@@ -50,7 +50,15 @@ def generate_launch_description():
                  'pause_turn_rate_rps': ParameterValue(
                      PythonExpression(["0.5 if '", LaunchConfiguration('robot_mode'), "' == 'true' else 0.0"]),
                      value_type=float),
+                 # On the robot, mark low edges (a railing's base rail, thresholds) from 4.5 cm:
+                 # it once climbed a base rail that the 6 cm default ignored.
+                 'min_obstacle_height_m': ParameterValue(
+                     PythonExpression(["0.045 if '", LaunchConfiguration('robot_mode'), "' == 'true' else 0.06"]),
+                     value_type=float),
              }]),
+        # Joins dotted obstacles in RTAB-Map's grid (railing posts) into solid walls for the costmaps.
+        Node(package='roomba_perception', executable='map_gap_filler', name='map_gap_filler',
+             output='screen'),
         Node(package='nav2_controller', executable='controller_server', name='controller_server', output='screen',
              parameters=[params], remappings=[('cmd_vel', 'cmd_vel_nav')]),
         Node(package='nav2_planner', executable='planner_server', name='planner_server', output='screen',

@@ -89,7 +89,7 @@ local_costmap:
       height: 3
       resolution: 0.05
       robot_radius: 0.17
-      plugins: ["obstacle_layer", "inflation_layer"]
+      plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
       filters: ["keepout_filter"]
       obstacle_layer:
         # Spatio-temporal voxel layer: marks fade after voxel_decay s, and whatever is inside the
@@ -146,6 +146,12 @@ local_costmap:
           horizontal_fov_angle: 1.4
           decay_acceleration: 15.0
           model_type: 0
+      static_layer:
+        # RTAB-Map's grid (gaps filled): walls the robot saw earlier stay known up close,
+        # inside the camera's ~0.3 m blind range.
+        plugin: "nav2_costmap_2d::StaticLayer"
+        map_topic: /rtabmap/map_filled
+        map_subscribe_transient_local: true
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 6.0
@@ -172,7 +178,7 @@ global_costmap:
       filters: ["keepout_filter"]
       static_layer:
         plugin: "nav2_costmap_2d::StaticLayer"
-        map_topic: /rtabmap/map
+        map_topic: /rtabmap/map_filled   # RTAB-Map grid with dotted obstacles joined
         map_subscribe_transient_local: true
       obstacle_layer:
         # Spatio-temporal voxel layer: marks fade after voxel_decay s, and whatever is inside the
@@ -293,7 +299,7 @@ collision_monitor:
     StopZone:
       type: "velocity_polygon"
       action_type: "stop"
-      min_points: 6
+      min_points: 4                   # thin railing posts give only a few points
       visualize: true
       polygon_pub_topic: "collision_stop_zone"
       enabled: true
@@ -324,7 +330,7 @@ collision_monitor:
       type: "velocity_polygon"
       action_type: "slowdown"
       slowdown_ratio: 0.7
-      min_points: 6
+      min_points: 4                   # thin railing posts give only a few points
       visualize: true
       polygon_pub_topic: "collision_slowdown_zone"
       enabled: true

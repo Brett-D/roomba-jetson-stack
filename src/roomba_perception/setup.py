@@ -24,6 +24,7 @@ setup(
             'floor_obstacles = roomba_perception.floor_obstacles:main',
             'nav_coach = roomba_perception.nav_coach:main',
             'explorer = roomba_perception.explorer:main',
+            'map_gap_filler = roomba_perception.map_gap_filler:main',
             'imu_calibrate = roomba_perception.imu_calibrate:main',
             'ekf_inputs = roomba_perception.ekf_inputs:main',
         ],
