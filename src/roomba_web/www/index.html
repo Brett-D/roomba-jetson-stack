@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#12151b">
+  <meta name="mobile-web-app-capable" content="yes">
+  <title>Roomba</title>
+  <link rel="manifest" href="/static/manifest.json">
+  <link rel="icon" href="/static/icon-192.png">
+  <link rel="apple-touch-icon" href="/static/icon-192.png">
+  <link rel="stylesheet" href="/static/style.css?v=20261109b">
+</head>
+<body data-tab="camera">
+  <header class="topbar">
+    <h1>Roomba</h1>
+    <div class="pills">
+      <span id="pill-conn" class="pill">Connecting…</span>
+      <span id="pill-track" class="pill">Tracking –</span>
+      <span id="pill-loc" class="pill">–</span>
+      <span id="pill-robot" class="pill" hidden></span>
+    </div>
+    <form method="post" action="/logout"><button class="ghost" type="submit">Log out</button></form>
+  </header>
+
+  <nav class="tabs" aria-label="View">
+    <button type="button" data-tab="camera">📷 Camera <span id="tab-count" class="badge" hidden></span></button>
+    <button type="button" data-tab="map">🗺️ Map</button>
+  </nav>
+
+  <div id="nav-banner" class="nav-banner" hidden>
+    <span id="nav-arrow" class="nav-arrow"></span>
+    <div class="nav-text">
+      <strong id="nav-text"></strong>
+      <span id="nav-dist" class="muted"></span>
+    </div>
+    <button id="btn-voice" class="ghost small" type="button">🔇 Voice off</button>
+    <button id="btn-stop-nav" class="danger small" type="button" hidden>⏹ Stop</button>
+  </div>
+
+  <main class="grid">
+    <section class="card" id="sec-camera">
+      <div class="row-between">
+        <h2>Camera</h2>
+        <div>
+          <button id="btn-grid" type="button" class="ghost small" title="Floor grid: 25 cm squares drawn on the floor. They should sit flat on the floor and stay put while the robot moves.">▦ Grid on</button>
+          <button id="btn-pause" type="button" class="ghost small">⏸ Pause</button>
+        </div>
+      </div>
+      <div class="camera-wrap">
+        <img id="camera" alt="Live camera with detections">
+        <div id="camera-paused" class="camera-paused" hidden>Camera paused</div>
+      </div>
+      <div id="robot-panel" class="robot-panel" hidden>
+        <div class="row-between">
+          <h3>Robot <span id="robot-status" class="muted"></span></h3>
+          <button id="btn-robot-stop" type="button" class="danger small">⏹ Stop</button>
+        </div>
+        <p id="robot-alert" class="hint" hidden></p>
+        <button id="btn-robot-enable" type="button" hidden>▶ Enable driving</button>
+        <div id="explore-row" class="explore-row" hidden>
+          <button id="btn-explore" type="button">🧭 Explore &amp; map</button>
+          <button id="btn-explore-stop" type="button" class="ghost" hidden>⏹ Stop exploring</button>
+          <span id="explore-status" class="note"></span>
+        </div>
+        <div class="drive-row">
+          <div id="drive-pad" class="drive-pad" role="application" aria-label="Drive pad: drag to drive, release to stop">
+            <div id="drive-knob" class="drive-knob"></div>
+          </div>
+          <p class="note">Drag to drive: up is forward, sideways turns. Let go to stop.
+            Arrow keys work too. Driving cancels navigation.</p>
+        </div>
+      </div>
+      <div class="row-between">
+        <h3>Detected <span id="det-count" class="muted"></span></h3>
+        <label class="toggle"><input type="checkbox" id="show-excluded"> Show excluded</label>
+      </div>
+      <ul id="det-list" class="det-list"></ul>
+    </section>
+
+    <section class="card" id="sec-map">
+      <h2>Top-down map</h2>
+      <div class="toolbar">
+        <button id="btn-goal" type="button">🎯 Go to…</button>
+        <button id="btn-draw" type="button" class="ghost">✏️ Draw exclusion zone</button>
+        <button id="btn-draw-keepout" type="button" class="ghost">⛔ Draw keep-out zone</button>
+        <button id="btn-finish" type="button" hidden>✔ Finish</button>
+        <button id="btn-undo" type="button" class="ghost" hidden>↶ Undo corner</button>
+        <button id="btn-cancel" type="button" class="ghost" hidden>✖ Cancel</button>
+        <button id="btn-center" type="button" class="ghost">⌖ Center on camera</button>
+      </div>
+      <p id="goal-hint" class="hint" hidden>Tap the map where you want to go. Then follow the instructions with the camera held level at knee height.</p>
+      <p id="draw-hint" class="hint" hidden>Tap the map to place corners. Tap the first corner or press Finish to close the zone. Drag to pan, scroll or pinch to zoom.</p>
+      <form id="name-form" class="name-form" hidden>
+        <input id="zone-name" maxlength="40" placeholder="Zone name" autocomplete="off">
+        <button id="btn-save" type="submit">Save zone</button>
+        <button id="btn-back" type="button" class="ghost">Back</button>
+      </form>
+      <p id="map-msg" class="error" hidden></p>
+      <div class="map-wrap"><canvas id="map"></canvas></div>
+      <div class="legend">
+        <span><i class="sw sw-cam"></i>Camera</span>
+        <span><i class="sw sw-person"></i>Person</span>
+        <span><i class="sw sw-pet"></i>Pet</span>
+        <span><i class="sw sw-excl"></i>Excluded</span>
+        <span><i class="sw sw-zone"></i>Exclusion zone</span>
+        <span><i class="sw sw-keepout"></i>Keep-out zone</span>
+        <span><i class="sw sw-plan"></i>Planned path</span>
+        <span><i class="sw sw-obst"></i>Obstacle</span>
+      </div>
+      <p id="floor-note" class="note"></p>
+      <h3>Zones</h3>
+      <ul id="zone-list" class="zone-list"></ul>
+      <p id="zone-note" class="note"></p>
+    </section>
+  </main>
+
+  <script src="/static/app.js?v=20261109b"></script>
+</body>
+</html>

@@ -1,0 +1,36 @@
+# roomba_driver settings for this robot (robot.launch.py). Driver source:
+# https://github.com/Brett-D/roomba-serial-ros2 (cloned in ~/roomba_ws/src/roomba-serial-ros2).
+roomba_driver:
+  ros__parameters:
+    port: /dev/serial/by-id/usb-FTDI_FT232R_USB_UART_A5069RR4-if00-port0
+    baud: 115200
+    initial_mode: safe            # cliff / wheel-drop protection on
+    auto_reenter_mode: false      # after a cliff or wheel drop, re-enable driving from the web app
+
+    # VIO (vslam_watchdog) owns odom -> base_link; wheel odometry goes to /wheel/odom only,
+    # where the watchdog uses it to bridge tracking loss.
+    odom_frame: wheel_odom
+    base_frame: base_link
+    publish_tf: false
+
+    wheel_base_m: 0.235
+    wheel_diameter_m: 0.072
+    encoder_counts_per_rev: 508.8
+
+    max_wheel_speed_m_s: 0.3
+    cmd_vel_timeout_s: 0.5
+    bump_stop: true
+    # This unit's right bumper switch is stuck "pressed" with nothing touching it: ignore it and
+    # use the front light bumpers (IR proximity) as the close-range stop instead.
+    ignore_sensors: ['bump_right']
+    bump_stop_light_bumper: true
+    # Thick carpet pile sets the front-left light-bumper flag (signal ~170) and blocked all forward
+    # driving; an object 1-2 cm away reads ~235 there. The other light bumpers read under 140
+    # even with an object close, so in practice only front-left can trigger this stop.
+    light_bumper_stop_signal: 200
+    use_stamped_cmd_vel: false    # Nav2 Jazzy publishes geometry_msgs/Twist
+
+    odom_rate_hz: 30.0
+    sensor_rate_hz: 5.0           # /roomba/sensors is for status displays; the safety logic runs on every frame
+    battery_rate_hz: 1.0
+    wake_with_dtr: false

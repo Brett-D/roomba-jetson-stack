@@ -1,0 +1,31 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>roomba_bringup</name>
+  <version>0.1.0</version>
+  <description>Launch files for the Roomba 550 + Jetson robot platform.</description>
+  <maintainer email="brett@example.com">brett</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <exec_depend>mynteye_d1000_driver</exec_depend>
+  <exec_depend>imu_filter_madgwick</exec_depend>
+  <exec_depend>rtabmap_launch</exec_depend>
+  <exec_depend>isaac_ros_visual_slam</exec_depend>
+  <exec_depend>basalt_vio_ros</exec_depend>
+  <exec_depend>rclcpp_components</exec_depend>
+  <exec_depend>roomba_perception</exec_depend>
+  <exec_depend>roomba_web</exec_depend>
+  <exec_depend>roomba_driver</exec_depend>
+  <exec_depend>tf2_ros</exec_depend>
+  <exec_depend>spatio_temporal_voxel_layer</exec_depend>
+  <exec_depend>navigation2</exec_depend>
+  <exec_depend>foxglove_bridge</exec_depend>
+  <exec_depend>image_transport</exec_depend>
+  <exec_depend>compressed_image_transport</exec_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
