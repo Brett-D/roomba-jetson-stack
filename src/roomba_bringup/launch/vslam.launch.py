@@ -269,7 +269,7 @@ def generate_launch_description():
         "('' if '", localization, "' == 'true' else '--delete_db_on_start')",
         # RayTracing clears cells seen as free again, so people who walked through
         # don't leave phantom obstacles that would later block line of sight.
-        " + ' --Grid/RangeMax 4.0 --Grid/MaxObstacleHeight 1.0 --Grid/RayTracing true'",
+        " + ' --Grid/RangeMax 2.5 --Grid/MaxObstacleHeight 1.0 --Grid/RayTracing true'",
         # Loop closures must be verified by enough inliers. cuVSLAM's drift needed a lenient 15;
         # with Basalt's accurate odometry 15 let similar-looking doors match the wrong place
         # and warp the map, 25 gave a clean map on the same recorded walk.

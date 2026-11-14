@@ -89,7 +89,7 @@ local_costmap:
       height: 3
       resolution: 0.05
       robot_radius: 0.17
-      plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
+      plugins: ["obstacle_layer", "inflation_layer"]
       filters: ["keepout_filter"]
       obstacle_layer:
         # Spatio-temporal voxel layer: marks fade after voxel_decay s, and whatever is inside the
@@ -146,12 +146,6 @@ local_costmap:
           horizontal_fov_angle: 1.4
           decay_acceleration: 15.0
           model_type: 0
-      static_layer:
-        # RTAB-Map's grid (gaps filled): walls the robot saw earlier stay known up close,
-        # inside the camera's ~0.3 m blind range.
-        plugin: "nav2_costmap_2d::StaticLayer"
-        map_topic: /rtabmap/map_filled
-        map_subscribe_transient_local: true
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 6.0

@@ -37,7 +37,7 @@ class MapGapFiller(Node):
 
     def __init__(self):
         super().__init__('map_gap_filler')
-        self.gap = float(self.declare_parameter('gap_m', 0.15).value)
+        self.gap = float(self.declare_parameter('gap_m', 0.10).value)
         self.occupied = int(self.declare_parameter('occupied_threshold', 65).value)
         latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.pub = self.create_publisher(OccupancyGrid, self.declare_parameter(

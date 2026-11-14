@@ -96,7 +96,7 @@ local_costmap:
       height: 3
       resolution: 0.05
       robot_radius: 0.17
-      plugins: ["static_layer", "nvblox_layer", "obstacle_layer", "inflation_layer"]
+      plugins: ["nvblox_layer", "obstacle_layer", "inflation_layer"]
       filters: ["keepout_filter"]
       nvblox_layer:
         # Distance-to-obstacle slice from nvblox (odom frame). Binary: cells inside an obstacle
@@ -109,12 +109,6 @@ local_costmap:
         max_obstacle_distance: 1.0
         inflation_distance: 0.3
         nav2_costmap_global_frame: odom
-      static_layer:
-        # RTAB-Map's grid (gaps filled): walls the robot saw earlier stay known up close,
-        # inside the camera's ~0.3 m blind range.
-        plugin: "nav2_costmap_2d::StaticLayer"
-        map_topic: /rtabmap/map_filled
-        map_subscribe_transient_local: true
       obstacle_layer:
         # Spatio-temporal voxel layer: marks fade after voxel_decay s, and whatever is inside the
         # camera's view but no longer seen is cleared quickly (frustum clearing). The plain
