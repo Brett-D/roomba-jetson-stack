@@ -97,7 +97,10 @@ def generate_launch_description():
         # Frontier exploration (robot only): started and stopped from the web app.
         Node(package='roomba_perception', executable='explorer', name='explorer', output='screen',
              # The driver estimates the Ridgid pack's charge from its voltage (battery_gauge: voltage).
-             parameters=[{'base_frame': LaunchConfiguration('base_frame'), 'low_battery_fraction': 0.2}],
+             # Bump marks: wider (this robot's right bumper switch is masked, so hits on the right
+             # read as left), and also on the front light bumpers, which see railing posts first.
+             parameters=[{'base_frame': LaunchConfiguration('base_frame'), 'low_battery_fraction': 0.2,
+                          'bump_mark_width_m': 0.5, 'bump_light_signal': 200}],
              condition=IfCondition(LaunchConfiguration('robot_mode'))),
     ]
     return LaunchDescription(args + nodes)

@@ -192,6 +192,14 @@ class Explorer(Node):
         self.bump_mark_ttl = float(p('bump_mark_ttl_s', 600.0).value)
         self.bump_mark_margin = float(p('bump_mark_margin_m', 0.15).value)
         self.bump_mark_spacing = float(p('bump_mark_spacing_m', 0.15).value)
+        self.bump_mark_width = float(p('bump_mark_width_m', 0.3).value)
+        # Also mark when a front light bumper reads at least this (0-4095; 0 = switches only): thin
+        # railing posts set it off right before, or instead of, the switches.
+        self.bump_light_min = int(p('bump_light_signal', 0).value)
+        # A frontier whose way in keeps hitting something the camera can't see (railing posts,
+        # glass) is skipped after this many bumps (0 = never).
+        self.bumps_per_goal = int(p('bumps_per_goal', 2).value)
+        self.goal_bumps = 0
         self.bumped = False
         self.bump_points = []        # (x, y, monotonic) of recent marks
 
@@ -261,17 +269,32 @@ class Explorer(Node):
                 self.cliff_seen[name] = now
         if msg.wheel_drop_left or msg.wheel_drop_right:
             self.cliff_seen['wheel_drop'] = now
-        bumped = bool(msg.bump_left or msg.bump_right)
+        light = self.bump_light_min > 0 and any(
+            getattr(msg, k, 0) >= self.bump_light_min for k, a in LIGHT_ANGLES.items() if abs(a) < 1.0)
+        bumped = bool(msg.bump_left or msg.bump_right) or light
         if bumped and not self.bumped and self.bump_marks and self.robot_mode in ('safe', 'full') \
                 and not (msg.wheel_drop_left or msg.wheel_drop_right):
-            self._mark_bump(bump_bearing(msg), now)
+            self._mark_bump(bump_bearing(msg, self.bump_light_min or 200), now)
+            self._bumped_on_goal()
         self.bumped = bumped
+
+    def _bumped_on_goal(self):
+        if self.state != 'exploring' or self.goal is None or self.bumps_per_goal <= 0:
+            return
+        self.goal_bumps += 1
+        if self.goal_bumps >= self.bumps_per_goal:
+            self.get_logger().warn(f'Bumped {self.goal_bumps} times on the way to a frontier '
+                                   '(railing or glass?): skipping it')
+            self._blacklist(self.goal[0], self.goal[1])
+            self.failed += 1
+            self._cancel_goal()
+            self.message = "Kept bumping into something the camera can't see: trying another area"
 
     def _mark_bump(self, bearing, now):
         pose = self._pose()
         if pose is None:
             return
-        points = bump_zone(pose[0], pose[1], pose[2], bearing)
+        points = bump_zone(pose[0], pose[1], pose[2], bearing, width=self.bump_mark_width)
         cx = sum(p[0] for p in points) / 4.0
         cy = sum(p[1] for p in points) / 4.0
         self.bump_points = [b for b in self.bump_points if now - b[2] < self.bump_mark_ttl]
@@ -476,6 +499,7 @@ class Explorer(Node):
         self.goal_seq += 1
         seq = self.goal_seq
         self.goal = (x, y, time.monotonic())
+        self.goal_bumps = 0
         self.sending = True
         future = self.nav.send_goal_async(goal)
         future.add_done_callback(lambda f: self._on_goal_response(f, seq))
