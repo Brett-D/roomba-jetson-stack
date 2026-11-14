@@ -24,6 +24,7 @@ roomba_driver:
     # use the front light bumpers (IR proximity) as the close-range stop instead.
     ignore_sensors: ['bump_right']
     bump_stop_light_bumper: true
+    bump_backup: true             # bump while driving forward: reverse 8 cm, turn away
     # Thick carpet pile sets the front-left light-bumper flag (signal ~170) and blocked all forward
     # driving; an object 1-2 cm away reads ~235 there. The other light bumpers read under 140
     # even with an object close, so in practice only front-left can trigger this stop.

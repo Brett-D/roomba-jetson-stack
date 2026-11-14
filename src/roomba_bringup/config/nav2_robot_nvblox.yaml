@@ -131,7 +131,10 @@ global_costmap:
       robot_radius: 0.17
       resolution: 0.05
       track_unknown_space: true
-      plugins: ["static_layer", "nvblox_layer", "inflation_layer"]
+      # nvblox only in the rolling local costmap: here (map frame, not rolling) its marks were
+      # never cleared and smeared as map->odom moved, walling the robot in. RTAB-Map's grid
+      # already integrates the depth obstacles for the whole map.
+      plugins: ["static_layer", "inflation_layer"]
       filters: ["keepout_filter"]
       static_layer:
         plugin: "nav2_costmap_2d::StaticLayer"

@@ -100,7 +100,11 @@ class NavCoach(Node):
         self.base_frame = p('base_frame', 'camera_link').value
         self.ahead = (0.0, False)
         self.tf_buffer = Buffer()
-        self.tf_listener = TransformListener(self.tf_buffer, self, spin_thread=True)
+        # spin_thread=True spins this node from a second executor; under load it races the main
+        # executor's wait set and the main loop stops delivering callbacks (seen live: the
+        # obstacle stream froze and the collision monitor stopped the robot). The main
+        # executor also processes /tf here, so lookups must not block.
+        self.tf_listener = TransformListener(self.tf_buffer, self, spin_thread=False)
         self.create_subscription(PointCloud2, '/perception/obstacles', self._on_obstacles, 2)
         self.create_subscription(GoalStatusArray, '/navigate_to_pose/_action/status', self._on_status, 10)
         self.create_subscription(NavigateToPose.Impl.FeedbackMessage, '/navigate_to_pose/_action/feedback',

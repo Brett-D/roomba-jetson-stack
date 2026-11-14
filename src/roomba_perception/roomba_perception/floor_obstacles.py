@@ -77,7 +77,11 @@ class FloorObstacles(Node):
         self.last_proc = 0.0
         self.R_opt_imu = None
         self.tf_buffer = Buffer()
-        self.tf_listener = TransformListener(self.tf_buffer, self, spin_thread=True)
+        # spin_thread=True spins this node from a second executor; under load it races the main
+        # executor's wait set and the main loop stops delivering callbacks (seen live: the
+        # obstacle stream froze and the collision monitor stopped the robot). The main
+        # executor also processes /tf here, so lookups must not block.
+        self.tf_listener = TransformListener(self.tf_buffer, self, spin_thread=False)
 
         self.create_subscription(CameraInfo, '/camera/depth/camera_info', self._on_info, 2)
         self.create_subscription(Imu, '/camera/imu/data', self._on_imu, QoSProfile(depth=20))
@@ -103,8 +107,7 @@ class FloorObstacles(Node):
             return None
         if self.R_opt_imu is None:
             try:
-                tf = self.tf_buffer.lookup_transform(frame, self.imu_frame, Time(),
-                                                     timeout=Duration(seconds=0.1))
+                tf = self.tf_buffer.lookup_transform(frame, self.imu_frame, Time())
             except TransformException:
                 return None
             r = tf.transform.rotation

@@ -75,7 +75,9 @@ def generate_launch_description():
              }]),
         # Frontier exploration (robot only): started and stopped from the web app.
         Node(package='roomba_perception', executable='explorer', name='explorer', output='screen',
-             parameters=[{'base_frame': LaunchConfiguration('base_frame')}],
+             # The Roomba's battery gauge is meaningless while it runs from the Ridgid pack through
+             # the 15 V regulator (it read 20 % on a full pack), so don't send the robot home on it.
+             parameters=[{'base_frame': LaunchConfiguration('base_frame'), 'low_battery_fraction': 0.0}],
              condition=IfCondition(LaunchConfiguration('robot_mode'))),
     ]
     return LaunchDescription(args + nodes)

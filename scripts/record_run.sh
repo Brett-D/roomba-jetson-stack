@@ -22,6 +22,8 @@ while [ $# -gt 0 ]; do
   esac
 done
 source /opt/ros/jazzy/setup.bash
+# Workspace messages (roomba_msgs/SensorState for /roomba/sensors) must be known to the recorder.
+[ -f ~/roomba_ws/install/setup.bash ] && source ~/roomba_ws/install/setup.bash
 # Raw inputs. Basalt and cuVSLAM: rectified mono stereo + camera_infos + raw IMU (200 Hz).
 # RTAB-Map: left color + depth + left camera_info (+ IMU orientation, recomputed by imu_filter on
 # replay). nvblox and floor_obstacles: depth + depth camera_info. EKF / watchdog: /wheel/odom +
@@ -40,7 +42,7 @@ if ! timeout 8 ros2 topic echo --once /camera/imu/data_raw > /dev/null 2>&1; the
   echo "No camera data (/camera/imu/data_raw). Start the robot first: ~/run_robot.sh mapping ..."
   exit 1
 fi
-timeout 4 ros2 topic echo --once /wheel/odom > /dev/null 2>&1 || \
+timeout 10 ros2 topic echo --once /wheel/odom > /dev/null 2>&1 || \
   echo "WARNING: no /wheel/odom (Roomba asleep or off?) - recording without wheel odometry."
 
 STAMP=$(date +%Y%m%d_%H%M%S)

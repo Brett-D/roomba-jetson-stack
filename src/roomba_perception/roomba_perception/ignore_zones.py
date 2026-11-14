@@ -93,7 +93,11 @@ class IgnoreZones(Node):
         self.mask_resolution = float(self.declare_parameter('keepout_resolution_m', 0.05).value)
 
         self.tf_buffer = Buffer()
-        self.tf_listener = TransformListener(self.tf_buffer, self, spin_thread=True)
+        # spin_thread=True spins this node from a second executor; under load it races the main
+        # executor's wait set and the main loop stops delivering callbacks (seen live: the
+        # obstacle stream froze and the collision monitor stopped the robot). The main
+        # executor also processes /tf here, so lookups must not block.
+        self.tf_listener = TransformListener(self.tf_buffer, self, spin_thread=False)
 
         self.zones = []
         self.draft = []
@@ -183,7 +187,7 @@ class IgnoreZones(Node):
     def _on_click(self, msg):
         try:
             tf = self.tf_buffer.lookup_transform(
-                self.map_frame, msg.header.frame_id, Time(), timeout=Duration(seconds=0.2))
+                self.map_frame, msg.header.frame_id, Time())
         except TransformException as e:
             self.get_logger().warn(f'Cannot place point from {msg.header.frame_id}: {e}')
             return
