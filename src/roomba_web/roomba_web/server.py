@@ -47,9 +47,9 @@ from nav_msgs.msg import OccupancyGrid, Path
 from rclpy.action import ActionClient
 from rclpy.duration import Duration
 from rclpy.node import Node
-from rclpy.qos import DurabilityPolicy, QoSProfile
+from rclpy.qos import DurabilityPolicy, QoSProfile, qos_profile_sensor_data
 from rclpy.time import Time
-from sensor_msgs.msg import BatteryState, CompressedImage
+from sensor_msgs.msg import BatteryState, CompressedImage, Image
 from std_msgs.msg import Bool, String
 from tf2_ros import Buffer, TransformException, TransformListener
 from vision_msgs.msg import Detection3DArray
@@ -167,11 +167,50 @@ class RosState(Node):
         self.pub_floor_grid = self.create_publisher(Bool, '/perception/person_detector/floor_grid', latched)
         self.pub_floor_grid.publish(Bool(data=self.floor_grid))
 
+        # Plain camera preview when the person detector isn't running (e.g. people:=false):
+        # subscribe to the raw mono image only while no annotated frames arrive, and encode
+        # a few small frames per second so the preview stays cheap.
+        self.preview_fps = float(self.declare_parameter('preview_fps', 4.0).value)
+        self.preview_topic = self.declare_parameter('preview_topic', '/camera/left/image_rect_mono').value
+        self.preview_width = int(self.declare_parameter('preview_width', 480).value)
+        self.last_annotated = 0.0
+        self.last_preview = 0.0
+        self.preview_sub = None
+        if self.preview_fps > 0:
+            self.create_timer(2.0, self._preview_check)
+
     # ---- ROS callbacks (executor thread) ----
     def _on_jpeg(self, msg):
+        self.last_annotated = time.monotonic()
         with self.lock:
             self.jpeg = bytes(msg.data)
             self.jpeg_seq += 1
+
+    def _preview_check(self):
+        detector_live = time.monotonic() - self.last_annotated < 3.0
+        if detector_live and self.preview_sub is not None:
+            self.destroy_subscription(self.preview_sub)
+            self.preview_sub = None
+        elif not detector_live and self.preview_sub is None:
+            self.preview_sub = self.create_subscription(
+                Image, self.preview_topic, self._on_preview, qos_profile_sensor_data)
+
+    def _on_preview(self, msg):
+        now = time.monotonic()
+        if now - self.last_preview < 1.0 / self.preview_fps or now - self.last_annotated < 3.0:
+            return
+        if msg.encoding not in ('mono8', '8UC1'):
+            return
+        self.last_preview = now
+        img = np.frombuffer(msg.data, np.uint8).reshape(msg.height, msg.step)[:, :msg.width]
+        if self.preview_width and msg.width > self.preview_width:
+            h = int(msg.height * self.preview_width / msg.width)
+            img = cv2.resize(img, (self.preview_width, h), interpolation=cv2.INTER_AREA)
+        ok, buf = cv2.imencode('.jpg', img, [cv2.IMWRITE_JPEG_QUALITY, 70])
+        if ok:
+            with self.lock:
+                self.jpeg = buf.tobytes()
+                self.jpeg_seq += 1
 
     def _to_map(self, header):
         for stamp in (Time.from_msg(header.stamp), Time()):

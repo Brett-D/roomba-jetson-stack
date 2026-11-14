@@ -146,6 +146,9 @@ class Explorer(Node):
         self.low_battery = float(p('low_battery_fraction', 0.2).value)
         self.rotate_speed = float(p('rotate_speed_rps', 0.7).value)     # 0 = leave the controller alone
         self.return_home = bool(p('return_home', True).value)
+        # A robot briefly boxed in (stale obstacles, tracking recovery) sees no reachable
+        # frontier; only call exploring finished after this long with none.
+        self.finish_confirm = float(p('finish_confirm_s', 20.0).value)
         # When a cliff sensor stops the robot (stairs, or deep carpet that reads like a drop),
         # add a keep-out zone there so neither exploring nor navigation tries it again.
         self.auto_keepout = bool(p('auto_keepout', True).value) and SensorState is not None
@@ -168,6 +171,9 @@ class Explorer(Node):
         self.frontier_count = 0
         self.saved_rotate = None
         self.sending = False
+        self.no_frontier_since = None
+        self.resume_after_home = False   # went home because nothing was reachable: look again there
+        self.final_check = False
 
         self.tf_buffer = Buffer()
         # spin_thread=True would spin this node from a second executor, which races the
@@ -281,17 +287,21 @@ class Explorer(Node):
             self.blacklist = []
             self.visited = []
             self.reached = self.failed = 0
+        self.no_frontier_since = None
+        self.resume_after_home = self.final_check = False
         self._slow_turns(True)
         self._set('exploring', 'Looking for unmapped areas…')
         self.get_logger().info(f'Exploration started; home at ({pose[0]:.2f}, {pose[1]:.2f})')
 
     def _stop(self, why):
+        self.resume_after_home = self.final_check = False
         self._cancel_goal()
         self._slow_turns(False)
         self._set('stopped', why)
         self.get_logger().info(why)
 
-    def _go_home(self, why):
+    def _go_home(self, why, resume=False):
+        self.resume_after_home = resume
         if self.home is None or not self.return_home:
             self._finish('Exploration finished')
             return
@@ -360,8 +370,20 @@ class Explorer(Node):
                 best = (score, x, y, math.atan2(fy - y, fx - x))   # look at the unknown
         self.frontier_count = candidates
         if best is None:
-            self._go_home('Exploration finished: no reachable unmapped areas left')
+            now = time.monotonic()
+            if self.no_frontier_since is None:
+                self.no_frontier_since = now
+            if now - self.no_frontier_since < self.finish_confirm:
+                self.message = 'No reachable unmapped areas right now; checking again…'
+                return
+            self.no_frontier_since = None
+            if self.final_check:
+                self.final_check = False
+                self._finish('Exploration finished: no reachable unmapped areas left - back at the start point')
+                return
+            self._go_home('Exploration finished: no reachable unmapped areas left', resume=True)
             return
+        self.no_frontier_since = None
         _, x, y, yaw = best
         self.message = f'Heading to an unmapped area {math.hypot(x - pose[0], y - pose[1]):.1f} m away'
         self._send_goal(x, y, yaw)
@@ -416,6 +438,13 @@ class Explorer(Node):
         goal, self.goal, self.goal_handle = self.goal, None, None
         if self.state == 'returning':
             why = self.message   # why it went home (finished, low battery, request)
+            if self.resume_after_home and status == GoalStatus.STATUS_SUCCEEDED:
+                # The map looks different from the start point: check once more before finishing.
+                self.resume_after_home = False
+                self.final_check = True
+                self._set('exploring', 'Back at the start point; checking for unmapped areas again…')
+                return
+            self.resume_after_home = False
             self._finish(f'{why} - back at the start point' if status == GoalStatus.STATUS_SUCCEEDED
                          else f'{why} - could not drive back to the start point')
             return

@@ -17,7 +17,7 @@ roomba_driver:
     wheel_diameter_m: 0.072
     encoder_counts_per_rev: 508.8
 
-    max_wheel_speed_m_s: 0.3
+    max_wheel_speed_m_s: 0.4
     cmd_vel_timeout_s: 0.5
     bump_stop: true
     # This unit's right bumper switch is stuck "pressed" with nothing touching it: ignore it and
