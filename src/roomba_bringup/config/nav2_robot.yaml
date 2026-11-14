@@ -61,7 +61,7 @@ controller_server:
       min_approach_linear_velocity: 0.08
       approach_velocity_scaling_dist: 0.25
       use_collision_detection: true
-      max_allowed_time_to_collision_up_to_carrot: 1.5
+      max_allowed_time_to_collision_up_to_carrot: 1.0   # 1.5 braked hard on distant noise
       use_regulated_linear_velocity_scaling: true
       use_cost_regulated_linear_velocity_scaling: true
       cost_scaling_dist: 0.35               # only slow for obstacles this close (default 0.6)
@@ -284,7 +284,7 @@ collision_monitor:
   ros__parameters:
     base_frame_id: "base_link"
     odom_frame_id: "odom"
-    cmd_vel_in_topic: "cmd_vel_nav"
+    cmd_vel_in_topic: "cmd_vel_smoothed"   # velocity_smoother output
     cmd_vel_out_topic: "cmd_vel"
     state_topic: "collision_monitor_state"
     transform_tolerance: 0.5
@@ -361,3 +361,20 @@ collision_monitor:
       min_height: -100.0
       max_height: 100.0
       enabled: true
+
+velocity_smoother:
+  ros__parameters:
+    # Ramps the planner's and behaviours' commands so normal stops and turns are gentle (the
+    # motors jerked and clunked on every abrupt stop). Sits before the collision monitor, so its
+    # safety stops and the driver's bump stop stay immediate.
+    smoothing_frequency: 20.0
+    scale_velocities: false
+    feedback: "OPEN_LOOP"
+    max_velocity: [0.3, 0.0, 1.0]
+    min_velocity: [-0.15, 0.0, -1.0]
+    max_accel: [0.35, 0.0, 1.5]
+    max_decel: [-0.5, 0.0, -2.0]
+    odom_topic: "odom"
+    odom_duration: 0.1
+    deadband_velocity: [0.0, 0.0, 0.0]
+    velocity_timeout: 1.0

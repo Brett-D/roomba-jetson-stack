@@ -18,7 +18,8 @@ from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
 
-NAV_NODES = ['controller_server', 'planner_server', 'behavior_server', 'bt_navigator', 'collision_monitor']
+NAV_NODES = ['controller_server', 'planner_server', 'behavior_server', 'bt_navigator', 'velocity_smoother',
+             'collision_monitor']
 
 
 def generate_launch_description():
@@ -55,6 +56,10 @@ def generate_launch_description():
                  'min_obstacle_height_m': ParameterValue(
                      PythonExpression(["0.045 if '", LaunchConfiguration('robot_mode'), "' == 'true' else 0.06"]),
                      value_type=float),
+                 # ...and drop stray depth speckles (they showed up as random obstacles mid-room).
+                 'min_cell_points': ParameterValue(
+                     PythonExpression(["4 if '", LaunchConfiguration('robot_mode'), "' == 'true' else 1"]),
+                     value_type=int),
              }]),
         # Joins dotted obstacles in RTAB-Map's grid (railing posts) into solid walls for the costmaps.
         Node(package='roomba_perception', executable='map_gap_filler', name='map_gap_filler',
@@ -65,6 +70,11 @@ def generate_launch_description():
              parameters=[params]),
         Node(package='nav2_behaviors', executable='behavior_server', name='behavior_server', output='screen',
              parameters=[params], remappings=[('cmd_vel', 'cmd_vel_nav')]),
+        # cmd_vel_nav (controller, behaviours, web drive pad) -> velocity_smoother -> cmd_vel_smoothed
+        # -> collision_monitor -> cmd_vel. With the human-mode params the smoother's output is unused.
+        Node(package='nav2_velocity_smoother', executable='velocity_smoother', name='velocity_smoother',
+             output='screen', parameters=[params],
+             remappings=[('cmd_vel', 'cmd_vel_nav'), ('cmd_vel_smoothed', 'cmd_vel_smoothed')]),
         Node(package='nav2_bt_navigator', executable='bt_navigator', name='bt_navigator', output='screen',
              parameters=[params], condition=UnlessCondition(LaunchConfiguration('robot_mode'))),
         # The robot can't see behind it: its tree backs up only 10 cm, at most once per goal.

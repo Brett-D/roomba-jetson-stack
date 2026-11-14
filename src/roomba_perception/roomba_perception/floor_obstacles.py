@@ -66,6 +66,12 @@ class FloorObstacles(Node):
         self.floor_memory = float(p('floor_memory_s', 30.0).value)
         self.imu_frame = p('imu_frame', 'camera_imu_frame').value
         self.pause_turn_rate = float(p('pause_turn_rate_rps', 0.0).value)
+        # Speckle filter: an obstacle point counts only if at least min_cell_points obstacle
+        # points fall within its 3x3 block of cell_size floor cells (stray depth noise is 1-2
+        # points; a wall, a box or even a thin post stacks many). 1 = off.
+        self.min_cell_points = int(p('min_cell_points', 1).value)
+        self.cell_size = float(p('cell_size_m', 0.05).value)
+        self.speckles = 0
         self.last_fast_turn = 0.0
         self.paused_frames = 0
         self.last_log = 0.0
@@ -117,6 +123,25 @@ class FloorObstacles(Node):
         up = np.array(quat_rotate(self.R_opt_imu, up_imu))
         return up / np.linalg.norm(up)
 
+    def _dense(self, pts, up):
+        """Mask of points with at least min_cell_points neighbours in their 3x3 floor-cell block."""
+        fwd = np.array([0.0, 0.0, 1.0]) - up * up[2]          # optical z, levelled
+        fwd /= np.linalg.norm(fwd) or 1.0
+        side = np.cross(up, fwd)
+        i = np.floor(pts @ fwd / self.cell_size).astype(np.int64)
+        j = np.floor(pts @ side / self.cell_size).astype(np.int64)
+        key = (i + 100000) * 200003 + (j + 100000)
+        cells, inverse, counts = np.unique(key, return_inverse=True, return_counts=True)
+        total = np.zeros(cells.shape[0], dtype=np.int64)
+        for di in (-1, 0, 1):
+            for dj in (-1, 0, 1):
+                nb = cells + di * 200003 + dj
+                idx = np.searchsorted(cells, nb)
+                idx = np.clip(idx, 0, cells.shape[0] - 1)
+                hit = cells[idx] == nb
+                total[hit] += counts[idx[hit]]
+        return total[inverse] >= self.min_cell_points
+
     def _estimate_floor(self, h):
         """Lowest dense height band below the camera, refined by its median."""
         below = h[h < -0.08]
@@ -167,6 +192,10 @@ class FloorObstacles(Node):
         rel = h - self.floor_h
 
         obstacles = pts[(rel > self.min_h) & (rel < self.max_h)]
+        if self.min_cell_points > 1 and obstacles.shape[0]:
+            keep = self._dense(obstacles, up)
+            self.speckles = int((~keep).sum())
+            obstacles = obstacles[keep]
         floor = pts[np.abs(rel) < self.floor_band]
         obs_cloud = _cloud(msg.header, obstacles)
         self.pub_obs.publish(obs_cloud)
@@ -184,6 +213,7 @@ class FloorObstacles(Node):
             'floor_visible': est is not None,
             'tilt_deg': round(tilt, 1),
             'obstacle_points': int(obstacles.shape[0]),
+            'speckles_removed': self.speckles,
             'floor_points': int(floor.shape[0]),
             'paused_frames': self.paused_frames,
         }
