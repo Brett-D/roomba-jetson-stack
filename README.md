@@ -20,6 +20,7 @@ The serial driver lives in its own repository and is included here as a submodul
 | `scripts/` | `run_robot.sh`, `stop_slam.sh`, mapping/replay helpers, setup scripts |
 | `tools/` | Probes and diagnostics (motion step test, costmap/obstacle probes, map render); `tools/oi_tests/` holds early serial/OI bench scripts |
 | `docs/` | Wiring and power diagrams |
+| `hardware/platform` | 3D-printed platform: STLs, fit tests and the Python generator |
 
 ## Data flow
 
@@ -40,6 +41,11 @@ TF: `map → odom → base_link → camera_link` (camera mount: x 0.135 m, z 0.1
 - Power: Ridgid 18 V Li-ion pack → 7.5 A fuse → 15 V / 12 A buck regulator → Roomba battery contacts and Jetson.
   See [`docs/battery-voltage-monitor.png`](docs/battery-voltage-monitor.png) for the ADS1115 pack-voltage monitor.
   **Do not dock or plug in the Roomba charger while running from the Ridgid pack.**
+- 3D-printed platform: STLs and generator in [`hardware/platform/`](hardware/platform/)
+
+System wiring (power, camera and serial), [`docs/system-wiring.png`](docs/system-wiring.png):
+
+![System wiring](docs/system-wiring.png)
 
 ## Build
 

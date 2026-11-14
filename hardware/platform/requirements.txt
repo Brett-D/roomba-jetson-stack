@@ -1,0 +1,8 @@
+manifold3d
+trimesh
+numpy
+matplotlib
+scipy
+networkx
+shapely
+rtree
