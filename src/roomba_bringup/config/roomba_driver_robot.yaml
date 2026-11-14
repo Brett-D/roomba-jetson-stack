@@ -34,4 +34,8 @@ roomba_driver:
     odom_rate_hz: 30.0
     sensor_rate_hz: 5.0           # /roomba/sensors is for status displays; the safety logic runs on every frame
     battery_rate_hz: 1.0
+    # The Roomba runs straight off the Ridgid 18 V pack (5 Li-ion cells), so its own mAh figures
+    # are made up: estimate the charge from the pack voltage instead.
+    battery_gauge: voltage
+    battery_cells: 5
     wake_with_dtr: false
