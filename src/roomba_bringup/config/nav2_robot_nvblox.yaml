@@ -50,7 +50,7 @@ controller_server:
       plugin: "nav2_controller::PoseProgressChecker"
       required_movement_radius: 0.15
       required_movement_angle: 0.3
-      movement_time_allowance: 15.0
+      movement_time_allowance: 6.0     # start recoveries (spin/back up) sooner when blocked
     goal_checker:
       plugin: "nav2_controller::SimpleGoalChecker"
       xy_goal_tolerance: 0.15
@@ -341,7 +341,9 @@ collision_monitor:
       # reversing get a tiny zone at the robot's centre, where the camera never sees points.
       velocity_polygons: ["forward", "turn", "reverse"]
       forward:
-        points: "[[0.55, 0.19], [0.55, -0.19], [0.17, -0.19], [0.17, 0.19]]"
+        # 18 cm beyond the bumper: an emergency stop, not a planner (it held the robot 15 s at
+        # a wall 52 cm away). The slowdown zone and costmaps handle normal approaches.
+        points: "[[0.35, 0.19], [0.35, -0.19], [0.17, -0.19], [0.17, 0.19]]"
         linear_min: 0.01
         linear_max: 1.0
         theta_min: -3.0
