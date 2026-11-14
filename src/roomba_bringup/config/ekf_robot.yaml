@@ -1,0 +1,121 @@
+# robot_localization EKF for the Roomba (robot.launch.py fusion:=ekf). Publishes odom -> base_link
+# (TF) and /odom; RTAB-Map reads the TF, Nav2 reads /odom. vslam_watchdog keeps supervising the
+# VIO (Basalt or cuVSLAM: jump/gyro/wheel checks, VIO resets, /vslam_filter/status) but no longer
+# publishes TF.
+#
+# Inputs (all velocities or differences, so nothing can teleport the robot):
+#   odom0 /ekf/wheel_odom    vx, vy, vyaw   wheel odometry via ekf_inputs (calibrated, covariances)
+#   imu0  /ekf/imu           vyaw           camera gyro via ekf_inputs (bias removed, 50 Hz)
+#   odom1 /vslam_filter/vio  x, y, yaw      VIO poses accepted by vslam_watchdog, DIFFERENTIAL:
+#                                           robot_localization turns consecutive poses into a
+#                                           body velocity, so a VIO reset or re-anchor is a
+#                                           single (rejected) outlier, never a jump of odom.
+#
+# Covariances (set by the publishers, reasoning here):
+#  * Wheels (ekf_inputs): vx sd = 0.01 m/s + 10 % of speed (measured +5 % scale error, corrected
+#    by wheel_linear_scale 0.952; the remainder is carpet slip), 50 % when reversing (measured
+#    slip up to 2.5x on carpet). vy = 0 +- 0.01 m/s (differential drive cannot slide sideways).
+#    vyaw sd = 0.01 rad/s + 40 % of the rate: in-place turns on carpet scrub and the encoders
+#    overstate rotation by ~40 % (corrected by wheel_angular_scale 0.71, residual is surface
+#    dependent). So vx is trusted much more than vyaw. At standstill the encoders are exact,
+#    which pins the heading while the robot is parked (no gyro-bias creep).
+#  * Gyro (ekf_inputs): from this IMU's calibration, ~/.config/roomba/imu_noise.yaml (imu_calibrate,
+#    3 h static Allan analysis at 199.7 Hz; the file stores values x10 for cuVSLAM, ekf_inputs
+#    divides back): raw noise density N = 0.000132 rad/s/sqrt(Hz), bias random walk
+#    K = 9.7e-7 rad/s^2/sqrt(Hz). Per averaged 50 Hz sample: white sd = N*sqrt(49.9) = 0.00093
+#    rad/s; + bias allowance sqrt(sb0^2 + K^2*t_since_standstill) with sb0 = N/sqrt(2*5 s) =
+#    4e-5 rad/s once re-learned at a standstill (0.001 rad/s before that: the initial bias from
+#    the calibration recording, 0.022/-0.107/-0.027 deg/s, shifts with turn-on/temperature by a
+#    few 0.01 deg/s); + 2 % of the turn rate for scale factor / vibration (not measurable in a
+#    static test). Stationary sd ~0.001 rad/s, at 1 rad/s ~0.02 rad/s: the gyro dominates
+#    rotation, which is what the wheels measure worst.
+#  * VIO (vslam_watchdog vio_position_variance 0.002 m^2, vio_yaw_variance 0.0005 rad^2 per
+#    pose): in differential mode robot_localization uses (cov_now + cov_prev) * dt as the
+#    velocity covariance, i.e. at 15 Hz vx sd ~0.016 m/s and vyaw sd ~0.008 rad/s: the VIO
+#    dominates translation while tracking (it does not slip), the wheels take over in gaps.
+#  * Mahalanobis gate on the VIO only (odom1_*_rejection_threshold): a remaining VIO glitch
+#    that disagrees with wheels + gyro by > 6 sigma is dropped. Wheels and gyro are not gated,
+#    so the filter can't lock itself out of its proprioceptive sensors.
+#
+# Missing inputs (degraded modes; robot_localization simply fuses whatever arrives):
+#  * No /wheel/odom (Roomba asleep/unpowered, or a bag without it): gyro + VIO only. Tested with
+#    the robot standing still: 0.3 cm / 0.06 deg drift in 60 s. ekf_inputs then learns the gyro
+#    bias from a quiet gyro instead of from wheel standstill. If the VIO ALSO stops (tracking lost,
+#    poses not forwarded) the EKF predicts with its last velocity (constant-velocity model) and
+#    its covariance grows; vslam_watchdog reports the loss on /vslam_filter/status, which pauses
+#    the explorer. With wheels this gap is bridged by the wheel velocities instead.
+#  * No VIO poses (tracking lost or VIO being reset): wheels + gyro dead-reckoning.
+#  * No gyro (camera stopped): there is no VIO either; wheels only (yaw rate from the wheels).
+ekf_filter_node:
+  ros__parameters:
+    frequency: 30.0
+    sensor_timeout: 0.2
+    two_d_mode: true
+    transform_time_offset: 0.0
+    transform_timeout: 0.0
+    print_diagnostics: true
+    publish_tf: true
+    publish_acceleration: false
+    # VIO poses arrive ~0.1-0.2 s after their image stamp (processing); re-run the filter
+    # from the measurement's stamp instead of fusing it late.
+    smooth_lagged_data: true
+    history_length: 1.0
+    # Replays loop sim time (compare_pipelines.sh); start clean instead of predicting across it.
+    reset_on_time_jump: true
+
+    map_frame: map
+    odom_frame: odom
+    base_link_frame: base_link
+    world_frame: odom
+
+    # [x, y, z, roll, pitch, yaw, vx, vy, vz, vroll, vpitch, vyaw, ax, ay, az]
+    odom0: /ekf/wheel_odom
+    odom0_config: [false, false, false,
+                   false, false, false,
+                   true,  true,  false,
+                   false, false, true,
+                   false, false, false]
+    odom0_queue_size: 10
+    odom0_differential: false
+    odom0_relative: false
+
+    imu0: /ekf/imu
+    imu0_config: [false, false, false,
+                  false, false, false,
+                  false, false, false,
+                  false, false, true,
+                  false, false, false]
+    imu0_queue_size: 20
+    imu0_differential: false
+    imu0_relative: false
+    imu0_remove_gravitational_acceleration: false
+
+    odom1: /vslam_filter/vio
+    odom1_config: [true,  true,  false,
+                   false, false, true,
+                   false, false, false,
+                   false, false, false,
+                   false, false, false]
+    odom1_queue_size: 10
+    odom1_differential: true
+    odom1_relative: false
+    odom1_pose_rejection_threshold: 6.0
+    odom1_twist_rejection_threshold: 6.0
+
+    # Process noise: the Roomba accelerates gently (Nav2 limits), so velocity states change
+    # slowly; yaw rate a bit faster (rotate-to-heading starts abruptly).
+    process_noise_covariance: [0.01, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00,
+                                0.00, 0.01, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00,
+                                0.00, 0.00, 0.01, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00,
+                                0.00, 0.00, 0.00, 0.01, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00,
+                                0.00, 0.00, 0.00, 0.00, 0.01, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00,
+                                0.00, 0.00, 0.00, 0.00, 0.00, 0.02, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00,
+                                0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.05, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00,
+                                0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.02, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00,
+                                0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.01, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00,
+                                0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.01, 0.00, 0.00, 0.00, 0.00, 0.00,
+                                0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.01, 0.00, 0.00, 0.00, 0.00,
+                                0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.10, 0.00, 0.00, 0.00,
+                                0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.01, 0.00, 0.00,
+                                0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.01, 0.00,
+                                0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.01]

@@ -26,10 +26,18 @@ hand-held, base_link on the robot) and only publishes physically plausible motio
 Default limits fit a person carrying the camera (hand-held cameras sway hard); robot.launch.py
 sets robot limits, wheel_odom_topic and planar output for the Roomba.
 
+With publish_tf false (robot.launch.py fusion:=ekf) a robot_localization EKF owns
+odom -> base_frame and /odom instead. This node then only supervises the VIO (same checks,
+recoveries and /vslam_filter/status) and forwards the poses it accepted while visual tracking
+was OK on fused_vio_topic, for the EKF to fuse differentially. Rejected, IMU-only and
+wheel-bridged poses are not forwarded, and the forwarded poses stay continuous across VIO
+resets (same re-anchoring as the published pose).
+
 Subscribes: /visual_slam/tracking/odometry (vslam_odom), /visual_slam/status,
             /camera/imu/data_raw (gyro), optional wheel odometry (wheel_odom_topic)
 Publishes:  TF odom -> base_frame (filtered), TF odom -> vslam_odom (current anchor),
-            /odom (nav_msgs/Odometry, filtered), /vslam_filter/status (std_msgs/String JSON)
+            /odom (nav_msgs/Odometry, filtered), /vslam_filter/status (std_msgs/String JSON);
+            with publish_tf false only fused_vio_topic (nav_msgs/Odometry) and the status
 Calls:      /visual_slam/reset, <rtabmap_ns>/pause|resume|trigger_new_map
 """
 import collections
@@ -173,13 +181,21 @@ class VslamWatchdog(Node):
         self.wheel_window_rel = float(p('wheel_window_tolerance_ratio', 0.6).value)
         # Ground robot: publish x, y and heading only (z = 0, no roll/pitch).
         self.planar = bool(p('planar', False).value)
+        # false: an EKF publishes odom -> base_frame; accepted VIO poses go to fused_vio_topic.
+        self.publish_tf = bool(p('publish_tf', True).value)
+        fused_topic = p('fused_vio_topic', '/vslam_filter/vio').value
+        # Per-pose variances of the forwarded VIO (see config/ekf_robot.yaml for the reasoning).
+        self.vio_pos_var = float(p('vio_position_variance', 0.002).value)
+        self.vio_yaw_var = float(p('vio_yaw_variance', 0.0005).value)
 
         self.cli_reset = self.create_client(Reset, '/visual_slam/reset')
         self.cli_pause = self.create_client(Empty, rtab_ns + '/pause')
         self.cli_resume = self.create_client(Empty, rtab_ns + '/resume')
         self.cli_new_map = self.create_client(Empty, rtab_ns + '/trigger_new_map')
         self.tf_pub = TransformBroadcaster(self)
-        self.pub_odom = self.create_publisher(Odometry, '/odom', 20)
+        self.pub_odom = (self.create_publisher(Odometry, '/odom', 20) if self.publish_tf
+                         else self.create_publisher(Odometry, fused_topic, 20))
+        self.forwarded = 0
         self.pub_status = self.create_publisher(String, '/vslam_filter/status', 2)
 
         self.offset = IDENTITY            # odom <- vslam_odom
@@ -547,14 +563,19 @@ class VslamWatchdog(Node):
             self.history.append((time.monotonic(), t, pos, quat))
         self.last = (t, pos, quat)
         self.recent.append(self.last)
-        self._publish(msg, pos, quat)
+        self._publish(msg, pos, quat, vio_ok=accepted and self.fail_since is None)
 
-    def _publish(self, msg, pos, quat):
+    def _publish(self, msg, pos, quat, vio_ok=False):
         stamp = msg.header.stamp
         if self.planar:
             # Ground robot: it can't leave the floor, so publish x, y and heading only.
             pos = np.array([pos[0], pos[1], 0.0])
             quat = yaw_quat(quat_yaw(quat))
+        if not self.publish_tf:
+            # EKF mode: forward only VIO poses that passed every check with tracking OK.
+            if vio_ok:
+                self._forward(stamp, pos, quat)
+            return
         base = TransformStamped()
         base.header.stamp, base.header.frame_id, base.child_frame_id = stamp, self.odom_frame, self.base_frame
         (base.transform.translation.x, base.transform.translation.y,
@@ -578,6 +599,22 @@ class VslamWatchdog(Node):
         odom.twist = msg.twist  # body-frame velocity from cuVSLAM
         self.pub_odom.publish(odom)
 
+    def _forward(self, stamp, pos, quat):
+        odom = Odometry()
+        # The pose lives in this node's anchored VIO frame; the EKF only uses differences
+        # between consecutive poses (differential mode), so the frame name is nominal.
+        odom.header.stamp, odom.header.frame_id, odom.child_frame_id = stamp, self.odom_frame, self.base_frame
+        odom.pose.pose.position.x, odom.pose.pose.position.y, odom.pose.pose.position.z = map(float, pos)
+        (odom.pose.pose.orientation.x, odom.pose.pose.orientation.y,
+         odom.pose.pose.orientation.z, odom.pose.pose.orientation.w) = quat
+        cov = [0.0] * 36
+        for i, v in enumerate((self.vio_pos_var, self.vio_pos_var, self.vio_pos_var,
+                               self.vio_yaw_var, self.vio_yaw_var, self.vio_yaw_var)):
+            cov[i * 7] = v
+        odom.pose.covariance = cov
+        self.pub_odom.publish(odom)
+        self.forwarded += 1
+
     def _publish_status(self):
         self.pub_status.publish(String(data=json.dumps({
             'state': self.state, 'filtered': self.filtered_total, 'recoveries': self.recoveries,
@@ -589,7 +626,9 @@ class VslamWatchdog(Node):
             'wheels': bool(self.wheel_buf) and self._wheel_pose(self.wheel_buf[-1][0]) is not None
                       and time.monotonic() - self.last_wheel < 1.0,
             'bridged': self.bridged,
-            'wheel_followed': self.wheel_followed})))
+            'wheel_followed': self.wheel_followed,
+            'output': 'tf' if self.publish_tf else 'ekf',
+            'forwarded': self.forwarded})))
 
     def _last_good_pose(self):
         """Most recent trustworthy (stamp, pos, quat) from before the failure started."""

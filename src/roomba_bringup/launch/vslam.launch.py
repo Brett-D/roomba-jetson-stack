@@ -2,6 +2,8 @@
 
 Odometry (odom -> base frame: camera_link when hand-held, base_link on the robot) comes from
 Basalt (default; stereo-inertial, CPU) or NVIDIA cuVSLAM (GPU), filtered by vslam_watchdog.
+On the robot, fusion:=ekf hands odom -> base_link to a robot_localization EKF instead (wheels +
+gyro + the VIO poses the watchdog accepted); the watchdog then only supervises the VIO.
 RTAB-Map consumes that odometry plus RGB-D for loop closure, the persistent map (map -> odom)
 and the 2D occupancy grid used later by Nav2. On the robot, use robot.launch.py, which includes
 this file with platform:=robot.
@@ -20,7 +22,7 @@ from launch.actions import (DeclareLaunchArgument, IncludeLaunchDescription, Log
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution, PythonExpression
-from launch_ros.actions import ComposableNodeContainer, Node
+from launch_ros.actions import ComposableNodeContainer, Node, SetParameter
 from launch_ros.descriptions import ComposableNode
 from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
@@ -73,10 +75,16 @@ def _resolve_mode(context):
 
 
 def _watchdog(context):
-    """Motion filter, with robot limits and wheel odometry on the Roomba."""
+    """Motion filter, with robot limits and wheel odometry on the Roomba. With fusion:=ekf it
+    only supervises the VIO, and robot_localization's EKF publishes odom -> base_link."""
     platform = LaunchConfiguration('platform').perform(context)
     if platform not in ('handheld', 'robot'):
         raise RuntimeError(f"platform must be handheld or robot (got '{platform}')")
+    fusion = LaunchConfiguration('fusion').perform(context)
+    if fusion not in ('watchdog', 'ekf'):
+        raise RuntimeError(f"fusion must be watchdog or ekf (got '{fusion}')")
+    if fusion == 'ekf' and platform != 'robot':
+        raise RuntimeError('fusion:=ekf needs wheel odometry: robot only (robot.launch.py)')
     params = {'base_frame': LaunchConfiguration('base_frame').perform(context)}
     if platform == 'robot':
         params.update({
@@ -87,8 +95,20 @@ def _watchdog(context):
             'wheel_odom_topic': '/wheel/odom',
             'planar': True,
         })
+    nodes = []
+    if fusion == 'ekf':
+        params['publish_tf'] = False
+        bringup = FindPackageShare('roomba_bringup').perform(context)
+        nodes += [
+            # Calibrated wheel twist and bias-free gyro with honest covariances for the EKF.
+            Node(package='roomba_perception', executable='ekf_inputs', name='ekf_inputs',
+                 output='screen'),
+            Node(package='robot_localization', executable='ekf_node', name='ekf_filter_node',
+                 output='screen', parameters=[os.path.join(bringup, 'config', 'ekf_robot.yaml')],
+                 remappings=[('odometry/filtered', '/odom')]),
+        ]
     return [Node(package='roomba_perception', executable='vslam_watchdog', name='vslam_watchdog',
-                 output='screen', parameters=[params])]
+                 output='screen', parameters=[params])] + nodes
 
 
 def generate_launch_description():
@@ -130,6 +150,14 @@ def generate_launch_description():
                               description='IR projector power 0-10 (0 = off, passive stereo depth only)'),
         DeclareLaunchArgument('camera', default_value='true',
                               description='false: no camera driver (replaying a recorded walk)'),
+        DeclareLaunchArgument('fusion', default_value='watchdog',
+                              description='watchdog: vslam_watchdog publishes odom -> base (filtered VIO, '
+                                          'wheel-bridged); ekf (robot only): robot_localization fuses '
+                                          'wheels + gyro + VIO (config/ekf_robot.yaml)'),
+        DeclareLaunchArgument('use_sim_time', default_value='false',
+                              description='true when replaying a bag with --clock'),
+        SetParameter(name='use_sim_time',
+                     value=ParameterValue(LaunchConfiguration('use_sim_time'), value_type=bool)),
         OpaqueFunction(function=_resolve_mode),
     ]
 
@@ -157,8 +185,8 @@ def generate_launch_description():
             'enable_ground_constraint_in_odometry': on_robot,
             'map_frame': 'vslam_odom',
             'publish_map_to_odom_tf': False,
-            # vslam_watchdog filters cuVSLAM's odometry (motion limits) and is the only
-            # publisher of odom -> base_frame.
+            # vslam_watchdog (or, with fusion:=ekf, robot_localization) is the only publisher
+            # of odom -> base_frame.
             'publish_odom_to_base_tf': False,
             'base_frame': LaunchConfiguration('base_frame'),
             # cuVSLAM odometry lives in vslam_odom; vslam_watchdog anchors it into odom.
@@ -286,6 +314,7 @@ def generate_launch_description():
             'rtabmap_args': rtabmap_args,
             'localization': localization,
             'database_path': LaunchConfiguration('database_path'),
+            'use_sim_time': LaunchConfiguration('use_sim_time'),
             'rtabmap_viz': 'false',
             'rviz': 'false',
         }.items(),

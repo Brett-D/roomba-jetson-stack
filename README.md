@@ -12,13 +12,13 @@ The serial driver lives in its own repository and is included here as a submodul
 | Path | Contents |
 |---|---|
 | `src/roomba_bringup` | Launch files (`robot.launch.py`, `vslam.launch.py`, `nav.launch.py`, `handheld_slam.launch.py`), Nav2 configs, robot driver config |
-| `src/roomba_perception` | VSLAM watchdog/odometry filter with wheel bridging, floor obstacle detection, explorer, ignore zones, nav coach, person detector, IMU calibration |
+| `src/roomba_perception` | VSLAM watchdog/odometry filter with wheel bridging, EKF input conditioning (`ekf_inputs`), floor obstacle detection, explorer, ignore zones, nav coach, person detector, IMU calibration |
 | `src/roomba_web` | Web app on port 8080: live map, robot status, drive pad, tap-to-go navigation, login |
 | `src/mynteye_d1000_driver` | ROS 2 node for the MYNT EYE D1000 stereo/depth/IMU camera |
 | `src/basalt_vio_ros` | ROS 2 wrapper for Basalt visual-inertial odometry |
 | `src/roomba-serial-ros2` | Roomba Open Interface driver (submodule) |
-| `scripts/` | `run_robot.sh`, `stop_slam.sh`, mapping/replay helpers, setup scripts |
-| `tools/` | Probes and diagnostics (motion step test, costmap/obstacle probes, map render); `tools/oi_tests/` holds early serial/OI bench scripts |
+| `scripts/` | `run_robot.sh`, `stop_slam.sh`, `record_run.sh` / `compare_pipelines.sh` (A vs B on a recorded drive), mapping/replay helpers, setup scripts |
+| `tools/` | Probes and diagnostics (motion step test, costmap/obstacle probes, map render, TF/drift/CPU-GPU checks, comparison monitor/renderer); `tools/oi_tests/` holds early serial/OI bench scripts |
 | `docs/` | Wiring and power diagrams |
 | `hardware/platform` | 3D-printed platform: STLs, fit tests and the Python generator |
 
@@ -68,6 +68,36 @@ colcon build --symlink-install
 Then open `http://<jetson-ip>:8080` and wait for **Tracking OK**. Wake the Roomba first (press Clean) if its lights are off.
 The web login password is generated on first run and stored in `~/.config/roomba_web/initial_password`;
 change it with `ros2 run roomba_web set_password`.
+
+### Pipelines A (default) and B (GPU)
+
+Extra arguments to `run_robot.sh` / `robot.launch.py` pick the odometry, the fusion and the costmap obstacles:
+
+| Argument | Default (A) | GPU pipeline (B) |
+|---|---|---|
+| `odometry:=` | `basalt` (CPU VIO) | `cuvslam` (Isaac ROS Visual SLAM) |
+| `fusion:=` | `watchdog` (vslam_watchdog publishes `odom → base_link`) | `ekf` (robot_localization: wheels + calibrated gyro + VIO, `config/ekf_robot.yaml`) |
+| `obstacles:=` | `floor` (floor_obstacles + voxel layer, `nav2_robot.yaml`) | `nvblox` (GPU TSDF/ESDF, `config/nvblox_robot.yaml`, `nav2_robot_nvblox.yaml`) |
+
+```bash
+~/roomba_ws/scripts/run_robot.sh mapping                                                   # A
+~/roomba_ws/scripts/run_robot.sh mapping odometry:=cuvslam fusion:=ekf obstacles:=nvblox    # B
+```
+
+The three choices are independent. With `fusion:=ekf` the watchdog still checks the VIO, resets it and
+publishes `/vslam_filter/status`. The collision monitor always uses floor_obstacles.
+
+### Recording a drive and comparing the pipelines
+
+```bash
+~/roomba_ws/scripts/record_run.sh [--duration S] [--zstd] [--name X]   # with the robot running; Ctrl-C stops
+~/roomba_ws/scripts/compare_pipelines.sh ~/bags/robot_<stamp> [--background] [--rate 0.5] [--only A|B]
+```
+
+`record_run.sh` records only the raw camera, IMU and Roomba topics plus `/tf_static` (no odometry/map TF) to
+`~/bags/robot_<stamp>` (mcap, about 1.2 GB/min uncompressed). `compare_pipelines.sh` replays it through A and B
+(sim time, camera and Roomba drivers off), each into its own RTAB-Map database, and writes metrics (tracking losses,
+loop closures, map area, end-vs-start pose, CPU/GPU), a side-by-side map image and an overlay to `/data/maps/compare/`.
 
 ## Known quirks
 

@@ -18,7 +18,9 @@ better in good light and trusts the IMU more where vision is weak).
 Outputs (in output_dir, default ~/maps):
   imu_raw_<date>.npz     recorded samples
   imu_allan_<date>.png   Allan deviation plot (if matplotlib is available)
-  ~/.config/roomba/imu_noise.yaml     cuVSLAM parameters, loaded by vslam.launch.py
+  ~/.config/roomba/imu_noise.yaml     cuVSLAM parameters, loaded by vslam.launch.py (inflated);
+                                      ekf_inputs divides them back to the raw values and takes
+                                      gyro_static_bias (raw mean of the recording) as initial bias
   ~/.config/roomba/basalt_calib.json  Basalt calibration with these noise values, loaded by
                                       vslam.launch.py instead of the packaged one
 """
@@ -108,6 +110,8 @@ def analyze(path, inflation, out_png=None):
                 'tau_n': float(tau_n), 'tau_k': float(tau_k), 'slope_fit_error_n': round(float(err_n), 3)}
         result[f'{name}_noise_density'] = float(np.mean(Ns))
         result[f'{name}_random_walk'] = float(np.mean(Ks))
+    # Turn-on bias of this recording (the camera was still): ekf_inputs starts from it.
+    result['gyro_static_bias'] = [float(v) for v in gyro.mean(axis=0)]
     params = {
         'gyro_noise_density': result['gyro_noise_density'] * inflation,
         'gyro_random_walk': result['gyro_random_walk'] * inflation,
@@ -144,6 +148,9 @@ def write_params(params, result, inflation):
         f.write(f'# {result["hours"]} h static recording at {result["rate_hz"]} Hz; raw values x{inflation}\n')
         for k, v in params.items():
             f.write(f'{k}: {v:.8g}\n')
+        # Not inflated, rad/s; ignored by vslam.launch.py, used as ekf_inputs' initial bias.
+        bias = ', '.join(f'{v:.8g}' for v in result['gyro_static_bias'])
+        f.write(f'gyro_static_bias: [{bias}]\n')
 
 
 def write_basalt_calib(params):

@@ -25,6 +25,7 @@ setup(
             'nav_coach = roomba_perception.nav_coach:main',
             'explorer = roomba_perception.explorer:main',
             'imu_calibrate = roomba_perception.imu_calibrate:main',
+            'ekf_inputs = roomba_perception.ekf_inputs:main',
         ],
     },
 )

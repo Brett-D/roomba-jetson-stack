@@ -4,7 +4,15 @@
   ros2 launch roomba_bringup robot.launch.py                       # reuse the saved map (auto)
   ros2 launch roomba_bringup robot.launch.py nav:=false            # VSLAM + driver only
 
-Frames: map (RTAB-Map) -> odom (vslam_watchdog: VIO, wheel-bridged) -> base_link (Roomba centre
+Pipelines (A is the default; any mix of the three choices works):
+  A  odometry:=basalt  fusion:=watchdog  obstacles:=floor     Basalt VIO (CPU), vslam_watchdog
+                                                               TF, floor_obstacles voxel costmaps
+  B  odometry:=cuvslam fusion:=ekf       obstacles:=nvblox    cuVSLAM (GPU), robot_localization
+                                                               EKF (wheels + gyro + VIO), nvblox
+                                                               costmaps (GPU)
+Replays (scripts/compare_pipelines.sh) add camera:=false driver:=false use_sim_time:=true.
+
+Frames: map (RTAB-Map) -> odom (vslam_watchdog: VIO, wheel-bridged; or the EKF) -> base_link (Roomba centre
 on the floor, x forward) -> camera_link (static mount below) -> optical / IMU frames (camera driver).
 roomba_driver drives the wheels from /cmd_vel (Nav2's collision monitor, or the web app's drive pad)
 and publishes /wheel/odom, /battery_state and /roomba/sensors.
@@ -16,26 +24,52 @@ calibrated floor_height directly because the mount is rigid.
 """
 import os
 
+from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, LogInfo, OpaqueFunction
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
-from launch_ros.actions import Node
+from launch.substitutions import LaunchConfiguration, PathJoinSubstitution, PythonExpression
+from launch_ros.actions import Node, SetParameter
+from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
 
 # Passed through to vslam.launch.py unchanged.
 VSLAM_ARGS = ['mode', 'odometry', 'database_path', 'foxglove', 'people', 'web', 'web_port',
-              'ir_depth_only', 'ir_intensity', 'ground_constraint']
+              'ir_depth_only', 'ir_intensity', 'ground_constraint', 'fusion', 'camera', 'use_sim_time']
+
+
+def _check_args(context):
+    obstacles = LaunchConfiguration('obstacles').perform(context)
+    if obstacles not in ('floor', 'nvblox'):
+        raise RuntimeError(f"obstacles must be floor or nvblox (got '{obstacles}')")
+    odometry = LaunchConfiguration('odometry').perform(context)
+    if odometry not in ('basalt', 'cuvslam'):
+        raise RuntimeError(f"odometry must be basalt or cuvslam (got '{odometry}')")
+    return [LogInfo(msg=f"[robot] odometry={odometry} fusion={LaunchConfiguration('fusion').perform(context)} "
+                        f"obstacles={obstacles} nav_params={LaunchConfiguration('nav_params').perform(context)}")]
 
 
 def generate_launch_description():
     bringup = FindPackageShare('roomba_bringup')
+    bringup_share = get_package_share_directory('roomba_bringup')
     lc = LaunchConfiguration
     args = [
         DeclareLaunchArgument('mode', default_value='auto',
                               description='auto (reuse saved map if present), mapping (new map), localization'),
-        DeclareLaunchArgument('odometry', default_value='basalt'),
+        DeclareLaunchArgument('odometry', default_value='basalt',
+                              description='basalt (CPU) or cuvslam (GPU, Isaac ROS Visual SLAM)'),
+        DeclareLaunchArgument('fusion', default_value='watchdog',
+                              description='watchdog (VIO filtered + wheel-bridged by vslam_watchdog) or ekf '
+                                          '(robot_localization: wheels + gyro + VIO, config/ekf_robot.yaml)'),
+        DeclareLaunchArgument('obstacles', default_value='floor',
+                              description='Costmap obstacles: floor (floor_obstacles + voxel layer) or nvblox '
+                                          '(GPU TSDF/ESDF, config/nvblox_robot.yaml). The collision monitor '
+                                          'always uses floor_obstacles.'),
+        DeclareLaunchArgument('camera', default_value='true',
+                              description='false: no camera driver (replaying a recorded bag)'),
+        DeclareLaunchArgument('use_sim_time', default_value='false',
+                              description='true when replaying a bag with --clock (compare_pipelines.sh)'),
         DeclareLaunchArgument('ground_constraint', default_value='true',
                               description='cuVSLAM only: keep the odometry in the floor plane'),
         DeclareLaunchArgument('database_path', default_value=os.path.expanduser('~/maps/vslam.db')),
@@ -49,8 +83,9 @@ def generate_launch_description():
         DeclareLaunchArgument('driver', default_value='true', description='Run the Roomba base driver'),
         DeclareLaunchArgument('driver_params', default_value=PathJoinSubstitution(
             [bringup, 'config', 'roomba_driver_robot.yaml'])),
-        DeclareLaunchArgument('nav_params', default_value=PathJoinSubstitution(
-            [bringup, 'config', 'nav2_robot.yaml'])),
+        DeclareLaunchArgument('nav_params', default_value=PythonExpression([
+            "'", bringup_share, "/config/' + ('nav2_robot_nvblox.yaml' if '", lc('obstacles'),
+            "' == 'nvblox' else 'nav2_robot.yaml')"])),
         # base_link -> camera_link (camera_link is centred between the lenses, x forward, z up).
         DeclareLaunchArgument('cam_x', default_value='0.153', description='m ahead of the Roomba centre'),
         DeclareLaunchArgument('cam_y', default_value='0.0', description='m to the left'),
@@ -99,4 +134,17 @@ def generate_launch_description():
         condition=IfCondition(lc('nav')),
     )
 
-    return LaunchDescription(args + [mount, vslam, driver, nav])
+    # GPU obstacle mapping for the costmaps (obstacles:=nvblox): depth -> TSDF -> 2D ESDF slice.
+    nvblox = Node(
+        package='nvblox_ros', executable='nvblox_node', name='nvblox_node', output='screen',
+        parameters=[PathJoinSubstitution([bringup, 'config', 'nvblox_robot.yaml'])],
+        remappings=[
+            ('camera_0/depth/image', '/camera/depth/image_rect_raw'),
+            ('camera_0/depth/camera_info', '/camera/depth/camera_info'),
+        ],
+        condition=IfCondition(PythonExpression(["'", lc('obstacles'), "' == 'nvblox'"])),
+    )
+
+    sim_time = SetParameter(name='use_sim_time', value=ParameterValue(lc('use_sim_time'), value_type=bool))
+    return LaunchDescription(args + [OpaqueFunction(function=_check_args), sim_time,
+                                     mount, vslam, driver, nvblox, nav])
