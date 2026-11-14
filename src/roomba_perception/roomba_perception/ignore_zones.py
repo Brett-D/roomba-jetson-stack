@@ -8,7 +8,9 @@ ops from the web app ({"op": "add" | "delete" | "rename" | "clear", ...}). Zones
 "kind": "exclusion" (default) or "keepout".
 
 Keep-out zones become a Nav2 keep-out filter mask, grown by keepout_margin_m because Nav2
-plans the robot's centre (the Roomba's body reaches 0.17 m beyond it).
+plans the robot's centre (the Roomba's body reaches 0.17 m beyond it). A zone can carry its
+own "margin", and a "ttl_s": such temporary zones (e.g. bumper hits marked by the explorer)
+expire on their own and are never saved with the map.
 
 Zones are stored in the map frame, so they stay valid while the same map database is
 used (mapping session that created it, or later runs with localization:=true). With
@@ -26,6 +28,7 @@ Publishes:
 import json
 import math
 import os
+import time
 
 import numpy as np
 import rclpy
@@ -48,15 +51,18 @@ MAX_ZONE_POINTS = 64
 KINDS = ('exclusion', 'keepout')
 
 
-def keepout_mask(polygons, resolution, margin):
+def keepout_mask(polygons, resolution, margin, margins=None):
     """OccupancyGrid data (row-major, 100 = keep out, 0 = free) covering the polygons plus margin.
+
+    margins: optional per-polygon margins (None entries use `margin`).
 
     Returns (origin_x, origin_y, width, height, data) or None when there are no polygons.
     """
     if not polygons:
         return None
+    margins = [margin if m is None else m for m in (margins or [None] * len(polygons))]
     pts = np.array([p for poly in polygons for p in poly], dtype=float)
-    pad = margin + 2 * resolution
+    pad = max(margins) + 2 * resolution
     ox, oy = pts.min(axis=0) - pad
     w = int(math.ceil((pts[:, 0].max() + pad - ox) / resolution))
     h = int(math.ceil((pts[:, 1].max() + pad - oy) / resolution))
@@ -64,7 +70,7 @@ def keepout_mask(polygons, resolution, margin):
     ys = oy + (np.arange(h) + 0.5) * resolution
     cx, cy = np.meshgrid(xs, ys)
     blocked = np.zeros((h, w), dtype=bool)
-    for poly in polygons:
+    for poly, poly_margin in zip(polygons, margins):
         p = np.array(poly, dtype=float)
         q = np.roll(p, -1, axis=0)
         inside = np.zeros((h, w), dtype=bool)
@@ -76,7 +82,7 @@ def keepout_mask(polygons, resolution, margin):
             # Distance to this edge for the margin.
             dx, dy = x2 - x1, y2 - y1
             t = np.clip(((cx - x1) * dx + (cy - y1) * dy) / ((dx * dx + dy * dy) or 1e-12), 0.0, 1.0)
-            near |= np.hypot(cx - (x1 + t * dx), cy - (y1 + t * dy)) <= margin
+            near |= np.hypot(cx - (x1 + t * dx), cy - (y1 + t * dy)) <= poly_margin
         blocked |= inside | near
     return float(ox), float(oy), w, h, np.where(blocked, 100, 0).astype(np.int8).ravel().tolist()
 
@@ -119,6 +125,7 @@ class IgnoreZones(Node):
         self.create_subscription(PointStamped, '/clicked_point', self._on_click, 10)
         self.create_subscription(String, '~/command', self._on_command, 10)
         self.create_timer(1.0, self._publish_markers)
+        self.create_timer(2.0, self._expire)
         self._publish_zones()
         self.get_logger().info(f'{len(self.zones)} ignore zone(s) loaded from {self.zones_file}')
 
@@ -137,7 +144,8 @@ class IgnoreZones(Node):
         os.makedirs(os.path.dirname(self.zones_file), exist_ok=True)
         tmp = self.zones_file + '.tmp'
         with open(tmp, 'w') as f:
-            json.dump({'frame': self.map_frame, 'zones': self.zones}, f, indent=1)
+            json.dump({'frame': self.map_frame, 'zones': [z for z in self.zones if 'expires' not in z]},
+                      f, indent=1)
         os.replace(tmp, self.zones_file)
 
     def _changed(self):
@@ -149,9 +157,18 @@ class IgnoreZones(Node):
         self.pub_zones.publish(String(data=json.dumps({'frame': self.map_frame, 'zones': self.zones})))
         self._publish_mask()
 
+    def _expire(self):
+        now = time.time()
+        expired = [z['name'] for z in self.zones if z.get('expires', math.inf) <= now]
+        if expired:
+            self.zones = [z for z in self.zones if z.get('expires', math.inf) > now]
+            self.get_logger().info(f'Expired temporary zone(s): {", ".join(expired)}')
+            self._changed()
+
     def _publish_mask(self):
-        polys = [z['points'] for z in self.zones if z.get('kind') == 'keepout']
-        mask = keepout_mask(polys, self.mask_resolution, self.keepout_margin)
+        keep = [z for z in self.zones if z.get('kind') == 'keepout']
+        mask = keepout_mask([z['points'] for z in keep], self.mask_resolution, self.keepout_margin,
+                            [z.get('margin') for z in keep])
         if mask is None:
             # The filter needs a mask; a single free cell means "no keep-out anywhere".
             mask = (0.0, 0.0, 1, 1, [0])
@@ -250,7 +267,18 @@ class IgnoreZones(Node):
                 name = self._clean_name(cmd.get('name')) or self._next_name(kind)
                 if any(z['name'] == name for z in self.zones):
                     raise ValueError(f'zone "{name}" already exists')
-                self.zones.append({'name': name, 'points': pts, 'kind': kind})
+                zone = {'name': name, 'points': pts, 'kind': kind}
+                if cmd.get('margin') is not None:
+                    margin = float(cmd['margin'])
+                    if not 0.0 <= margin <= 1.0:
+                        raise ValueError('margin must be 0..1 m')
+                    zone['margin'] = round(margin, 3)
+                if cmd.get('ttl_s') is not None:
+                    ttl = float(cmd['ttl_s'])
+                    if not 0.0 < ttl <= 86400.0:
+                        raise ValueError('ttl_s must be 0..86400')
+                    zone['expires'] = round(time.time() + ttl, 1)
+                self.zones.append(zone)
                 self.get_logger().info(f'Added {kind} zone {name} ({len(pts)} corners)')
             elif op == 'delete':
                 name = cmd.get('name')

@@ -47,11 +47,41 @@ from tf2_ros import Buffer, TransformException, TransformListener
 ROTATE_PARAM = 'FollowPath.rotate_to_heading_angular_vel'
 # Cliff sensor directions on the Roomba (rad, left positive) for automatic keep-out zones.
 CLIFF_ANGLES = {'cliff_left': 1.05, 'cliff_front_left': 0.35, 'cliff_front_right': -0.35, 'cliff_right': -1.05}
+# Light-bumper (IR proximity) directions, used to tell where on the bumper a hit was.
+LIGHT_ANGLES = {'light_bump_left_signal': 1.2, 'light_bump_front_left_signal': 0.65,
+                'light_bump_center_left_signal': 0.2, 'light_bump_center_right_signal': -0.2,
+                'light_bump_front_right_signal': -0.65, 'light_bump_right_signal': -1.2}
 
 try:
     from roomba_msgs.msg import SensorState
 except ImportError:   # driver messages not built: no automatic keep-out zones
     SensorState = None
+
+
+def bump_zone(x, y, yaw, bearing, contact=0.18, depth=0.06, width=0.3):
+    """Thin keep-out strip (map frame) on the surface the bumper touched, `contact` m from the
+    robot centre along `bearing`, extending `depth` m into the obstacle."""
+    a = yaw + bearing
+    ca, sa = math.cos(a), math.sin(a)
+    h = width / 2.0
+    corners = ((contact, -h), (contact + depth, -h), (contact + depth, h), (contact, h))
+    return [[round(x + u * ca - v * sa, 3), round(y + u * sa + v * ca, 3)] for u, v in corners]
+
+
+def bump_bearing(msg, light_min=200):
+    """Direction of a bumper hit relative to the robot heading (rad, + = left).
+
+    The switches alone are coarse (and this robot's right switch is masked as faulty, so a head-on
+    hit reads as left), so the light bumpers' signals at the moment of contact pick the direction
+    when they see something (deep carpet pile reads ~100-200); otherwise fall back to the switches.
+    """
+    sig = {k: getattr(msg, k, 0) for k in LIGHT_ANGLES}
+    total = sum(v for v in sig.values() if v >= light_min)
+    if total > 0:
+        return math.atan2(sum(v * math.sin(LIGHT_ANGLES[k]) for k, v in sig.items() if v >= light_min),
+                          sum(v * math.cos(LIGHT_ANGLES[k]) for k, v in sig.items() if v >= light_min))
+    left, right = bool(msg.bump_left), bool(msg.bump_right)
+    return 0.5 if left and not right else -0.5 if right and not left else 0.0
 
 
 def cliff_zone(x, y, yaw, bearing, distance=0.42, size=0.35):
@@ -153,6 +183,16 @@ class Explorer(Node):
         # add a keep-out zone there so neither exploring nor navigation tries it again.
         self.auto_keepout = bool(p('auto_keepout', True).value) and SensorState is not None
         self.cliff_seen = {}         # sensor name -> monotonic time it last read a cliff
+        # Bumper hits leave a thin, temporary keep-out strip on the touched surface so the planner
+        # stops sending the robot back into a wall the camera can't see (the last ~30 cm, or below
+        # the obstacle band). Margin ~ the Roomba's radius: it may still drive right up to the
+        # wall (it's a vacuum); it just won't plan through that spot. Never saved with the map.
+        self.bump_marks = bool(p('bump_marks', True).value) and SensorState is not None
+        self.bump_mark_ttl = float(p('bump_mark_ttl_s', 600.0).value)
+        self.bump_mark_margin = float(p('bump_mark_margin_m', 0.15).value)
+        self.bump_mark_spacing = float(p('bump_mark_spacing_m', 0.15).value)
+        self.bumped = False
+        self.bump_points = []        # (x, y, monotonic) of recent marks
 
         self.grid = None
         self.robot_mode = None
@@ -190,7 +230,7 @@ class Explorer(Node):
         self.create_subscription(String, '/vslam_filter/status', self._on_filter, 2)
         self.create_subscription(String, '~/command', self._on_command, 10)
         self.pub_zone_cmd = self.create_publisher(String, '/perception/ignore_zones/command', 10)
-        if self.auto_keepout:
+        if self.auto_keepout or self.bump_marks:
             self.create_subscription(SensorState, '/roomba/sensors', self._on_sensors, 10)
         self.pub_status = self.create_publisher(String, '~/status', latched)
         self.create_timer(1.0, self._tick)
@@ -220,6 +260,29 @@ class Explorer(Node):
                 self.cliff_seen[name] = now
         if msg.wheel_drop_left or msg.wheel_drop_right:
             self.cliff_seen['wheel_drop'] = now
+        bumped = bool(msg.bump_left or msg.bump_right)
+        if bumped and not self.bumped and self.bump_marks and self.robot_mode in ('safe', 'full') \
+                and not (msg.wheel_drop_left or msg.wheel_drop_right):
+            self._mark_bump(bump_bearing(msg), now)
+        self.bumped = bumped
+
+    def _mark_bump(self, bearing, now):
+        pose = self._pose()
+        if pose is None:
+            return
+        points = bump_zone(pose[0], pose[1], pose[2], bearing)
+        cx = sum(p[0] for p in points) / 4.0
+        cy = sum(p[1] for p in points) / 4.0
+        self.bump_points = [b for b in self.bump_points if now - b[2] < self.bump_mark_ttl]
+        if any(math.hypot(cx - bx, cy - by) < self.bump_mark_spacing for bx, by, _ in self.bump_points):
+            return   # already marked here
+        self.bump_points.append((cx, cy, now))
+        name = time.strftime('bump_%H%M%S') + f'_{len(self.bump_points)}'
+        self.pub_zone_cmd.publish(String(data=json.dumps(
+            {'op': 'add', 'kind': 'keepout', 'name': name, 'points': points,
+             'margin': self.bump_mark_margin, 'ttl_s': self.bump_mark_ttl})))
+        self.get_logger().info(f'Bumper hit at {math.degrees(bearing):+.0f} deg: marked {name} '
+                               f'for {self.bump_mark_ttl / 60:.0f} min')
 
     def _cliff_keepout(self):
         """The firmware just left safe mode: if a cliff sensor fired, keep out of that spot."""
