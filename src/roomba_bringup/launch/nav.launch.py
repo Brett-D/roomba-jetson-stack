@@ -60,6 +60,9 @@ def generate_launch_description():
                  'min_cell_points': ParameterValue(
                      PythonExpression(["4 if '", LaunchConfiguration('robot_mode'), "' == 'true' else 1"]),
                      value_type=int),
+                 'max_range_m': ParameterValue(
+                     PythonExpression(["2.5 if '", LaunchConfiguration('robot_mode'), "' == 'true' else 4.0"]),
+                     value_type=float),
              }]),
         # Joins dotted obstacles in RTAB-Map's grid (railing posts) into solid walls for the costmaps.
         Node(package='roomba_perception', executable='map_gap_filler', name='map_gap_filler',
