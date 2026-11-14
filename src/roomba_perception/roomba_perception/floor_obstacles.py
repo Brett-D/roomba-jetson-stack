@@ -71,6 +71,10 @@ class FloorObstacles(Node):
         # points; a wall, a box or even a thin post stacks many). 1 = off.
         self.min_cell_points = int(p('min_cell_points', 1).value)
         self.cell_size = float(p('cell_size_m', 0.05).value)
+        # When something closer than min_range fills the view, report a short wall this far in
+        # front of the camera (inside the collision monitor's forward stop zone).
+        self.blind_distance = float(p('blind_obstacle_distance_m', 0.15).value)
+        self.blind_frames = 0
         self.speckles = 0
         self.last_fast_turn = 0.0
         self.paused_frames = 0
@@ -122,6 +126,21 @@ class FloorObstacles(Node):
         up_imu = quat_rotate((-x, -y, -z, w), (0.0, 0.0, 1.0))  # inverse rotation of world up
         up = np.array(quat_rotate(self.R_opt_imu, up_imu))
         return up / np.linalg.norm(up)
+
+    def _publish_blind(self, header, up):
+        """Too few depth points, e.g. a wall closer than min_range fills the view: report a short
+        wall just ahead. Publishing nothing let the collision monitor's source timeout stop every
+        motion, so the robot could neither turn nor back away; these points only block forward."""
+        fwd = np.array([0.0, 0.0, 1.0]) - up * up[2]          # optical z, levelled
+        fwd /= np.linalg.norm(fwd) or 1.0
+        side = np.cross(up, fwd)
+        pts = np.array([self.blind_distance * fwd + o * side for o in np.linspace(-0.1, 0.1, 5)])
+        self.pub_obs.publish(_cloud(header, pts))
+        self.blind_frames += 1
+        self.pub_status.publish(String(data=json.dumps({'blind': True, 'blind_frames': self.blind_frames})))
+        self.get_logger().warning(
+            f'depth blind (closer than {self.min_range:.2f} m?): blocking forward motion only',
+            throttle_duration_sec=5.0)
 
     def _dense(self, pts, up):
         """Mask of points with at least min_cell_points neighbours in their 3x3 floor-cell block."""
@@ -178,6 +197,7 @@ class FloorObstacles(Node):
         y = (v.ravel()[ok] * d - cy) * z / fy
         pts = np.stack([x, y, z], axis=1)
         if pts.shape[0] < 100:
+            self._publish_blind(msg.header, up)
             return
         h = pts @ up
 
@@ -216,6 +236,7 @@ class FloorObstacles(Node):
             'speckles_removed': self.speckles,
             'floor_points': int(floor.shape[0]),
             'paused_frames': self.paused_frames,
+            'blind_frames': self.blind_frames,
         }
         self.pub_status.publish(String(data=json.dumps(status)))
         if now - self.last_log > 5.0:

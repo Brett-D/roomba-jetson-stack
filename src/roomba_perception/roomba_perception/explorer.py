@@ -176,6 +176,7 @@ class Explorer(Node):
         self.low_battery = float(p('low_battery_fraction', 0.2).value)
         self.rotate_speed = float(p('rotate_speed_rps', 0.7).value)     # 0 = leave the controller alone
         self.return_home = bool(p('return_home', True).value)
+        self.home_tolerance = float(p('home_tolerance_m', 0.5).value)
         # A robot briefly boxed in (stale obstacles, tracking recovery) sees no reachable
         # frontier; only call exploring finished after this long with none.
         self.finish_confirm = float(p('finish_confirm_s', 20.0).value)
@@ -442,7 +443,8 @@ class Explorer(Node):
             self.no_frontier_since = None
             if self.final_check:
                 self.final_check = False
-                self._finish('Exploration finished: no reachable unmapped areas left - back at the start point')
+                self._finish('Exploration finished: no reachable unmapped areas left'
+                             + (' - back at the start point' if self._near_home() else ''))
                 return
             self._go_home('Exploration finished: no reachable unmapped areas left', resume=True)
             return
@@ -501,14 +503,17 @@ class Explorer(Node):
         goal, self.goal, self.goal_handle = self.goal, None, None
         if self.state == 'returning':
             why = self.message   # why it went home (finished, low battery, request)
-            if self.resume_after_home and status == GoalStatus.STATUS_SUCCEEDED:
-                # The map looks different from the start point: check once more before finishing.
+            # Nav2 can report success without the robot moving (a one-pose plan while it was
+            # boxed in at a wall), so check that it really is back.
+            home = status == GoalStatus.STATUS_SUCCEEDED and self._near_home()
+            if self.resume_after_home:
+                # The map looks different from elsewhere: check once more before finishing.
                 self.resume_after_home = False
                 self.final_check = True
-                self._set('exploring', 'Back at the start point; checking for unmapped areas again…')
+                self._set('exploring', 'Back at the start point; checking for unmapped areas again…' if home
+                          else 'Could not reach the start point; checking for unmapped areas again from here…')
                 return
-            self.resume_after_home = False
-            self._finish(f'{why} - back at the start point' if status == GoalStatus.STATUS_SUCCEEDED
+            self._finish(f'{why} - back at the start point' if home
                          else f'{why} - could not drive back to the start point')
             return
         if self.state != 'exploring':
@@ -528,6 +533,11 @@ class Explorer(Node):
         handle, self.goal_handle, self.goal = self.goal_handle, None, None
         if handle is not None:
             handle.cancel_goal_async()
+
+    def _near_home(self):
+        pose = self._pose()
+        return (pose is not None and self.home is not None
+                and math.hypot(pose[0] - self.home[0], pose[1] - self.home[1]) <= self.home_tolerance)
 
     def _pose(self):
         try:
