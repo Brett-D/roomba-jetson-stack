@@ -157,6 +157,7 @@ class Explorer(Node):
         self.tracking_ok = True
         self.state = 'idle'          # idle | exploring | returning | done | stopped
         self.message = 'Ready'
+        self.logged_message = None   # last message written to the log
         self.home = None
         self.goal = None             # (x, y, sent monotonic)
         self.goal_handle = None
@@ -470,6 +471,9 @@ class Explorer(Node):
         self.set_params.call_async(SetParameters.Request(parameters=[param]))
 
     def _publish_status(self):
+        if self.message != self.logged_message and self.state in ('exploring', 'returning'):
+            self.get_logger().info(f'[{self.state}] {self.message}')
+        self.logged_message = self.message
         self.pub_status.publish(String(data=json.dumps({
             'state': self.state, 'message': self.message, 'reached': self.reached,
             'failed': self.failed, 'frontiers': self.frontier_count,
