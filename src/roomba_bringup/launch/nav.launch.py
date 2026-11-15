@@ -97,7 +97,10 @@ def generate_launch_description():
              output='screen', parameters=[params]),
         Node(package='nav2_lifecycle_manager', executable='lifecycle_manager', name='lifecycle_manager_navigation',
              output='screen', parameters=[{'autostart': True, 'node_names': NAV_NODES, 'bond_timeout': 10.0}]),
-        Node(package='roomba_perception', executable='nav_coach', name='nav_coach', output='screen',
+        # Rust port: the same instructions tick for tick (tools/ab_nav_coach_offline.py), ~1/6 of the CPU.
+        Node(package=PythonExpression(["'roomba_rs' if '", LaunchConfiguration('rust_nodes'),
+                                       "' == 'true' else 'roomba_perception'"]),
+             executable='nav_coach', name='nav_coach', output='screen',
              parameters=[{
                  'base_frame': LaunchConfiguration('base_frame'),
                  'robot_mode': ParameterValue(LaunchConfiguration('robot_mode'), value_type=bool),

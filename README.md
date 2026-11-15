@@ -13,7 +13,7 @@ The serial driver lives in its own repository and is included here as a submodul
 |---|---|
 | `src/roomba_bringup` | Launch files (`robot.launch.py`, `vslam.launch.py`, `nav.launch.py`, `handheld_slam.launch.py`), Nav2 configs, robot driver config |
 | `src/roomba_perception` | VSLAM watchdog/odometry filter with wheel bridging, EKF input conditioning (`ekf_inputs`), floor obstacle detection, explorer, ignore zones, nav coach, person detector, IMU calibration |
-| `src/roomba_rs` | Rust ports of the robot's ROS 2 nodes (rclrs): `floor_obstacles`, `ekf_inputs`, `vslam_watchdog`, `map_gap_filler`, `ignore_zones`, `roomba_driver`, `web_server`, `set_password` and `explorer` (same topics, services, parameters, files and output as the Python nodes at a fraction of the CPU; `vendor/` holds generated Rust bindings for the Isaac ROS VSLAM interfaces). `tf_buffer`/`tf_listener` give rclrs nodes a tf2-equivalent TF buffer (bit-identical lookups). `rust_nodes:=false` switches back to the Python nodes |
+| `src/roomba_rs` | Rust ports of the robot's ROS 2 nodes (rclrs): `floor_obstacles`, `ekf_inputs`, `vslam_watchdog`, `map_gap_filler`, `ignore_zones`, `roomba_driver`, `web_server`, `set_password`, `explorer` and `nav_coach` (same topics, services, parameters, files and output as the Python nodes at a fraction of the CPU; `vendor/` holds generated Rust bindings for the Isaac ROS VSLAM interfaces). `tf_buffer`/`tf_listener` give rclrs nodes a tf2-equivalent TF buffer (bit-identical lookups). `rust_nodes:=false` switches back to the Python nodes |
 | `src/roomba_web` | Web app on port 8080: live map, robot status, drive pad, tap-to-go navigation, login (the page, and the Python server used with `rust_nodes:=false`) |
 | `src/mynteye_d1000_driver` | ROS 2 node for the MYNT EYE D1000 stereo/depth/IMU camera |
 | `src/basalt_vio_ros` | ROS 2 wrapper for Basalt visual-inertial odometry |
@@ -86,7 +86,8 @@ no drivers), steers the explorer with commands and records costmaps, TF, sensors
 and the nodes' outputs; `tools/ab_explorer_offline.py` drives both explorers with scripted houses
 (doors, invisible railings, bumps, cliffs, low battery, TF loss, a scripted NavigateToPose server and
 parameter services) and that recording, comparing every goal, cancel, status, mark and log line plus
-the frontier goals on every costmap.
+the frontier goals on every costmap; `tools/ab_nav_coach_offline.py` does the same for nav_coach's
+instructions and `tools/ab_explorer_cpu.sh` measures CPU and memory of both pairs.
 
 ## Run
 

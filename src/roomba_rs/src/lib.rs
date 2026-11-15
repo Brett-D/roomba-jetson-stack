@@ -10,6 +10,7 @@ pub mod floor;
 pub mod gap_filler;
 pub mod geometry;
 pub mod kinematics;
+pub mod nav_coach;
 pub mod node_params;
 pub mod oi;
 pub mod roomba;
