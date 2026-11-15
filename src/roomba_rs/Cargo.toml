@@ -32,6 +32,14 @@ path = "src/bin/ignore_zones.rs"
 name = "roomba_driver"
 path = "src/bin/roomba_driver.rs"
 
+[[bin]]
+name = "web_server"
+path = "src/bin/web_server.rs"
+
+[[bin]]
+name = "set_password"
+path = "src/bin/set_password.rs"
+
 [dependencies]
 anyhow = "1"
 # Async service callbacks hand requests to the driver's service thread (rclrs uses futures 0.3 too).
@@ -44,6 +52,23 @@ ros-env = "0.3"
 # preserve_order: zones keep their key order like Python dicts; float_roundtrip: exact floats
 serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
+# web_server: HTTP/websocket server, login (scrypt), multipart login forms
+base64 = "0.23"
+bytes = "1"
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+getrandom = "0.4"
+http-body-util = "0.1"
+httpdate = "1"
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+multer = "3"
+scrypt = { version = "0.12", default-features = false }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "macros"] }
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
+
+[build-dependencies]
+# compiles src/web/codecs.c (JPEG/PNG through the system libjpeg-turbo and libpng)
+cc = "1"
 
 [profile.release]
 opt-level = 3

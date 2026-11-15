@@ -13,8 +13,8 @@ The serial driver lives in its own repository and is included here as a submodul
 |---|---|
 | `src/roomba_bringup` | Launch files (`robot.launch.py`, `vslam.launch.py`, `nav.launch.py`, `handheld_slam.launch.py`), Nav2 configs, robot driver config |
 | `src/roomba_perception` | VSLAM watchdog/odometry filter with wheel bridging, EKF input conditioning (`ekf_inputs`), floor obstacle detection, explorer, ignore zones, nav coach, person detector, IMU calibration |
-| `src/roomba_rs` | Rust ports of hot-path nodes (rclrs): `floor_obstacles`, `ekf_inputs`, `vslam_watchdog`, `map_gap_filler`, `ignore_zones` and the Roomba serial driver `roomba_driver` (same topics, services, parameters, files and output as the Python nodes at a fraction of the CPU; `vendor/` holds generated Rust bindings for the Isaac ROS VSLAM interfaces). `tf_buffer`/`tf_listener` give rclrs nodes a tf2-equivalent TF buffer (bit-identical lookups). `rust_nodes:=false` switches back to the Python nodes |
-| `src/roomba_web` | Web app on port 8080: live map, robot status, drive pad, tap-to-go navigation, login |
+| `src/roomba_rs` | Rust ports of the robot's ROS 2 nodes (rclrs): `floor_obstacles`, `ekf_inputs`, `vslam_watchdog`, `map_gap_filler`, `ignore_zones`, `roomba_driver`, `web_server` and `set_password` (same topics, services, parameters, files and output as the Python nodes at a fraction of the CPU; `vendor/` holds generated Rust bindings for the Isaac ROS VSLAM interfaces). `tf_buffer`/`tf_listener` give rclrs nodes a tf2-equivalent TF buffer (bit-identical lookups). `rust_nodes:=false` switches back to the Python nodes |
+| `src/roomba_web` | Web app on port 8080: live map, robot status, drive pad, tap-to-go navigation, login (the page, and the Python server used with `rust_nodes:=false`) |
 | `src/mynteye_d1000_driver` | ROS 2 node for the MYNT EYE D1000 stereo/depth/IMU camera |
 | `src/basalt_vio_ros` | ROS 2 wrapper for Basalt visual-inertial odometry |
 | `src/roomba-serial-ros2` | Roomba Open Interface driver (submodule) |
@@ -77,6 +77,10 @@ Roomba on a pseudo-terminal (scripted sensors, bumps, cliffs, charging, bad chec
 dropouts, sleep, reset); `tools/ab_driver.sh` runs both drivers through the same scenario
 (`tools/ab_driver_harness.py`) and `tools/ab_driver_compare.py` compares the serial bytes, topics,
 service responses, logs and shutdown bytes; `tools/ab_driver_cpu.sh` measures CPU.
+`tools/ab_web.sh` runs both web servers side by side on scripted topics and compares every HTTP
+response (all routes, methods and login states), websocket state, MJPEG frame and published command;
+`tools/ab_web_images.py` checks the camera preview JPEGs and map PNGs against OpenCV byte for byte
+and `tools/ab_web_cpu.sh` measures CPU and memory with a recorded drive and a browser-like client.
 
 ## Run
 
@@ -88,7 +92,7 @@ service responses, logs and shutdown bytes; `tools/ab_driver_cpu.sh` measures CP
 
 Then open `http://<jetson-ip>:8080` and wait for **Tracking OK**. Wake the Roomba first (press Clean) if its lights are off.
 The web login password is generated on first run and stored in `~/.config/roomba_web/initial_password`;
-change it with `ros2 run roomba_web set_password`.
+change it with `ros2 run roomba_web set_password` (or `ros2 run roomba_rs set_password`; same file).
 
 ### Pipelines A (default) and B (GPU)
 

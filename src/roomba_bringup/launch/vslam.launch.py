@@ -369,8 +369,11 @@ def generate_launch_description():
         # people:=true, so with the detector off every bump mark was silently dropped).
     )
 
+    # Rust port (roomba_rs) by default: same routes, login, websocket state, images and commands
+    # (tools/ab_web.sh); it serves roomba_web's page. rust_nodes:=false runs the Python server.
     web_app = Node(
-        package='roomba_web',
+        package=PythonExpression(["'roomba_rs' if '", LaunchConfiguration('rust_nodes'),
+                                  "' == 'true' else 'roomba_web'"]),
         executable='web_server',
         name='web_server',
         output='screen',

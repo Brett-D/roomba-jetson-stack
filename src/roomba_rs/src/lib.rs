@@ -16,6 +16,7 @@ pub mod static_tf;
 pub mod tf_buffer;
 pub mod tf_listener;
 pub mod watchdog;
+pub mod web;
 pub mod zones;
 
 /// Restores the default action (terminate) for SIGINT and SIGTERM. A process started in the
