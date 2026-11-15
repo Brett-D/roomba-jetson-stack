@@ -20,6 +20,10 @@ path = "src/bin/ekf_inputs.rs"
 name = "vslam_watchdog"
 path = "src/bin/vslam_watchdog.rs"
 
+[[bin]]
+name = "map_gap_filler"
+path = "src/bin/map_gap_filler.rs"
+
 [dependencies]
 anyhow = "1"
 # Generated bindings for NVIDIA's message package (its debs ship none), see vendor/.../regenerate.sh

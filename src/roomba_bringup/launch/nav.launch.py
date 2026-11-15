@@ -71,8 +71,10 @@ def generate_launch_description():
                      value_type=float),
              }]),
         # Joins dotted obstacles in RTAB-Map's grid (railing posts) into solid walls for the costmaps.
-        Node(package='roomba_perception', executable='map_gap_filler', name='map_gap_filler',
-             output='screen'),
+        # Rust port: the same grid cell for cell (tools/ab_map_gap_filler_offline.py), ~20x faster.
+        Node(package=PythonExpression(["'roomba_rs' if '", LaunchConfiguration('rust_nodes'),
+                                       "' == 'true' else 'roomba_perception'"]),
+             executable='map_gap_filler', name='map_gap_filler', output='screen'),
         Node(package='nav2_controller', executable='controller_server', name='controller_server', output='screen',
              parameters=[params], remappings=[('cmd_vel', 'cmd_vel_nav')]),
         Node(package='nav2_planner', executable='planner_server', name='planner_server', output='screen',

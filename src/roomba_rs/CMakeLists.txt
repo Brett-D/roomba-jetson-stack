@@ -9,7 +9,7 @@ find_package(ament_cmake REQUIRED)
 find_program(CARGO cargo HINTS "$ENV{HOME}/.cargo/bin" REQUIRED)
 
 set(CARGO_TARGET_DIR "${CMAKE_CURRENT_BINARY_DIR}/cargo")
-set(NODES floor_obstacles ekf_inputs vslam_watchdog)
+set(NODES floor_obstacles ekf_inputs vslam_watchdog map_gap_filler)
 
 add_custom_target(cargo_build ALL
   COMMAND ${CMAKE_COMMAND} -E env --unset=MAKEFLAGS --unset=MFLAGS CARGO_TARGET_DIR=${CARGO_TARGET_DIR} ${CARGO} build --release --locked

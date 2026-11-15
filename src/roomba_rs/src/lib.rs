@@ -1,7 +1,9 @@
 //! Processing used by the Rust nodes, kept free of ROS types so it can be unit tested - except
 //! `tf_listener`, the /tf subscriptions feeding `tf_buffer` (tf2's BufferCore for rclrs nodes).
+pub mod cv;
 pub mod ekf;
 pub mod floor;
+pub mod gap_filler;
 pub mod geometry;
 pub mod static_tf;
 pub mod tf_buffer;
