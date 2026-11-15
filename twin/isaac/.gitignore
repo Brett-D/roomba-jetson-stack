@@ -1,0 +1,19 @@
+# Big or generated twin files live outside git (E:\twin\...), but keep strays out too.
+*.usd
+*.usdc
+*.usdz
+*.obj
+*.mtl
+*.ply
+*.pgm
+*.onnx
+*.engine
+*.pt
+*.png
+*.jpg
+*.npz
+datasets/
+assets/
+outputs/
+runs/
+__pycache__/
