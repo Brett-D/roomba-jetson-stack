@@ -13,7 +13,7 @@ The serial driver lives in its own repository and is included here as a submodul
 |---|---|
 | `src/roomba_bringup` | Launch files (`robot.launch.py`, `vslam.launch.py`, `nav.launch.py`, `handheld_slam.launch.py`), Nav2 configs, robot driver config |
 | `src/roomba_perception` | VSLAM watchdog/odometry filter with wheel bridging, EKF input conditioning (`ekf_inputs`), floor obstacle detection, explorer, ignore zones, nav coach, person detector, IMU calibration |
-| `src/roomba_rs` | Rust ports of hot-path nodes (rclrs): `floor_obstacles`, `ekf_inputs` and `vslam_watchdog` (same topics, parameters and output as the Python nodes at 1/7 to 1/12 of the CPU; `vendor/` holds generated Rust bindings for the Isaac ROS VSLAM interfaces). `rust_nodes:=false` switches back to the Python nodes |
+| `src/roomba_rs` | Rust ports of hot-path nodes (rclrs): `floor_obstacles`, `ekf_inputs`, `vslam_watchdog`, `map_gap_filler` and `ignore_zones` (same topics, parameters, files and output as the Python nodes at a fraction of the CPU; `vendor/` holds generated Rust bindings for the Isaac ROS VSLAM interfaces). `tf_buffer`/`tf_listener` give rclrs nodes a tf2-equivalent TF buffer (bit-identical lookups). `rust_nodes:=false` switches back to the Python nodes |
 | `src/roomba_web` | Web app on port 8080: live map, robot status, drive pad, tap-to-go navigation, login |
 | `src/mynteye_d1000_driver` | ROS 2 node for the MYNT EYE D1000 stereo/depth/IMU camera |
 | `src/basalt_vio_ros` | ROS 2 wrapper for Basalt visual-inertial odometry |
@@ -66,7 +66,12 @@ frame, plus CPU), `tools/ab_ekf_offline.py` (same message sequence into both, ev
 and `tools/ab_ekf_inputs.sh` (CPU). For the watchdog, `tools/record_vio_replay.sh` first replays a
 raw recording through the VIO and records its output; `tools/ab_watchdog_offline.py` then feeds that
 to both watchdogs (TF, odometry, status, service calls and logs compared, optionally with injected
-faults) and `tools/ab_watchdog.sh` measures CPU.
+faults) and `tools/ab_watchdog.sh` measures CPU. `tools/ab_tf_buffer.py` compares the Rust TF buffer
+with tf2 on recorded /tf. `tools/record_map_replay.sh` replays a raw recording through RTAB-Map and
+records its grid and path; `tools/ab_map_gap_filler_offline.py` compares the filled grids cell for
+cell and `tools/ab_ignore_zones_offline.py` the zone outputs (JSON, masks, markers, zones file) on
+scripted and random commands, clicks and bump marks; `tools/ab_scene_filter.py` checks the zone/line
+of sight helpers and `tools/ab_zones_gap_filler_cpu.sh` measures CPU and memory of both pairs.
 
 ## Run
 
