@@ -111,7 +111,10 @@ class RosState(Node):
                                  lambda m: self._on_dets(m, 'excluded'), QoSProfile(depth=5))
         # RTAB-Map publishes the grid latched (transient local) and only on change.
         latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
-        self.create_subscription(OccupancyGrid, '/rtabmap/map', self._on_map, latched)
+        # Prefer the planner's map (gaps filled, lined-up railing posts joined) when it exists.
+        self.create_subscription(OccupancyGrid, '/rtabmap/map', lambda m: self._on_map(m, False), latched)
+        self.create_subscription(OccupancyGrid, '/rtabmap/map_filled', lambda m: self._on_map(m, True), latched)
+        self.last_filled_map = -1e9
         self.create_subscription(Path, '/rtabmap/mapPath', self._on_path, QoSProfile(depth=1))
         self.create_subscription(
             String, '/perception/ignore_zones', self._on_zones,
@@ -235,7 +238,11 @@ class RosState(Node):
         with self.lock:
             self.dets[kind] = (time.monotonic(), out)
 
-    def _on_map(self, msg):
+    def _on_map(self, msg, filled=False):
+        if filled:
+            self.last_filled_map = time.monotonic()
+        elif time.monotonic() - self.last_filled_map < 10.0:
+            return
         info = msg.info
         grid = np.asarray(msg.data, dtype=np.int16).reshape(info.height, info.width)
         img = np.zeros((info.height, info.width, 4), np.uint8)  # BGRA, unknown = transparent
