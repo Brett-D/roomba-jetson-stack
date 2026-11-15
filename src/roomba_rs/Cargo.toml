@@ -52,6 +52,10 @@ path = "src/bin/nav_coach.rs"
 name = "person_detector"
 path = "src/bin/person_detector.rs"
 
+[[bin]]
+name = "twin2d"
+path = "src/bin/twin2d.rs"
+
 [dependencies]
 anyhow = "1"
 # Async service callbacks hand requests to the driver's service thread (rclrs uses futures 0.3 too).
@@ -63,6 +67,9 @@ rclrs = "0.8"
 ros-env = "0.3"
 # preserve_order: zones keep their key order like Python dicts; float_roundtrip: exact floats
 serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
+# twin2d: scenario and map YAML files
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 # web_server: HTTP/websocket server, login (scrypt), multipart login forms
 base64 = "0.23"

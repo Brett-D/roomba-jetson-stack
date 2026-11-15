@@ -21,6 +21,7 @@ pub mod static_tf;
 pub mod tf_buffer;
 pub mod tf_listener;
 pub mod trt;
+pub mod twin;
 pub mod watchdog;
 pub mod web;
 pub mod zones;

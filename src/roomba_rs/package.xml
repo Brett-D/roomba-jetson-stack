@@ -3,7 +3,7 @@
 <package format="3">
   <name>roomba_rs</name>
   <version>0.1.0</version>
-  <description>Rust ports of the Roomba robot's ROS 2 nodes (floor_obstacles, ekf_inputs, vslam_watchdog, map_gap_filler, ignore_zones, roomba_driver, web_server, set_password, explorer, nav_coach, person_detector). Needs a Rust toolchain (rustup) and libclang-dev; cargo fetches rclrs. person_detector also needs TensorRT, CUDA and OpenCV dev files (JetPack).</description>
+  <description>Rust ports of the Roomba robot's ROS 2 nodes (floor_obstacles, ekf_inputs, vslam_watchdog, map_gap_filler, ignore_zones, roomba_driver, web_server, set_password, explorer, nav_coach, person_detector) and twin2d, the 2D digital twin of the house and the robot. Needs a Rust toolchain (rustup) and libclang-dev; cargo fetches rclrs. person_detector also needs TensorRT, CUDA and OpenCV dev files (JetPack).</description>
   <maintainer email="brett@brettsbox.com">Brett</maintainer>
   <license>MIT</license>
 
@@ -18,6 +18,8 @@
   <depend>nav2_msgs</depend>
   <depend>visualization_msgs</depend>
   <depend>vision_msgs</depend>
+  <depend>action_msgs</depend>
+  <depend>rcl_interfaces</depend>
   <!-- person_detector: native/person_shim.cpp links TensorRT (libnvinfer-dev, part of JetPack; no
        rosdep key), the CUDA runtime and OpenCV 4 -->
   <build_depend>cuda-toolkit</build_depend>

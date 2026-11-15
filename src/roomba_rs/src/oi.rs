@@ -349,6 +349,34 @@ pub fn decode(packet_id: u8, data: &[u8]) -> Result<SensorValues, String> {
     Ok(out)
 }
 
+/// The data bytes the robot sends for a packet or group, from each packet's raw value (`raw(id)`
+/// for ids 7..=58: the byte or 16-bit word as sent, e.g. the bump/wheel-drop bits of packet 7).
+/// The inverse of [`decode`] (the twin's Open Interface uses it).
+pub fn encode(packet_id: u8, raw: &impl Fn(u8) -> i32) -> Result<Vec<u8>, String> {
+    let mut out = Vec::with_capacity(packet_size(packet_id)?);
+    for pid in packet_range(packet_id)? {
+        let v = raw(pid);
+        match PACKETS[(pid - 7) as usize].0 {
+            U8 | I8 => out.push(v as u8),
+            U16 | I16 => out.extend_from_slice(&(v as u16).to_be_bytes()),
+        }
+    }
+    Ok(out)
+}
+
+/// A whole stream frame [19][n][id][data]...[checksum] for the requested ids.
+pub fn encode_stream_frame(ids: &[u8], raw: &impl Fn(u8) -> i32) -> Result<Vec<u8>, String> {
+    let mut body = vec![STREAM_HEADER, 0];
+    for &pid in ids {
+        body.push(pid);
+        body.extend(encode(pid, raw)?);
+    }
+    body[1] = (body.len() - 2) as u8;
+    let sum = body.iter().fold(0u8, |a, &b| a.wrapping_add(b));
+    body.push(sum.wrapping_neg());
+    Ok(body)
+}
+
 /// Decode the [id][data][id][data]... body of a stream frame.
 pub fn decode_stream_payload(payload: &[u8]) -> Result<SensorValues, String> {
     let mut out = SensorValues::default();
@@ -883,5 +911,36 @@ mod tests {
         assert_eq!(mode_str(None), "None");
         assert_eq!(Field::from_name("bump_right"), Some(F::BumpRight));
         assert_eq!(F::Stasis.name(), "stasis");
+    }
+
+    #[test]
+    fn encode_is_the_inverse_of_decode() {
+        assert_eq!(encode(3, &|pid| match pid {
+            21 => 4,
+            22 => 14695,
+            23 => 398,
+            24 => 18,
+            25 => 2202,
+            _ => 2696,
+        })
+        .unwrap(), hex("043967018e12089a0a88"));
+        let raw = |pid: u8| match pid {
+            7 => 0b0110,
+            23 => -1500,
+            24 => -12,
+            43 => 64000,
+            47 => 250,
+            _ => pid as i32,
+        };
+        let frame = encode_stream_frame(&STREAM_PRIMARY, &raw).unwrap();
+        assert_eq!(frame.len(), 3 + stream_payload_length(&STREAM_PRIMARY).unwrap());
+        let mut parser = StreamParser::new(&[&STREAM_PRIMARY]).unwrap();
+        let v = parser.feed(&frame).pop().unwrap();
+        assert!(v.flag(F::BumpLeft) && v.flag(F::WheelDropRight) && !v.flag(F::BumpRight));
+        assert_eq!(v.get(F::CurrentMa), Some(-1500));
+        assert_eq!(v.get(F::TemperatureC), Some(-12));
+        assert_eq!(v.get(F::LeftEncoderCounts), Some(64000));
+        assert_eq!(v.get(F::LightBumpFrontLeftSignal), Some(250));
+        assert_eq!(v.get(F::OiMode), Some(35));
     }
 }
