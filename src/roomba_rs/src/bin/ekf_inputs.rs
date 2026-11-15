@@ -98,9 +98,20 @@ fn main() -> Result<()> {
     let context = Context::default_from_env()?;
     let mut executor = context.create_basic_executor();
     let node = executor.create_node("ekf_inputs")?;
-    let f = |name: &str, d: f64| -> Result<f64> { Ok(node.declare_parameter(name).default(d).mandatory()?.get()) };
+    // rclrs undeclares a parameter when its handle is dropped; keep them so `ros2 param` sees them.
+    let handles = std::cell::RefCell::new(Vec::<Box<dyn std::any::Any>>::new());
+    let keep = |p: Box<dyn std::any::Any>| handles.borrow_mut().push(p);
+    let f = |name: &str, d: f64| -> Result<f64> {
+        let p = node.declare_parameter(name).default(d).mandatory()?;
+        let v = p.get();
+        keep(Box::new(p));
+        Ok(v)
+    };
     let s = |name: &str, d: &str| -> Result<String> {
-        Ok(node.declare_parameter::<Arc<str>>(name).default(d.into()).mandatory()?.get().to_string())
+        let p = node.declare_parameter::<Arc<str>>(name).default(d.into()).mandatory()?;
+        let v = p.get().to_string();
+        keep(Box::new(p));
+        Ok(v)
     };
 
     let wheel = WheelParams {
@@ -116,7 +127,9 @@ fn main() -> Result<()> {
     let fallback_sd = f("gyro_sd", 0.03)?;
     let motion_ratio = f("gyro_motion_sd_ratio", 0.02)?;
     let turn_on_sd = f("bias_turn_on_sd", 0.001)?;
-    let average = node.declare_parameter("imu_average").default(4i64).mandatory()?.get().max(1) as usize;
+    let average_p = node.declare_parameter("imu_average").default(4i64).mandatory()?;
+    let average = average_p.get().max(1) as usize;
+    keep(Box::new(average_p));
     let still_s = f("still_time_s", 1.0)?;
     let bias_tau = f("bias_time_constant_s", 5.0)?;
     let wheel_max_age = f("wheel_max_age_s", 0.5)?;
