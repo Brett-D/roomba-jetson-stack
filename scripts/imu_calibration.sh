@@ -14,7 +14,8 @@ fi
 source /opt/ros/jazzy/setup.bash
 source ~/roomba_ws/install/setup.bash
 ~/stop_slam.sh
-ros2 launch mynteye_d1000_driver d1000.launch.py &
+# graceful.py: started in the background, plain ros2 launch would ignore the SIGINT below.
+"$(dirname "$(readlink -f "$0")")/graceful.py" ros2 launch mynteye_d1000_driver d1000.launch.py &
 DRIVER=$!
 sleep 10
 ros2 run roomba_perception imu_calibrate --ros-args -p duration_s:=$((HOURS * 3600)).0

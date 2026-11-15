@@ -18,7 +18,7 @@ The serial driver lives in its own repository and is included here as a submodul
 | `src/mynteye_d1000_driver` | ROS 2 node for the MYNT EYE D1000 stereo/depth/IMU camera |
 | `src/basalt_vio_ros` | ROS 2 wrapper for Basalt visual-inertial odometry |
 | `src/roomba-serial-ros2` | Roomba Open Interface driver (submodule) |
-| `scripts/` | `run_robot.sh`, `stop_slam.sh`, `record_run.sh` / `compare_pipelines.sh` (A vs B on a recorded drive), mapping/replay helpers, setup scripts |
+| `scripts/` | `run_robot.sh`, `stop_slam.sh`, `graceful.py` (`ros2 launch` that SIGTERM / SIGINT stop cleanly), `record_run.sh` / `compare_pipelines.sh` (A vs B on a recorded drive), mapping/replay helpers, setup scripts |
 | `tools/` | Probes and diagnostics (motion step test, costmap/obstacle probes, map render, TF/drift/CPU-GPU checks, comparison monitor/renderer, Python vs Rust A/B checks); `tools/oi_tests/` holds early serial/OI bench scripts |
 | `docs/` | Wiring and power diagrams |
 | `hardware/platform` | 3D-printed platform: STLs, fit tests and the Python generator |
@@ -101,9 +101,15 @@ and latency at the camera rate.
 ~/roomba_ws/scripts/run_robot.sh            # reuse the saved map, or start one if none exists
 ~/roomba_ws/scripts/run_robot.sh mapping    # start a new map (old one backed up to ~/maps/backup)
 ~/roomba_ws/scripts/stop_slam.sh            # stop everything
+kill $(cat ~/robot.pid)                     # or stop the launch itself (SIGTERM; SIGINT works too)
 ```
 
 Then open `http://<jetson-ip>:8080` and wait for **Tracking OK**. Wake the Roomba first (press Clean) if its lights are off.
+The log is `~/robot.log`. The run scripts start `ros2 launch` through `scripts/graceful.py`: started in the
+background, plain `ros2 launch` ignores SIGINT and dies on SIGTERM, leaving every node running. Through it,
+SIGTERM or SIGINT to the launch (`~/robot.pid`, or a service manager's stop) shuts everything down like Ctrl-C:
+each node gets SIGINT, then if still running SIGTERM 5 s later and SIGKILL only 85 s after that
+(`sigkill_timeout:=`), so RTAB-Map can finish writing its map database.
 The web login password is generated on first run and stored in `~/.config/roomba_web/initial_password`;
 change it with `ros2 run roomba_web set_password` (or `ros2 run roomba_rs set_password`; same file).
 

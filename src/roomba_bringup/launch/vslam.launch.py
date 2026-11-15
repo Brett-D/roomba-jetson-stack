@@ -160,6 +160,12 @@ def generate_launch_description():
                                           'wheels + gyro + VIO (config/ekf_robot.yaml)'),
         DeclareLaunchArgument('use_sim_time', default_value='false',
                               description='true when replaying a bag with --clock'),
+        # Stopping (Ctrl-C, or SIGTERM / SIGINT through scripts/graceful.py): launch sends every
+        # process SIGINT, SIGTERM 5 s later (sigterm_timeout) and SIGKILL this much later still.
+        # RTAB-Map writes its map database while it shuts down, which takes a while for a big map:
+        # launch's default 5 s could kill it mid-write. Applies to every process of the launch.
+        DeclareLaunchArgument('sigkill_timeout', default_value='85',
+                              description='s from SIGTERM to SIGKILL when stopping (RTAB-Map saves its map)'),
         SetParameter(name='use_sim_time',
                      value=ParameterValue(LaunchConfiguration('use_sim_time'), value_type=bool)),
         OpaqueFunction(function=_resolve_mode),

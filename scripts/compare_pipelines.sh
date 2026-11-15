@@ -85,7 +85,10 @@ run_pipeline() {  # run_pipeline A|B
   else ARGS=("${ARGS_B[@]}"); NODES=(/visual_slam_node /vslam_watchdog /ekf_filter_node /nvblox_node); fi
   echo "=== Pipeline $P: ${ARGS[*]}"
   rm -f "$PREFIX.db" "$PREFIX".json "$PREFIX"_*.json "$PREFIX"_*.npz "$PREFIX"_*.npy "$PREFIX"_*.txt
-  setsid ros2 launch roomba_bringup robot.launch.py "${COMMON[@]}" "${ARGS[@]}" database_path:="$PREFIX.db" \
+  # graceful.py: the SIGINT from stop_slam.sh reaches the launch (started in the background, plain
+  # ros2 launch ignores it), which stops every node and lets RTAB-Map save its database.
+  setsid "$WS/scripts/graceful.py" ros2 launch roomba_bringup robot.launch.py "${COMMON[@]}" "${ARGS[@]}" \
+    database_path:="$PREFIX.db" \
     > "$PREFIX.log" 2>&1 < /dev/null &
   if ! wait_nodes 150 /rtabmap/rtabmap /collision_monitor "${NODES[@]}"; then
     ~/stop_slam.sh > /dev/null; return 1

@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Stop the SLAM / robot launch and every node it started.
 pkill -INT -f "ros2 bag record" 2>/dev/null
+# The launch (started through scripts/graceful.py) stops its nodes on SIGINT like Ctrl-C; the
+# kills below are a safety net for anything left over (or a launch started without graceful.py).
 pkill -INT -f "ros2 launch roomba_bringup" 2>/dev/null
 # rtabmap saves its database on shutdown (can take a while for big maps): wait for it
 # before anything gets killed harder, or the map can be truncated.
@@ -29,4 +31,5 @@ sleep 1
 for f in /dev/shm/fastrtps_* /dev/shm/sem.fastrtps_*; do
     [ -e "$f" ] && ! fuser -s "$f" 2>/dev/null && rm -f "$f"
 done
+rm -f ~/robot.pid   # written by run_robot.sh
 pgrep -af 'rtabmap|foxglove|d1000_node|imu_filter|republish|component_container|person_detector|ignore_zones|vslam_watchdog|basalt_vio_node|web_server|nav2_|floor_obstacles|nav_coach|explorer|roomba_driver|static_transform|ekf_node|ekf_inputs|nvblox_node' | grep -v pgrep || echo "all stopped"

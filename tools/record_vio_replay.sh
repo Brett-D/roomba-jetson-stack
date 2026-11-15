@@ -40,7 +40,9 @@ print(f'ready: {len(transforms)} static transforms', flush=True)
 rclpy.spin(n)
 EOF
 TFPID=$!
-setsid ros2 launch roomba_bringup robot.launch.py mode:=mapping database_path:="$DB" camera:=false driver:=false \
+# graceful.py: the SIGINT from stop_slam.sh reaches the launch (plain ros2 launch ignores it here).
+setsid "$(dirname "$(readlink -f "$0")")/../scripts/graceful.py" ros2 launch roomba_bringup robot.launch.py \
+  mode:=mapping database_path:="$DB" camera:=false driver:=false \
   use_sim_time:=true people:=false foxglove:=false web:=false nav:=false "$@" > "$OUT.launch.log" 2>&1 < /dev/null &
 for i in $(seq 1 75); do ros2 node list 2>/dev/null | grep -qx /vslam_watchdog && break; sleep 2; done
 sleep 10  # VIO node and RTAB-Map bring-up

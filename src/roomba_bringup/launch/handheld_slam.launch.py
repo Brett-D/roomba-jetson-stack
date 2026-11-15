@@ -25,6 +25,10 @@ def generate_launch_description():
         DeclareLaunchArgument('database_path',
                               default_value=os.path.expanduser('~/maps/handheld.db')),
         DeclareLaunchArgument('foxglove', default_value='true'),
+        # Stopping: SIGINT, SIGTERM 5 s later, SIGKILL this much later still; RTAB-Map writes its
+        # map database while it shuts down (launch's default 5 s could kill it mid-write).
+        DeclareLaunchArgument('sigkill_timeout', default_value='85',
+                              description='s from SIGTERM to SIGKILL when stopping (RTAB-Map saves its map)'),
     ]
 
     camera = IncludeLaunchDescription(
