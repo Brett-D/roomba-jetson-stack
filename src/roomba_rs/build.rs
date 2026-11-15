@@ -35,9 +35,12 @@ fn main() {
         .include(&opencv)
         .flag_if_supported("-Wno-deprecated-declarations")
         .flag_if_supported("-Wno-unused-parameter");
+    // libnvinfer-dev puts NvInfer.h in the multiarch include dir (aarch64 on the Jetson, x86_64 on a PC)
+    let arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
+    let multiarch = format!("/usr/include/{arch}-linux-gnu/NvInfer.h");
     if let Some(trt) = env_path("TENSORRT_INCLUDE") {
         build.include(trt);
-    } else if !Path::new("/usr/include/aarch64-linux-gnu/NvInfer.h").exists() && !Path::new("/usr/include/NvInfer.h").exists() {
+    } else if !Path::new(&multiarch).exists() && !Path::new("/usr/include/NvInfer.h").exists() {
         panic!("TensorRT headers (NvInfer.h) not found: install libnvinfer-dev or set TENSORRT_INCLUDE");
     }
     build.compile("person_shim");
