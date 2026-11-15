@@ -119,14 +119,16 @@ def railing_polylines(plan):
             c = a['center']
             af = math.degrees(math.atan2(a['from_pt'][1] - c[1], a['from_pt'][0] - c[0]))
             at = math.degrees(math.atan2(a['to_pt'][1] - c[1], a['to_pt'][0] - c[0]))
-            pts = arc_points(c, a['radius'], af, at, a.get('clockwise', True)).tolist()
+            pts = arc_points(c, a['radius'], af, at, a.get('clockwise', True)).tolist() + list(rl.get('then', []))
             out.append({'name': rl['name'], 'pts': pts, 'outdoor': rl.get('outdoor', False)})
     return out
 
 
 def stair_void_polygon(plan):
-    """Drop-off polygon (pixels): outer stair edge, top step, then the well circle the long way round."""
+    """Drop-off polygon (pixels): explicit stair['void_poly'], else outer stair edge + the well circle the long way round."""
     st = plan['stair']
+    if 'void_poly' in st:
+        return [list(q) for q in st['void_poly']] + [list(st['void_poly'][0])]
     c, r = st['well_center'], st['well_radius']
     outer = list(st['outer_edge'])
     a_end = math.degrees(math.atan2(st['top_step'][1][1] - c[1], st['top_step'][1][0] - c[0]))
@@ -272,3 +274,28 @@ def evaluate(T, plan_pts, occ_pts, path_xy, floor_poly_m, void_poly_m, tol=0.15,
     out['scale'] = round(float(T['scale']), 4)
     out['mirror'] = bool(T['mirror'])
     return out
+
+
+def dump_plan(plan, path):
+    """Write a plan JSON compactly: one line per room / door / window / fixture / railing / stair key."""
+    def c(v):
+        return json.dumps(v, separators=(', ', ': '))
+    out = ['{']
+    keys = list(plan)
+    for k_i, k in enumerate(keys):
+        v = plan[k]
+        end = ',' if k_i < len(keys) - 1 else ''
+        if isinstance(v, list) and v and all(isinstance(x, (dict, str)) for x in v):
+            out.append(f' "{k}": [')
+            out += [f'  {c(x)}' + (',' if j < len(v) - 1 else '') for j, x in enumerate(v)]
+            out.append(f' ]{end}')
+        elif isinstance(v, dict):
+            out.append(f' "{k}": {{')
+            ks = list(v)
+            out += [f'  "{kk}": {c(v[kk])}' + (',' if j < len(ks) - 1 else '') for j, kk in enumerate(ks)]
+            out.append(f' }}{end}')
+        else:
+            out.append(f' "{k}": {c(v)}{end}')
+    out.append('}')
+    with open(path, 'w', newline='\n') as f:
+        f.write('\n'.join(out) + '\n')

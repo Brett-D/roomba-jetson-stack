@@ -28,6 +28,14 @@ ROLE_ASSETS = {
     'lamp': ['Lighting/FloorLamp', 'Lighting/BrassFloorLamp', 'Lighting/Candice'],
     'ottoman': ['Furniture/Chairs/Bevo_Ottoman'],
     'media': ['Furniture/MediaTables/CreveCoeur', 'Furniture/MediaTables/Soulard'],
+    # downstairs rooms
+    'sofa_big': ['Furniture/Sofas/LemaySofa_Left', 'Furniture/Sofas/LemaySofa_Right', 'Furniture/Sofas/Arnold'],
+    'coffee': ['Furniture/CoffeeTables/Midtown', 'Furniture/CoffeeTables/Make'],
+    'dining_table': ['Furniture/Tables/Whittershins'],
+    'dining_chair': ['Furniture/Chairs/Chair_Array', 'Furniture/Chairs/Chair_Wire'],
+    'stool': ['Furniture/BarStools/MapleBarStool', 'Furniture/BarStools/bar_stool'],
+    'shelf_big': ['Furniture/Bookshelves/Delmar', 'Furniture/Bookshelves/Costello'],
+    'ladder': ['Misc/Ladder'],
 }
 BED_SIZES = {'king': (1.95, 2.12), 'queen': (1.55, 2.08), 'full': (1.40, 1.98), 'twin': (1.0, 1.95)}
 
@@ -312,8 +320,64 @@ def furnish(plan, frame, wall_mask, void_px, catalog, rng, blobs, path_px):
                     p = catalog.pick('plant', rng)
                     if p:
                         F.place_against_wall(room, 'plant', *sorted(p['size_m'][:2], reverse=True), p, p['size_m'][2])
-        elif t == 'hallway':
+        elif t in ('hallway', 'entry'):
             for role in ('console', 'plant', 'console', 'plant'):
+                a_ = catalog.pick(role, rng)
+                if a_:
+                    F.place_against_wall(room, role, *sorted(a_['size_m'][:2], reverse=True), a_, a_['size_m'][2])
+        elif t in ('living', 'family'):
+            sofa = catalog.pick('sofa_big', rng)
+            if sofa:
+                sw_, sd_ = sorted(sofa['size_m'][:2], reverse=True)
+                item, slot = F.place_against_wall(room, 'sofa', sw_, sd_, sofa, sofa['size_m'][2], prefer=[0.5, 0.4, 0.6])
+                ct = catalog.pick('coffee', rng)
+                if item is not None and ct:
+                    a, b_, nrm, along = slot
+                    cw, cd = sorted(ct['size_m'][:2], reverse=True)
+                    c = along + nrm * (0.15 * frame.s + sd_ * frame.s + 0.45 * frame.s + cd * frame.s / 2)
+                    u = (b_ - a) / np.linalg.norm(b_ - a)
+                    F.add(room, 'table', c, cw, cd, math.atan2(u[1], u[0]), ct, ct['size_m'][2])
+            for role in ('media', 'armchair', 'armchair', 'lamp', 'plant'):
+                a_ = catalog.pick(role, rng)
+                if a_:
+                    F.place_against_wall(room, role, *sorted(a_['size_m'][:2], reverse=True), a_, a_['size_m'][2])
+        elif t == 'dining':
+            tb = catalog.pick('dining_table', rng)
+            free = F.room_free(room).astype(np.uint8)
+            if tb is not None and free.any():
+                dist = cv2.distanceTransform(free, cv2.DIST_L2, 5)
+                cy_, cx_ = np.unravel_index(np.argmax(dist), dist.shape)
+                tw = max(tb['size_m'][:2])
+                c_t = np.array([cx_, cy_], float)
+                if F.add(room, 'dining_table', c_t, tw, tw, 0.0, tb, tb['size_m'][2]):
+                    ch = catalog.pick('dining_chair', rng)
+                    for k in range(4):           # the footprint is committed as a square: chairs on its sides
+                        q = 2 * math.pi * k / 4
+                        v = np.array([math.cos(q), math.sin(q)])
+                        c = c_t + v * (tw / 2 + 0.42) * frame.s
+                        cw_, cd_ = sorted(ch['size_m'][:2], reverse=True)
+                        if F.add(room, 'chair', c, cw_, cd_, q + math.pi / 2, ch, ch['size_m'][2]):
+                            F.items[-1]['back_dir'] = [float(v[0]), float(-v[1])]
+            for role in ('console', 'plant'):
+                a_ = catalog.pick(role, rng)
+                if a_:
+                    F.place_against_wall(room, role, *sorted(a_['size_m'][:2], reverse=True), a_, a_['size_m'][2])
+        elif t == 'office':
+            for role in ('desk', 'tall', 'tall', 'armchair', 'plant'):
+                a_ = catalog.pick(role, rng)
+                if a_:
+                    F.place_against_wall(room, role, *sorted(a_['size_m'][:2], reverse=True), a_, a_['size_m'][2])
+        elif t == 'kitchen':
+            st_ = catalog.pick('stool', rng)
+            isl = [f for f in plan['fixtures'] if f['type'] == 'island' and f.get('room') == room['name']]
+            if st_ and isl:
+                x0, y0, x1, y1 = isl[0]['rect']
+                for fx in (0.2, 0.5, 0.8):
+                    c = np.array([x0 + (x1 - x0) * fx, y1 + 0.35 * frame.s])
+                    if F.add(room, 'stool', c, *sorted(st_['size_m'][:2], reverse=True), 0.0, st_, st_['size_m'][2]):
+                        F.items[-1]['back_dir'] = [0.0, -1.0]
+        elif t == 'garage':
+            for role in ('shelf_big', 'shelf_big', 'ladder', 'tall'):
                 a_ = catalog.pick(role, rng)
                 if a_:
                     F.place_against_wall(room, role, *sorted(a_['size_m'][:2], reverse=True), a_, a_['size_m'][2])

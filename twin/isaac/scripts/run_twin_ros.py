@@ -39,6 +39,8 @@ ap.add_argument('--speed', type=float, default=0.2)
 ap.add_argument('--record', default=None, help='directory for captured frames')
 ap.add_argument('--record-every', type=int, default=3, help='save every Nth published image frame')
 ap.add_argument('--drive-log', default=None, help='CSV of the path drive (1 Hz: pose, path index, stuck flag)')
+ap.add_argument('--unstick', action='store_true',
+                help='path survey: when stuck for 5 s, log it and teleport ~0.8 m further along the path')
 args, _ = ap.parse_known_args()
 
 # Bundled ROS 2 Jazzy: must be on the DLL path before rclpy / the bridge load.
@@ -290,6 +292,21 @@ if args.drive_log:
     drive_log = csv.writer(open(args.drive_log, 'w', newline=''))
     drive_log.writerow(['t', 'x', 'y', 'yaw_deg', 'path_idx', 'v_cmd', 'w_cmd', 'moved_5s_m', 'stuck'])
 hist = []      # (t, x, y) for the stuck detector
+stuck_events = []
+
+
+def teleport_ahead():
+    p0, _, _ = pose()
+    j = pp.i
+    while j < len(path) - 1 and math.hypot(path[j][0] - p0[0], path[j][1] - p0[1]) < 0.8:
+        j += 1
+    x_, y_, yaw_ = path[j]
+    art.set_world_poses(np.array([[x_, y_, float(p0[2])]], np.float32),
+                        np.array([[math.cos(yaw_ / 2), 0, 0, math.sin(yaw_ / 2)]], np.float32))
+    art.set_velocities(np.zeros((1, 6), np.float32))
+    pp.i = j
+    hist.clear()
+    return j
 print('LOOP_START', flush=True)
 
 while app.is_running():
@@ -321,6 +338,14 @@ while app.is_running():
                             pp.i if pp else -1, f'{v:.2f}', f'{w:.2f}', f'{moved:.3f}', stuck])
         if n_upd % 600 == 0:
             print(f'DRIVE t {t1:.0f} idx {pp.i if pp else -1} pose {p1[0]:.2f} {p1[1]:.2f} stuck {stuck}', flush=True)
+        if stuck and args.unstick and pp is not None:
+            j = teleport_ahead()
+            stuck_events.append({'t': round(t1, 1), 'x': round(float(p1[0]), 3), 'y': round(float(p1[1]), 3),
+                                 'path_idx': j})
+            print(f'STUCK t {t1:.0f} at {p1[0]:.2f} {p1[1]:.2f} -> teleported to path idx {j}', flush=True)
+        if pp is not None and pp.i >= len(path) - 1 and math.hypot(path[-1][0] - p1[0], path[-1][1] - p1[1]) < 0.25:
+            print('PATH_DONE', flush=True)
+            break
     t = SimulationManager.get_simulation_time()
     ck = Clock()
     ck.clock = stamp(t)
@@ -376,6 +401,11 @@ print(f'RUN_DONE sim {sim_s:.1f} s wall {wall_s:.1f} s rtf {sim_s / max(wall_s, 
       flush=True)
 if rec_dir:
     rec_csv.close()
+if args.drive_log:
+    import json as _json
+    with open(os.path.splitext(args.drive_log)[0] + '_stuck.json', 'w') as f:
+        _json.dump(stuck_events, f, indent=1)
+    print('STUCK_EVENTS', len(stuck_events), flush=True)
 SimulationManager.deregister_callback(imu_sub)
 tl.stop()
 node.destroy_node()

@@ -58,6 +58,8 @@ class TwinScene:
         self.look = look
         if look == 'remodel':
             self.house.GetReferences().AddReference(tc.REMODEL_USD)
+            if os.path.exists(tc.REMODEL_F1_USD):       # downstairs, visible through the stair well
+                self.stage.DefinePrim('/World/HouseF1', 'Xform').GetReferences().AddReference(tc.REMODEL_F1_USD)
             self.plan = json.load(open(tc.FLOORPLAN_JSON))
             self.obstacles = self._plan_obstacles()
             self.free_xy = self._plan_free_xy()

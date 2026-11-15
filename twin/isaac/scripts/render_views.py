@@ -19,6 +19,8 @@ ap.add_argument('--real', default=r'E:\twin\real_frames\left')
 ap.add_argument('--out', default=r'E:\twin\screens')
 ap.add_argument('--prefix', default=None)
 ap.add_argument('--dome', type=float, default=300.0)
+ap.add_argument('--floor1', action='store_true', help='also render the stacked downstairs (top-down, cutaway, stair views)')
+ap.add_argument('--skip-real', action='store_true', help='only the overview renders')
 args, _ = ap.parse_known_args()
 prefix = args.prefix if args.prefix is not None else f'{args.look}_'
 
@@ -80,6 +82,57 @@ Image.fromarray(grab('/World/TopCam', 1400, 1400, 24)).save(os.path.join(args.ou
 Image.fromarray(grab('/World/ObliqueCam', 1600, 900, 24)).save(os.path.join(args.out, f'{prefix}oblique.png'))
 for c in ceilings:
     UsdGeom.Imageable(c).MakeVisible()
+
+
+def look_at_cam(path, eye, target, focal=14.0):
+    cam = UsdGeom.Camera.Define(stage, path)
+    cam.CreateFocalLengthAttr(focal)
+    cam.CreateClippingRangeAttr(Gf.Vec2f(0.05, 100))
+    m = Gf.Matrix4d().SetLookAt(Gf.Vec3d(*eye), Gf.Vec3d(*target), Gf.Vec3d(0, 0, 1)).GetInverse()
+    UsdGeom.Xformable(cam).AddTransformOp().Set(m)
+    return path
+
+
+if args.floor1 and stage.GetPrimAtPath('/World/HouseF1'):
+    import json
+    f1 = json.load(open(os.path.join(os.path.dirname(tc.FLOORPLAN_JSON), 'floorplan_floor1.json')))
+    P = np.vstack([np.array(r['polygon']) for r in f1['rooms']])
+    c1 = (P.min(0) + P.max(0)) / 2
+    z1 = f1['floor_z_m']
+    up = stage.GetPrimAtPath('/World/House')
+    for c in ceilings:
+        UsdGeom.Imageable(c).MakeInvisible()
+    UsdGeom.Imageable(up).MakeInvisible()
+    top1 = UsdGeom.Camera.Define(stage, '/World/TopCamF1')
+    top1.CreateFocalLengthAttr(18.0)
+    top1.CreateHorizontalApertureAttr(20.955)
+    top1.CreateVerticalApertureAttr(20.955)
+    top1.CreateClippingRangeAttr(Gf.Vec2f(0.1, 100))
+    UsdGeom.Xformable(top1).AddTranslateOp().Set(Gf.Vec3d(float(c1[0]), float(c1[1]), z1 + 26.0))
+    Image.fromarray(grab('/World/TopCamF1', 1400, 1400, 24)).save(os.path.join(args.out, f'{prefix}floor1_topdown.png'))
+    UsdGeom.Imageable(up).MakeVisible()
+    # cutaway of both floors (all ceilings hidden), seen from outside
+    look_at_cam('/World/StackCam', (c1[0] - 14.0, c1[1] - 15.0, 9.0), (c1[0], c1[1], z1 + 1.0))
+    Image.fromarray(grab('/World/StackCam', 1600, 900, 24)).save(os.path.join(args.out, f'{prefix}stack_oblique.png'))
+    for c in ceilings:
+        UsdGeom.Imageable(c).MakeVisible()
+    # stair views: from the upstairs top step looking down, and from the entry looking up the stair
+    up_plan = json.load(open(tc.FLOORPLAN_JSON))
+    top_step = np.array(up_plan['stair_void']['top_step'])
+    vc = np.array(up_plan['stair_void']['polygon']).mean(0)
+    ts = top_step.mean(0)
+    d = (ts - vc) / np.linalg.norm(ts - vc)
+    look_at_cam('/World/StairTopCam', (ts[0] + d[0] * 1.2, ts[1] + d[1] * 1.2, 1.6), (vc[0], vc[1], -2.0), 12.0)
+    Image.fromarray(grab('/World/StairTopCam', 1280, 720, 24)).save(os.path.join(args.out, f'{prefix}stair_from_top.png'))
+    fd = [np.array(dr['segment']).mean(0) for dr in f1['doors'] if dr['id'] == 'front']
+    eye = fd[0] + (vc - fd[0]) / np.linalg.norm(vc - fd[0]) * 1.2 if fd else vc
+    look_at_cam('/World/EntryCam', (eye[0], eye[1], z1 + 1.5), (ts[0], ts[1], -0.8), 12.0)
+    Image.fromarray(grab('/World/EntryCam', 1280, 720, 24)).save(os.path.join(args.out, f'{prefix}entry_up_stair.png'))
+
+if args.skip_real:
+    print('VIEWS_DONE overviews only')
+    app.close()
+    sys.exit(0)
 
 poses = []
 for ln in open(tc.POSES_TXT):

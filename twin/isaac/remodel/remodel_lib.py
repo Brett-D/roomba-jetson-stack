@@ -122,6 +122,8 @@ def point_in_tri(p, a, b, c):
 
 def poly_mask(shape, poly_px):
     m = np.zeros(shape, np.uint8)
+    if poly_px is None or len(poly_px) < 3:
+        return m.astype(bool)
     cv2.fillPoly(m, [np.round(np.asarray(poly_px) * 8).astype(np.int32)], 1, shift=3)
     return m.astype(bool)
 
@@ -155,7 +157,8 @@ def stair_elements(outer_m, inner_m, steps, rise, bottom_z):
     for k in range(steps):
         poly = [o[k], o[k + 1], i[k + 1], i[k]]
         z_top = -(k + 1) * rise
-        els.append(prism(poly, bottom_z, z_top, 'stair_wood', 'stairs', True, name=f'step_{k:02d}'))
+        # a 0.4 m thick winding slab (open below, e.g. the storage under the stair), solid near the bottom
+        els.append(prism(poly, max(bottom_z, z_top - 0.4), z_top, 'stair_wood', 'stairs', True, name=f'step_{k:02d}'))
     return els
 
 
@@ -187,7 +190,8 @@ def railing_elements(pts_m, z0=0.0, spacing=BALUSTER_SPACING, post=0.022, height
 
 # ---------------------------------------------------------------- openings
 
-def window_elements(a, b, t, sill, head, wall_h=WALL_H):
+def window_elements(a, b, t, sill, head, wall_h=None):
+    wall_h = WALL_H if wall_h is None else wall_h
     els = []
     for z0, z1 in ((0.0, sill), (head, wall_h)):
         if z1 - z0 > 1e-3:
@@ -210,7 +214,8 @@ def window_elements(a, b, t, sill, head, wall_h=WALL_H):
     return els
 
 
-def door_frame_elements(a, b, t, head=DOOR_H, wall_h=WALL_H):
+def door_frame_elements(a, b, t, head=DOOR_H, wall_h=None):
+    wall_h = WALL_H if wall_h is None else wall_h
     els = []
     e = seg_box(a, b, t, head, wall_h, 'wall', 'wall')
     if e:
@@ -289,6 +294,13 @@ def fixture_elements(f, frame):
         els.append(box((cx, cy, 0.2), (0.38, 0.52, 0.4), yaw, 'ceramic', 'furniture'))
         # tank behind the bowl: local (0, -0.22) rotated by yaw
         els.append(box((cx + s * 0.22, cy - c * 0.22, 0.6), (0.48, 0.2, 0.4), yaw, 'ceramic', 'furniture'))
+    elif t in ('counter', 'island'):
+        els.append(box((cx, cy, 0.44), (sx - 0.02, sy - 0.02, 0.88), 0, 'cabinet', 'furniture'))
+        els.append(box((cx, cy, 0.9), (sx + 0.03, sy + 0.03, 0.04), 0, 'counter', 'furniture'))
+    elif t == 'fridge':
+        els.append(box((cx, cy, 0.9), (sx, sy, 1.8), 0, 'metal', 'furniture'))
+    elif t == 'appliance':
+        els.append(box((cx, cy, 0.45), (sx - 0.02, sy - 0.02, 0.9), 0, 'ceramic', 'furniture'))
     elif t == 'closet_shelf':
         els.append(box((cx, cy, 1.72), (sx, sy, 0.025), 0, 'trim', 'furniture', False))
         els.append(box((cx, cy, 1.62), (max(sx - 0.1, 0.02) if sx > sy else 0.025,

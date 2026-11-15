@@ -44,14 +44,15 @@ def main():
         val = set(rnd.sample(imgs, max(1, len(imgs) // 10)))
     split_dir = os.path.join(a.data, 'splits')
     os.makedirs(split_dir, exist_ok=True)
-    with open(os.path.join(split_dir, 'train.txt'), 'w') as f:
-        f.write('\n'.join(p for p in imgs if p not in val) + '\n')
-    with open(os.path.join(split_dir, 'val.txt'), 'w') as f:
-        f.write('\n'.join(sorted(val)) + '\n')
+    def write_if_changed(path, text):      # parallel runs on the same dataset share the split files
+        if not os.path.exists(path) or open(path).read() != text:
+            with open(path, 'w') as f:
+                f.write(text)
+    write_if_changed(os.path.join(split_dir, 'train.txt'), '\n'.join(p for p in imgs if p not in val) + '\n')
+    write_if_changed(os.path.join(split_dir, 'val.txt'), '\n'.join(sorted(val)) + '\n')
     yaml_path = os.path.join(split_dir, 'data_split.yaml')
-    with open(yaml_path, 'w') as f:
-        f.write(f"path: {a.data}\ntrain: {os.path.join(split_dir, 'train.txt')}\nval: {os.path.join(split_dir, 'val.txt')}\n"
-                "names:\n  0: person\n  1: railing\n")
+    write_if_changed(yaml_path, f"path: {a.data}\ntrain: {os.path.join(split_dir, 'train.txt')}\n"
+                                f"val: {os.path.join(split_dir, 'val.txt')}\nnames:\n  0: person\n  1: railing\n")
 
     os.makedirs(a.project, exist_ok=True)
     model = YOLO(a.model)
