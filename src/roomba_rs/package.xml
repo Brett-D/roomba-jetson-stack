@@ -17,6 +17,11 @@
   <depend>geometry_msgs</depend>
   <depend>nav2_msgs</depend>
   <depend>visualization_msgs</depend>
+  <depend>vision_msgs</depend>
+  <!-- person_detector: native/person_shim.cpp links TensorRT (libnvinfer-dev, part of JetPack; no
+       rosdep key), the CUDA runtime and OpenCV 4 -->
+  <build_depend>cuda-toolkit</build_depend>
+  <depend>libopencv-dev</depend>
   <depend>roomba_msgs</depend>
   <!-- vendor/isaac_ros_visual_slam_interfaces links its C type support libraries -->
   <depend>isaac_ros_visual_slam_interfaces</depend>

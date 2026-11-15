@@ -334,8 +334,11 @@ def generate_launch_description():
         condition=IfCondition(LaunchConfiguration('foxglove')),
     )
 
+    # Rust port (roomba_rs) by default: identical detections, distances, ignore decisions and annotated
+    # images (tools/ab_person_detector_offline.py) at a fraction of the CPU.
     people = Node(
-        package='roomba_perception',
+        package=PythonExpression(["'roomba_rs' if '", LaunchConfiguration('rust_nodes'),
+                                  "' == 'true' else 'roomba_perception'"]),
         executable='person_detector',
         name='person_detector',
         namespace='perception',

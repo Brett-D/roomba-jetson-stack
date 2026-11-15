@@ -48,6 +48,10 @@ path = "src/bin/explorer.rs"
 name = "nav_coach"
 path = "src/bin/nav_coach.rs"
 
+[[bin]]
+name = "person_detector"
+path = "src/bin/person_detector.rs"
+
 [dependencies]
 anyhow = "1"
 # Async service callbacks hand requests to the driver's service thread (rclrs uses futures 0.3 too).
@@ -75,7 +79,8 @@ tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "
 tokio-tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
 
 [build-dependencies]
-# compiles src/web/codecs.c (JPEG/PNG through the system libjpeg-turbo and libpng)
+# compiles src/web/codecs.c (JPEG/PNG through the system libjpeg-turbo and libpng) and
+# native/person_shim.cpp (TensorRT and OpenCV for the person detector)
 cc = "1"
 
 [profile.release]
