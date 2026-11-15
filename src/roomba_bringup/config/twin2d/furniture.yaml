@@ -1,0 +1,32 @@
+# Things the camera handles badly, plus imperfect odometry: a 3 cm door threshold (under the
+# obstacle height floor_obstacles and RTAB-Map use, but too high to drive over), a coffee table
+# whose top (0.40-0.45 m) the robot fits under, a chair with legs only, and 1.5 % odometry scale
+# error with 2 deg/m heading drift that RTAB-Map corrects every 2 s.
+name: furniture
+description: Low threshold, coffee table, chair legs, odometry drift.
+seed: 1
+duration_s: 1800
+start: {x: 0.0, y: 0.0, yaw_deg: 0}
+dock: true
+odometry: {scale_error: 0.015, yaw_drift_deg_per_m: 2.0, correction_period_s: 2.0}
+obstacles:
+  - name: threshold
+    segment: [[3.0, -0.6], [3.0, 0.5]]
+    thickness: 0.04
+    zmax: 0.03
+  - name: coffee_table_top
+    polygon: [[2.4, 1.8], [3.4, 1.8], [3.4, 2.3], [2.4, 2.3]]
+    zmin: 0.40
+    zmax: 0.45
+  - {name: table_leg_1, circle: [2.45, 1.85, 0.025], zmax: 0.45}
+  - {name: table_leg_2, circle: [3.35, 1.85, 0.025], zmax: 0.45}
+  - {name: table_leg_3, circle: [2.45, 2.25, 0.025], zmax: 0.45}
+  - {name: table_leg_4, circle: [3.35, 2.25, 0.025], zmax: 0.45}
+  - {name: chair_leg_1, circle: [1.0, 2.0, 0.02], zmax: 0.45}
+  - {name: chair_leg_2, circle: [1.4, 2.0, 0.02], zmax: 0.45}
+  - {name: chair_leg_3, circle: [1.0, 2.4, 0.02], zmax: 0.45}
+  - {name: chair_leg_4, circle: [1.4, 2.4, 0.02], zmax: 0.45}
+  - name: chair_seat
+    polygon: [[0.97, 1.97], [1.43, 1.97], [1.43, 2.43], [0.97, 2.43]]
+    zmin: 0.42
+    zmax: 0.47

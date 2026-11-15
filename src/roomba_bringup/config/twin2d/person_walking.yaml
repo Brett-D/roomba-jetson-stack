@@ -1,0 +1,17 @@
+# Someone walks back and forth across the robot's way (across the hallway into the open area,
+# 0.7 m/s, a second's pause at each end) for the first 10 minutes. The robot sees them (depth),
+# the map briefly gets an obstacle where they stood, and the collision monitor / costmaps must cope.
+name: person_walking
+description: A person walks across the hallway near x = 1.8 for 10 minutes.
+seed: 1
+duration_s: 1800
+start: {x: 0.0, y: 0.0, yaw_deg: 0}
+dock: true
+people:
+  - name: walker
+    path: [[1.8, -0.35], [1.8, 2.4]]
+    speed_mps: 0.7
+    pause_s: 1.0
+    mode: pingpong
+    from_s: 18
+    until_s: 618

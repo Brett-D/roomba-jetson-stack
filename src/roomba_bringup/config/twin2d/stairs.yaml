@@ -1,0 +1,13 @@
+# Stairs going down at the north end of the open area, with no railing. The depth camera looks down
+# into the stairwell (no obstacle, and RTAB-Map maps it as floor), so only the cliff sensors stop
+# the robot: Safe mode drops to Passive, the explorer adds a cliff keep-out zone, and the operator
+# (after 10 s) carries the robot back and re-enables driving.
+name: stairs
+description: Stairwell (no railing) at the north end of the open area.
+seed: 1
+duration_s: 1800
+start: {x: 0.0, y: 0.0, yaw_deg: 0}
+dock: true
+cliffs:
+  - name: stairwell
+    polygon: [[2.0, 2.3], [3.4, 2.3], [3.4, 2.95], [2.0, 2.95]]

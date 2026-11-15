@@ -1,0 +1,16 @@
+# A door closes while the robot explores (the doorway from the hallway near the start to the rooms
+# in the south-west, ~8 m2 of floor) and opens again 6 minutes later. Does the explorer give up on
+# those rooms, wait, or come back for them once the door is open?
+name: door_closes
+description: The south-west doorway closes at 60 s and opens again at 420 s.
+seed: 1
+duration_s: 1800
+start: {x: 0.0, y: 0.0, yaw_deg: 0}
+dock: true
+doors:
+  - name: southwest_door
+    segment: [[-1.6, -1.2], [-0.75, -1.2]]
+    thickness: 0.06
+    events:
+      - {t: 60, state: closed}
+      - {t: 420, state: open}

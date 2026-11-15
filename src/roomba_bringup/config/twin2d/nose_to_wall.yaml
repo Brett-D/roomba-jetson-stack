@@ -1,0 +1,8 @@
+# The robot starts facing a wall 1.5 cm in front of its bumper: the depth camera (blind under
+# 0.3 m) sees nothing, floor_obstacles publishes its "blind wall" and the robot must turn away and
+# explore anyway (it once stayed stuck like this: the collision monitor stopped all motion).
+name: nose_to_wall
+description: Start with the bumper 1.5 cm from the hallway's south wall, facing it.
+seed: 1
+duration_s: 1800
+start: {x: 0.6, y: -0.717, yaw_deg: -90}

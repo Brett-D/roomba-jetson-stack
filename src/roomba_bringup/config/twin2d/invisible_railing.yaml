@@ -1,0 +1,16 @@
+# A railing across the open area north of the hallway that the depth camera can't see (thin posts:
+# stereo depth returns nothing). The camera sees the floor beyond it, so the map shows free space
+# there; only the bumpers and the light bumpers find the railing. Bump marks (explorer ->
+# ignore_zones keep-out) and map_gap_filler are what should keep the robot from hitting it again
+# and again.
+name: invisible_railing
+description: Invisible 3.2 m railing across the open area at y = 1.3.
+seed: 1
+duration_s: 1800
+start: {x: 0.0, y: 0.0, yaw_deg: 0}
+dock: true
+railings:
+  - name: open_area_railing
+    points: [[1.2, 1.3], [4.4, 1.3]]
+    depth: none
+    height_m: 0.9

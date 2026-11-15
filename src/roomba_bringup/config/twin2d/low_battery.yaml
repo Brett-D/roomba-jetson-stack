@@ -1,0 +1,12 @@
+# The pack runs low part-way through: the explorer should notice (battery_state below
+# low_battery_fraction 0.2, through the driver's smoothed voltage gauge) and drive back to where it
+# started.
+name: low_battery
+description: Battery drops to 17 % at 240 s; the explorer should return to the start.
+seed: 1
+duration_s: 1200
+start: {x: 0.0, y: 0.0, yaw_deg: 0}
+dock: true
+battery: {soc: 0.5}
+events:
+  - {t: 240, battery_soc: 0.17}
