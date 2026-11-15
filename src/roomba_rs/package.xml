@@ -3,7 +3,7 @@
 <package format="3">
   <name>roomba_rs</name>
   <version>0.1.0</version>
-  <description>Rust ports of the Roomba robot's hot-path ROS 2 nodes (floor_obstacles, ekf_inputs, vslam_watchdog). Needs a Rust toolchain (rustup) and libclang-dev; cargo fetches rclrs.</description>
+  <description>Rust ports of the Roomba robot's hot-path ROS 2 nodes (floor_obstacles, ekf_inputs, vslam_watchdog, map_gap_filler, ignore_zones). Needs a Rust toolchain (rustup) and libclang-dev; cargo fetches rclrs.</description>
   <maintainer email="brett@brettsbox.com">Brett</maintainer>
   <license>MIT</license>
 
@@ -15,6 +15,8 @@
   <depend>nav_msgs</depend>
   <depend>tf2_msgs</depend>
   <depend>geometry_msgs</depend>
+  <depend>nav2_msgs</depend>
+  <depend>visualization_msgs</depend>
   <!-- vendor/isaac_ros_visual_slam_interfaces links its C type support libraries -->
   <depend>isaac_ros_visual_slam_interfaces</depend>
 

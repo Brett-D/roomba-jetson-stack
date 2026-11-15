@@ -349,9 +349,11 @@ def generate_launch_description():
         condition=IfCondition(LaunchConfiguration('people')),
     )
 
-    # Ignore zones are stored next to the map database they were drawn on.
+    # Ignore zones are stored next to the map database they were drawn on. Rust port (roomba_rs) by
+    # default: identical outputs and zones file (tools/ab_ignore_zones_offline.py).
     ignore_zones = Node(
-        package='roomba_perception',
+        package=PythonExpression(["'roomba_rs' if '", LaunchConfiguration('rust_nodes'),
+                                  "' == 'true' else 'roomba_perception'"]),
         executable='ignore_zones',
         name='ignore_zones',
         namespace='perception',

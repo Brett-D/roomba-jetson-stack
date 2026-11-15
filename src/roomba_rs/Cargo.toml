@@ -24,6 +24,10 @@ path = "src/bin/vslam_watchdog.rs"
 name = "map_gap_filler"
 path = "src/bin/map_gap_filler.rs"
 
+[[bin]]
+name = "ignore_zones"
+path = "src/bin/ignore_zones.rs"
+
 [dependencies]
 anyhow = "1"
 # Generated bindings for NVIDIA's message package (its debs ship none), see vendor/.../regenerate.sh
@@ -31,6 +35,8 @@ isaac_ros_visual_slam_interfaces = { path = "vendor/isaac_ros_visual_slam_interf
 libc = "0.2"
 rclrs = "0.8"
 ros-env = "0.3"
+# preserve_order: zones keep their key order like Python dicts; float_roundtrip: exact floats
+serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [profile.release]
