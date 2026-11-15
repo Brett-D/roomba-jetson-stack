@@ -85,9 +85,10 @@ and `tools/ab_web_cpu.sh` measures CPU and memory with a recorded drive and a br
 `tools/ab_explorer_live.sh` replays a raw recording through the whole stack including Nav2 (sim time,
 no drivers), steers the explorer with commands and records costmaps, TF, sensors, Nav2 action traffic
 and the nodes' outputs; `tools/ab_explorer_offline.py` drives both explorers with scripted houses
-(doors, invisible railings, bumps, cliffs, low battery, TF loss, a scripted NavigateToPose server and
-parameter services) and that recording, comparing every goal, cancel, status, mark and log line plus
-the frontier goals on every costmap; `tools/ab_nav_coach_offline.py` does the same for nav_coach's
+(doors, invisible railings, bumps, cliffs, low battery, TF loss, a scripted NavigateToPose server that
+can also answer late or never, and parameter services) and that recording, comparing every goal, cancel,
+status, mark and log line plus the frontier goals on every costmap (and checking that lost Nav2 answers
+never stall exploring); `tools/ab_nav_coach_offline.py` does the same for nav_coach's
 instructions and `tools/ab_explorer_cpu.sh` measures CPU and memory of both pairs.
 `tools/ab_person_detector_offline.py` feeds both person detectors the same frames, TF, RTAB-Map grids
 and scripted zones / toggles and compares YOLO input and output tensors, detections, distances, ignore

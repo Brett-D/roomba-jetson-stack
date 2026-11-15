@@ -5,8 +5,9 @@ compares every output in order: status JSON, NavigateToPose goals (frame, positi
 stamp), cancels, controller parameter get/set requests, keep-out commands, cliff timers and log
 lines, plus the frontier goals computed for every costmap (Q events). Nothing goes through ROS:
 time.monotonic, the node clock and the wall clock (mark names, UTC) follow the script. A scripted
-NavigateToPose server answers goals (accept / reject, succeed / abort / never, cancel -> canceled)
-and fake controller parameter services answer get/set.
+NavigateToPose server answers goals (accept / reject, at once, late or never; succeed / abort /
+never, cancel -> canceled) and fake controller parameter services answer get/set. Some scenarios
+also check the outputs themselves (e.g. that exploring never stalls on a lost Nav2 answer).
   tools/ab_explorer_offline.py [--scenario NAME ...] [--bag RECORDING] [--rust BIN] [--work DIR]
 Synthetic scenarios run in a simulated house (ground truth grid, ray-cast "camera" revealing the
 costmap, robot teleported to goals that succeed, doors, invisible railings producing bumper hits).
@@ -56,6 +57,18 @@ H = None   # the running harness (the patched node methods report to it)
 
 def f32(v):
     return float(np.float32(v))
+
+
+class Outputs(list):
+    """The Python node's outputs, with the (script) time of each in .t for scenario checks."""
+
+    def __init__(self):
+        super().__init__()
+        self.t = []
+
+    def append(self, item):
+        super().append(item)
+        self.t.append(H.t)
 
 
 # ---- fakes for the node's ROS interfaces ----
@@ -213,7 +226,8 @@ class Harness:
         H = self
         self.name, self.params, self.work = name, dict(params), work
         self.t, self.ros = T0, ROS0
-        self.py, self.trace, self.heap, self.n = [], [], [], 0
+        self.py, self.trace, self.heap, self.n = Outputs(), [], [], 0
+        self.checks = []   # fn(h) -> list of problems with the outputs (h.py)
         self.ready = {'nav': True, 'get': True, 'set': True}
         self.subs, self.tick_cb, self.result_futs = {}, None, {}
         self.rs_entry, self.dead = {}, set()
@@ -364,6 +378,8 @@ class Harness:
         self.goal_pose[seq] = (pose.position.x, pose.position.y, yaw)
         spec = self.policy(n, seq, pose.position.x, pose.position.y, yaw) if self.policy else {}
         resp = spec.get('resp', 0.05)
+        if resp is None:
+            return   # the request is lost: no answer, ever
         accept = spec.get('accept', True)
         self.push(self.t + resp, 1, 'GR', (seq, accept, fut))
         if accept and spec.get('result') is not None:
@@ -799,6 +815,122 @@ def sc_superseded(h):
     return 150
 
 
+# ---- lost and late Nav2 answers (the explorer must give up on them, never stall) ----
+
+RESPONSE_TIMEOUT = 10.0   # goal_response_timeout_s default
+RETURN_TIMEOUT = 300.0    # return_timeout_s default
+
+
+def statuses(h):
+    """(time, state, message) of every status the Python node published."""
+    out = []
+    for o, t in zip(h.py, h.py.t):
+        if o[0] == 'ST':
+            s = json.loads(o[1])
+            out.append((t, s['state'], s['message']))
+    return out
+
+
+def check_gives_up(h, slack=2.0):
+    """Every goal request Nav2 didn't answer in time is given up on: within the timeout (+ slack)
+    the explorer drops that goal (status goal null, another goal, or another state)."""
+    answered = {e[3]: e[1] for e in h.trace if e[0] == 'GR'}
+    problems, state = [], None
+    for i, (o, t) in enumerate(zip(h.py, h.py.t)):
+        if o[0] == 'ST':
+            state = json.loads(o[1])['state']
+        if o[0] != 'GL' or answered.get(o[1], math.inf) - t <= RESPONSE_TIMEOUT:
+            continue
+        after = next((t2 for o2, t2 in zip(h.py[i + 1:], h.py.t[i + 1:]) if o2[0] == 'GL' or (
+            o2[0] == 'ST' and (json.loads(o2[1])['state'] != state or json.loads(o2[1])['goal'] is None))), None)
+        if after is None or after - t > RESPONSE_TIMEOUT + slack:
+            problems.append(f'goal {o[1]} sent at {t - T0:.0f} s ({state}) got no answer for {RESPONSE_TIMEOUT:.0f} s '
+                            'and ' + ('the explorer never dropped it' if after is None
+                                      else f'the explorer only dropped it {after - t:.0f} s later'))
+    return problems
+
+
+def check_late_cancelled(h):
+    """Goals Nav2 accepted after the explorer gave up on them are cancelled right away."""
+    sent = {o[1]: t for o, t in zip(h.py, h.py.t) if o[0] == 'GL'}
+    cancels = {(o[1], t) for o, t in zip(h.py, h.py.t) if o[0] == 'CN'}
+    return [f'goal {e[3]} accepted {e[1] - sent[e[3]]:.0f} s late was not cancelled' for e in h.trace
+            if e[0] == 'GR' and e[4] and e[1] - sent[e[3]] > RESPONSE_TIMEOUT and (e[3], e[1]) not in cancels]
+
+
+def check_ends(h, runs):
+    """The explorer finished (state done) `runs` times and ends done."""
+    st = statuses(h)
+    ends = sum(1 for a, b in zip(st, st[1:]) if b[1] == 'done' and a[1] != 'done')
+    problems = [] if ends == runs else [f'finished {ends} times, expected {runs}']
+    if st[-1][1] != 'done':
+        problems.append(f'ends {st[-1][1]} ("{st[-1][2]}"), expected done')
+    return problems
+
+
+def check_longest(h, state, limit):
+    """The explorer never stays in `state` longer than `limit` s at a time."""
+    longest, since = 0.0, None
+    for t, s, _ in statuses(h):
+        since = (t if since is None else since) if s == state else None
+        if since is not None:
+            longest = max(longest, t - since)
+    return [] if longest <= limit else [f'stayed {state} for {longest:.0f} s (limit {limit:.0f} s)']
+
+
+def check_logs(h, text, count):
+    n = sum(1 for o in h.py if o[0] == 'LG' and text in o[2])
+    return [] if n == count else [f'{n} log lines with "{text}", expected {count}']
+
+
+def sc_goal_response_lost(h):
+    """Nav2 never answers some goal requests (two frontier goals and the first trip home): each
+    counts as rejected after goal_response_timeout_s (the frontier is blacklisted, the trip home
+    failed: check again from there) and exploring goes on to the end."""
+    start_world(h, house())
+    home = {'n': 0}
+
+    def fail(n, x, y):
+        if math.hypot(x - 0.5, y - 0.5) < 1e-6:   # the start point
+            home['n'] += 1
+            return {'resp': None} if home['n'] == 1 else None
+        return {'resp': None} if n in (1, 4) else None
+    h.policy = moving_policy(h, fail=fail)
+    h.checks = [check_gives_up, lambda h: check_ends(h, 1), lambda h: check_logs(h, 'did not answer', 3)]
+    return 1500
+
+
+def sc_goal_response_late(h):
+    """Nav2 answers some goal requests only after the explorer gave up on them (one even after
+    goal_timeout_s): late acceptances are cancelled at once, late rejections ignored, and exploring
+    goes on meanwhile."""
+    start_world(h, house())
+    late = {1: {'resp': 25.0, 'result': 5.0, 'status': 4}, 3: {'resp': 30.0, 'accept': False},
+            5: {'resp': 70.0, 'result': 5.0, 'status': 4}}
+    h.policy = moving_policy(h, fail=lambda n, x, y: late.get(n))
+    h.checks = [check_gives_up, check_late_cancelled, lambda h: check_ends(h, 1),
+                lambda h: check_logs(h, 'did not answer', 3)]
+    return 1500
+
+
+def sc_home_lost(h):
+    """The trip home goes wrong every way, in a flat with nothing to explore: never answered,
+    accepted but never finished (return_timeout_s), rejected, and never answered after a "home"
+    command. Each ends the trip as failed (check again from there, or finish) instead of leaving
+    the explorer "returning" for good."""
+    truth = np.full((80, 100), 100, np.int8)
+    truth[2:-2, 2:-2] = 0
+    start_world(h, truth, start=(1.0, 1.0, 0.0))
+    h.world.known[:] = True
+    answers = [{'resp': None}, {'result': None}, {'accept': False}, {'resp': None}]
+    h.policy = lambda n, s, x, y, yaw: answers[n] if n < len(answers) else {'result': 2.0, 'status': 4}
+    for t, c in ((100.0, 'start'), (500.0, 'start'), (600.0, 'start'), (605.0, 'home')):
+        h.inp(t, 'C', c)
+    h.checks = [check_gives_up, lambda h: check_ends(h, 4), lambda h: check_longest(h, 'returning', RETURN_TIMEOUT + 2),
+                lambda h: check_logs(h, 'did not answer', 2), lambda h: check_logs(h, 'timed out after', 1)]
+    return 660
+
+
 SCENARIOS = {name[3:]: fn for name, fn in globals().items() if name.startswith('sc_')}
 
 
@@ -874,9 +1006,14 @@ def summarize(name, h, py, rs):
           f'  (frontier queries with goals: {sum(1 for o in fq if o[1])}, goals compared: '
           f'{sum(len(o[1]) for o in fq if o[1])})')
     print(f'   states {dict(states)}; {len(msgs)} distinct messages; logs {dict(logs)}')
+    problems = [p for check in h.checks for p in check(h)]
+    if h.checks and not problems:
+        print(f'   checks: {len(h.checks)} passed')
+    for p in problems:
+        print(f'   CHECK FAILED: {p}')
     if first is None:
         print('   RESULT: identical')
-        return True
+        return not problems
     print(f'   RESULT: DIFFERENT at output {first}')
     for i in range(max(0, first - 3), min(first + 3, max(len(py), len(rs)))):
         print(f'     py {str(py[i])[:300] if i < len(py) else "-"}\n     rs {str(rs[i])[:300] if i < len(rs) else "-"}')

@@ -75,7 +75,8 @@ impl Io for RosIo {
         let requested = match self.nav.try_request_goal(goal) {
             Ok(r) => r,
             Err(e) => {
-                // rclpy would raise here; leave the goal to time out like an unanswered request.
+                // rclpy would raise here; the explorer gives up on it like on any request Nav2
+                // never answers (goal_response_timeout_s).
                 log!(self.node.error(), "Could not send the navigation goal: {e}");
                 return;
             }

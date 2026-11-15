@@ -8,7 +8,9 @@ parked in clear, known space (goal_standoff_m from the unknown, away from obstac
 it, facing it, so the controller isn't asked to drive into clutter at the map's edge. The
 explorer drives to the nearest one and repeats. Spots reached are not revisited and goals
 that fail are blacklisted for the session. When no frontier is left (or on request) it
-returns to where it started.
+returns to where it started. Nav2 answers that never come don't stall it: a goal request not
+answered within goal_response_timeout_s counts as rejected (a late acceptance is cancelled), and
+a trip home with no result within return_timeout_s as failed.
 
 Safety: exploring stops if the Roomba leaves safe/full mode (cliff, wheel drop, charger:
 the firmware drops it to passive), and it returns home when the battery runs low. While
@@ -173,6 +175,12 @@ class Explorer(Node):
         self.blacklist_radius = float(p('blacklist_radius_m', 0.75).value)
         self.visited_radius = float(p('visited_radius_m', 0.6).value)
         self.goal_timeout = float(p('goal_timeout_s', 60.0).value)
+        # Nav2 answers a goal request at once; one it never answers (server restarting, request
+        # lost) counts as rejected after this long, so exploring doesn't stall waiting for it.
+        self.response_timeout = float(p('goal_response_timeout_s', 10.0).value)
+        # Driving home may take a while, but a result that never comes counts as a failed trip
+        # home after this long (0 = wait for it forever).
+        self.return_timeout = float(p('return_timeout_s', 300.0).value)
         self.low_battery = float(p('low_battery_fraction', 0.2).value)
         self.rotate_speed = float(p('rotate_speed_rps', 0.7).value)     # 0 = leave the controller alone
         self.return_home = bool(p('return_home', True).value)
@@ -223,7 +231,7 @@ class Explorer(Node):
         self.failed = 0
         self.frontier_count = 0
         self.saved_rotate = None
-        self.sending = False
+        self.sending = None          # (seq, sent monotonic) of the goal request Nav2 hasn't answered
         self.no_frontier_since = None
         self.resume_after_home = False   # went home because nothing was reachable: look again there
         self.final_check = False
@@ -412,18 +420,26 @@ class Explorer(Node):
 
     # ---- main loop ----
     def _tick(self):
-        if self.state == 'exploring':
+        now = time.monotonic()
+        if self.sending is not None and now - self.sending[1] > self.response_timeout:
+            self._no_response()
+        elif self.state == 'exploring':
             if self.battery is not None and self.battery < self.low_battery:
                 self._go_home(f'Battery at {self.battery * 100:.0f}%: returning to the start point')
             elif not self.tracking_ok:
                 self.message = 'Paused: visual tracking is recovering'
-            elif self.goal is not None and time.monotonic() - self.goal[2] > self.goal_timeout:
+            elif self.goal is not None and now - self.goal[2] > self.goal_timeout:
                 self.get_logger().warn('Frontier goal timed out; skipping it')
                 self._blacklist(self.goal[0], self.goal[1])
                 self.failed += 1
                 self._cancel_goal()
-            elif self.goal is None and not self.sending:
+            elif self.goal is None and self.sending is None:
                 self._next_frontier()
+        elif (self.state == 'returning' and self.goal is not None and self.return_timeout > 0
+              and now - self.goal[2] > self.return_timeout):
+            self.get_logger().warn(f'Driving back to the start point timed out after {self.return_timeout:.0f} s')
+            self._cancel_goal()
+            self._returned(False)
         self._publish_status()
 
     def _next_frontier(self):
@@ -512,25 +528,42 @@ class Explorer(Node):
         seq = self.goal_seq
         self.goal = (x, y, time.monotonic())
         self.goal_bumps = 0
-        self.sending = True
+        self.sending = (seq, self.goal[2])
         future = self.nav.send_goal_async(goal)
         future.add_done_callback(lambda f: self._on_goal_response(f, seq))
 
     def _on_goal_response(self, future, seq):
-        self.sending = False
+        if self.sending is not None and self.sending[0] == seq:
+            self.sending = None
         handle = future.result()
-        if seq != self.goal_seq:          # superseded or cancelled meanwhile
+        if seq != self.goal_seq:          # superseded, cancelled or given up on meanwhile
             if handle.accepted:
                 handle.cancel_goal_async()
             return
         if not handle.accepted:
             self.get_logger().warn('Navigation rejected the goal')
-            if self.goal is not None:
-                self._blacklist(self.goal[0], self.goal[1])
-            self.goal = None
+            self._refused()
             return
         self.goal_handle = handle
         handle.get_result_async().add_done_callback(lambda f: self._on_result(f, seq))
+
+    def _no_response(self):
+        """Nav2 never answered the goal request: stop waiting and count the goal as rejected."""
+        seq, self.sending = self.sending[0], None
+        if seq != self.goal_seq:
+            return    # cancelled or superseded meanwhile: nothing left to do
+        self.goal_seq += 1   # an answer that still comes is then for a superseded goal (cancelled)
+        self.get_logger().warn(f'Navigation did not answer the goal request within '
+                               f'{self.response_timeout:.0f} s; giving up on it')
+        self._refused()
+
+    def _refused(self):
+        """The current goal was rejected (or never answered): skip that spot, or end the trip home."""
+        goal, self.goal = self.goal, None
+        if self.state == 'returning':
+            self._returned(False)
+        elif goal is not None:
+            self._blacklist(goal[0], goal[1])
 
     def _on_result(self, future, seq):
         if seq != self.goal_seq:
@@ -538,19 +571,9 @@ class Explorer(Node):
         status = future.result().status
         goal, self.goal, self.goal_handle = self.goal, None, None
         if self.state == 'returning':
-            why = self.message   # why it went home (finished, low battery, request)
             # Nav2 can report success without the robot moving (a one-pose plan while it was
             # boxed in at a wall), so check that it really is back.
-            home = status == GoalStatus.STATUS_SUCCEEDED and self._near_home()
-            if self.resume_after_home:
-                # The map looks different from elsewhere: check once more before finishing.
-                self.resume_after_home = False
-                self.final_check = True
-                self._set('exploring', 'Back at the start point; checking for unmapped areas again…' if home
-                          else 'Could not reach the start point; checking for unmapped areas again from here…')
-                return
-            self._finish(f'{why} - back at the start point' if home
-                         else f'{why} - could not drive back to the start point')
+            self._returned(status == GoalStatus.STATUS_SUCCEEDED and self._near_home())
             return
         if self.state != 'exploring':
             return
@@ -563,6 +586,19 @@ class Explorer(Node):
             # Unreachable or no progress: don't try this spot again.
             self.failed += 1
             self._blacklist(goal[0], goal[1])
+
+    def _returned(self, home):
+        """The trip home ended, at the start point (home) or not."""
+        why = self.message   # why it went home (finished, low battery, request)
+        if self.resume_after_home:
+            # The map looks different from elsewhere: check once more before finishing.
+            self.resume_after_home = False
+            self.final_check = True
+            self._set('exploring', 'Back at the start point; checking for unmapped areas again…' if home
+                      else 'Could not reach the start point; checking for unmapped areas again from here…')
+            return
+        self._finish(f'{why} - back at the start point' if home
+                     else f'{why} - could not drive back to the start point')
 
     def _cancel_goal(self):
         self.goal_seq += 1

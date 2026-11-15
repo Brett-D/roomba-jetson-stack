@@ -2,8 +2,9 @@
 //! roomba_perception/explorer.py (see its docstring): the same frontier groups, goal cells, scores
 //! and tie-breaking (OpenCV's connected-component order, numpy's argmin/argwhere order, its
 //! float32 distance transform and float rounding), the same state machine (blacklist, visited
-//! spots, bump and cliff keep-out marks, retries, return home, finish checks), status JSON, log
-//! lines and Nav2 / parameter-service requests. Checked by tools/ab_explorer_offline.py.
+//! spots, bump and cliff keep-out marks, retries, return home, finish checks, giving up on Nav2
+//! answers that never come), status JSON, log lines and Nav2 / parameter-service requests. Checked
+//! by tools/ab_explorer_offline.py.
 //!
 //! ROS-free: [`Explorer`] reacts to inputs and talks to the outside through [`Io`] (the node in
 //! src/bin/explorer.rs, or the replay in examples/explorer_replay.rs).
@@ -501,6 +502,8 @@ pub struct Params {
     pub blacklist_radius: f64,
     pub visited_radius: f64,
     pub goal_timeout: f64,
+    pub response_timeout: f64,
+    pub return_timeout: f64,
     pub low_battery: f64,
     pub rotate_speed: f64,
     pub return_home: bool,
@@ -533,6 +536,10 @@ impl Params {
             blacklist_radius: p.float("blacklist_radius_m", 0.75)?,
             visited_radius: p.float("visited_radius_m", 0.6)?,
             goal_timeout: p.float("goal_timeout_s", 60.0)?,
+            // A goal request Nav2 never answers counts as rejected after this long.
+            response_timeout: p.float("goal_response_timeout_s", 10.0)?,
+            // A trip home with no result counts as failed after this long (0 = wait forever).
+            return_timeout: p.float("return_timeout_s", 300.0)?,
             low_battery: p.float("low_battery_fraction", 0.2)?,
             rotate_speed: p.float("rotate_speed_rps", 0.7)?,
             return_home: p.boolean("return_home", true)?,
@@ -648,7 +655,8 @@ pub struct Explorer {
     failed: i64,
     frontier_count: i64,
     saved_rotate: Option<f64>,
-    sending: bool,
+    /// (seq, sent monotonic) of the goal request Nav2 hasn't answered yet.
+    sending: Option<(u64, f64)>,
     no_frontier_since: Option<f64>,
     resume_after_home: bool,
     final_check: bool,
@@ -682,7 +690,7 @@ impl Explorer {
             failed: 0,
             frontier_count: 0,
             saved_rotate: None,
-            sending: false,
+            sending: None,
             no_frontier_since: None,
             resume_after_home: false,
             final_check: false,
@@ -924,20 +932,33 @@ impl Explorer {
 
     /// The 1 s timer.
     pub fn tick(&mut self, io: &mut impl Io) {
-        if self.state == State::Exploring {
+        let now = io.mono();
+        if self.sending.is_some_and(|(_, sent)| now - sent > self.p.response_timeout) {
+            self.no_response(io);
+        } else if self.state == State::Exploring {
             let timeout = self.p.goal_timeout;
             if let Some(b) = self.battery.filter(|&b| b < self.p.low_battery) {
                 self.go_home(format!("Battery at {:.0}%: returning to the start point", b * 100.0), false, io);
             } else if !self.tracking_ok {
                 self.message = "Paused: visual tracking is recovering".into();
-            } else if let Some(goal) = self.goal.filter(|g| io.mono() - g.sent > timeout) {
+            } else if let Some(goal) = self.goal.filter(|g| now - g.sent > timeout) {
                 io.log(Level::Warn, "Frontier goal timed out; skipping it".into());
                 self.blacklist.push((goal.x, goal.y));
                 self.failed += 1;
                 self.cancel_goal(io);
-            } else if self.goal.is_none() && !self.sending {
+            } else if self.goal.is_none() && self.sending.is_none() {
                 self.next_frontier(io);
             }
+        } else if self.state == State::Returning
+            && self.p.return_timeout > 0.0
+            && self.goal.is_some_and(|g| now - g.sent > self.p.return_timeout)
+        {
+            io.log(
+                Level::Warn,
+                format!("Driving back to the start point timed out after {:.0} s", self.p.return_timeout),
+            );
+            self.cancel_goal(io);
+            self.returned(false, io);
         }
         self.publish_status(io);
     }
@@ -1050,9 +1071,10 @@ impl Explorer {
         };
         self.goal_seq += 1;
         let seq = self.goal_seq;
-        self.goal = Some(Goal { x, y, sent: io.mono(), numpy });
+        let sent = io.mono();
+        self.goal = Some(Goal { x, y, sent, numpy });
         self.goal_bumps = 0;
-        self.sending = true;
+        self.sending = Some((seq, sent));
         io.send_goal(GoalRequest {
             seq,
             frame: self.p.map_frame.clone(),
@@ -1065,9 +1087,11 @@ impl Explorer {
 
     /// Nav2's answer to goal `seq`.
     pub fn on_goal_response(&mut self, seq: u64, accepted: bool, io: &mut impl Io) {
-        self.sending = false;
+        if self.sending.is_some_and(|(s, _)| s == seq) {
+            self.sending = None;
+        }
         if seq != self.goal_seq {
-            // superseded or cancelled meanwhile
+            // superseded, cancelled or given up on meanwhile
             if accepted {
                 io.cancel_goal(seq);
             }
@@ -1075,13 +1099,34 @@ impl Explorer {
         }
         if !accepted {
             io.log(Level::Warn, "Navigation rejected the goal".into());
-            if let Some(g) = self.goal {
-                self.blacklist.push((g.x, g.y));
-            }
-            self.goal = None;
+            self.refused(io);
             return;
         }
         self.goal_handle = Some(seq);
+    }
+
+    /// Nav2 never answered the goal request: stop waiting and count the goal as rejected.
+    fn no_response(&mut self, io: &mut impl Io) {
+        let Some((seq, _)) = self.sending.take() else { return };
+        if seq != self.goal_seq {
+            return; // cancelled or superseded meanwhile: nothing left to do
+        }
+        self.goal_seq += 1; // an answer that still comes is then for a superseded goal (cancelled)
+        io.log(
+            Level::Warn,
+            format!("Navigation did not answer the goal request within {:.0} s; giving up on it", self.p.response_timeout),
+        );
+        self.refused(io);
+    }
+
+    /// The current goal was rejected (or never answered): skip that spot, or end the trip home.
+    fn refused(&mut self, io: &mut impl Io) {
+        let goal = self.goal.take();
+        if self.state == State::Returning {
+            self.returned(false, io);
+        } else if let Some(g) = goal {
+            self.blacklist.push((g.x, g.y));
+        }
     }
 
     /// The final status of the accepted goal `seq`.
@@ -1092,28 +1137,10 @@ impl Explorer {
         let goal = self.goal.take();
         self.goal_handle = None;
         if self.state == State::Returning {
-            let why = self.message.clone(); // why it went home (finished, low battery, request)
             // Nav2 can report success without the robot moving (a one-pose plan while it was
             // boxed in at a wall), so check that it really is back.
             let home = status == STATUS_SUCCEEDED && self.near_home(io);
-            if self.resume_after_home {
-                // The map looks different from elsewhere: check once more before finishing.
-                self.resume_after_home = false;
-                self.final_check = true;
-                let msg = if home {
-                    "Back at the start point; checking for unmapped areas again…"
-                } else {
-                    "Could not reach the start point; checking for unmapped areas again from here…"
-                };
-                self.set(State::Exploring, msg.into(), io);
-                return;
-            }
-            let msg = if home {
-                format!("{why} - back at the start point")
-            } else {
-                format!("{why} - could not drive back to the start point")
-            };
-            self.finish(msg, io);
+            self.returned(home, io);
             return;
         }
         if self.state != State::Exploring {
@@ -1130,6 +1157,29 @@ impl Explorer {
             self.failed += 1;
             self.blacklist.push((g.x, g.y));
         }
+    }
+
+    /// The trip home ended, at the start point (`home`) or not.
+    fn returned(&mut self, home: bool, io: &mut impl Io) {
+        let why = self.message.clone(); // why it went home (finished, low battery, request)
+        if self.resume_after_home {
+            // The map looks different from elsewhere: check once more before finishing.
+            self.resume_after_home = false;
+            self.final_check = true;
+            let msg = if home {
+                "Back at the start point; checking for unmapped areas again…"
+            } else {
+                "Could not reach the start point; checking for unmapped areas again from here…"
+            };
+            self.set(State::Exploring, msg.into(), io);
+            return;
+        }
+        let msg = if home {
+            format!("{why} - back at the start point")
+        } else {
+            format!("{why} - could not drive back to the start point")
+        };
+        self.finish(msg, io);
     }
 
     fn cancel_goal(&mut self, io: &mut impl Io) {
@@ -1342,5 +1392,137 @@ mod tests {
         let v = py_json_loads(r#"{"state": "idle", "rate": NaN, "s": "NaN"}"#).unwrap();
         assert_eq!(v["state"], "idle");
         assert_eq!(v["s"], "NaN");
+    }
+
+    /// Records what the explorer does; the robot stands still and time moves by hand.
+    #[derive(Default)]
+    struct TestIo {
+        t: f64,
+        pose: (f64, f64),
+        goals: Vec<GoalRequest>,
+        cancels: Vec<u64>,
+        logs: Vec<(Level, String)>,
+        status: String,
+    }
+
+    impl Io for TestIo {
+        fn mono(&mut self) -> f64 {
+            self.t
+        }
+        fn lookup(&mut self, _: &str, _: &str) -> Option<([f64; 3], [f64; 4])> {
+            Some(([self.pose.0, self.pose.1, 0.0], [0.0, 0.0, 0.0, 1.0]))
+        }
+        fn nav_ready(&mut self) -> bool {
+            true
+        }
+        fn send_goal(&mut self, goal: GoalRequest) {
+            self.goals.push(goal);
+        }
+        fn cancel_goal(&mut self, seq: u64) {
+            self.cancels.push(seq);
+        }
+        fn get_params_ready(&mut self) -> bool {
+            false
+        }
+        fn set_params_ready(&mut self) -> bool {
+            false
+        }
+        fn get_rotate(&mut self) {}
+        fn set_rotate(&mut self, _: f64) {}
+        fn status(&mut self, json: String) {
+            self.status = json;
+        }
+        fn zone_command(&mut self, _: String) {}
+        fn log(&mut self, level: Level, msg: String) {
+            self.logs.push((level, msg));
+        }
+        fn local_hms(&mut self) -> String {
+            "000000".into()
+        }
+        fn start_cliff_timer(&mut self) {}
+    }
+
+    impl TestIo {
+        fn warnings(&self, text: &str) -> usize {
+            self.logs.iter().filter(|(l, m)| *l == Level::Warn && m.contains(text)).count()
+        }
+
+        fn ticks(&mut self, e: &mut Explorer, from: u32, to: u32) {
+            for t in from..=to {
+                self.t = t as f64;
+                e.tick(self);
+            }
+        }
+    }
+
+    /// Exploring the open room of frontier_goal_in_open_room (0.1 m cells, robot in cell (10, 3)),
+    /// its one frontier goal sent at t = 1 s and not answered yet.
+    fn exploring(io: &mut TestIo) -> Explorer {
+        let (w, h) = (20u32, 20u32);
+        let data = (0..h)
+            .flat_map(|r| (0..w).map(move |c| if c >= 13 { -1 } else if r == 0 || r == h - 1 || c == 0 { 100 } else { 0 }))
+            .collect();
+        let mut e = Explorer::new(Params::load(&mut crate::watchdog::Defaults).unwrap(), io);
+        e.on_grid(Grid { width: w, height: h, resolution: 0.1, origin_x: 0.0, origin_y: 0.0, data });
+        e.on_mode("full", io);
+        io.pose = (0.35, 1.05);
+        io.t = 1.0;
+        e.on_command("start", io);
+        e.tick(io);
+        assert_eq!(e.state(), State::Exploring);
+        assert_eq!(io.goals.len(), 1);
+        e
+    }
+
+    #[test]
+    fn unanswered_goal_request_is_given_up() {
+        let mut io = TestIo::default();
+        let mut e = exploring(&mut io);
+        let first = io.goals[0].seq;
+        io.ticks(&mut e, 2, 11);
+        assert_eq!(io.warnings("did not answer"), 0, "waits goal_response_timeout_s");
+        io.ticks(&mut e, 12, 12);
+        assert_eq!(io.warnings("did not answer"), 1);
+        assert!(io.status.contains(r#""goal": null"#));
+        // Nav2 accepts it after all: cancelled at once, nothing else changes.
+        e.on_goal_response(first, true, &mut io);
+        assert_eq!(io.cancels, vec![first]);
+        // The spot was blacklisted like a rejected goal; with nothing else left it's retried
+        // (retry_failed_before_finish) once finish_confirm_s has passed: exploring goes on.
+        io.ticks(&mut e, 13, 34);
+        assert_eq!(io.goals.len(), 2);
+        assert_ne!(io.goals[1].seq, first);
+        assert_eq!((io.goals[1].x, io.goals[1].y), (io.goals[0].x, io.goals[0].y));
+        assert_eq!(e.state(), State::Exploring);
+    }
+
+    #[test]
+    fn trip_home_without_answer_or_result_fails() {
+        let mut io = TestIo::default();
+        let mut e = exploring(&mut io);
+        e.on_command("home", &mut io);
+        assert_eq!(e.state(), State::Returning);
+        io.ticks(&mut e, 2, 11);
+        assert_eq!(e.state(), State::Returning);
+        io.ticks(&mut e, 12, 12);
+        assert_eq!(e.state(), State::Done, "request never answered: the trip failed");
+        assert!(io.status.contains("Returning to the start point - could not drive back to the start point"));
+        // Accepted this time, but the result never comes: given up after return_timeout_s.
+        e.on_command("start", &mut io);
+        io.t = 20.0;
+        e.on_command("home", &mut io);
+        let home = io.goals.last().unwrap().seq;
+        e.on_goal_response(home, true, &mut io);
+        io.ticks(&mut e, 21, 320);
+        assert_eq!(e.state(), State::Returning);
+        io.ticks(&mut e, 321, 321);
+        assert_eq!(e.state(), State::Done);
+        assert_eq!(io.cancels, vec![home]);
+        assert_eq!(io.warnings("timed out after 300 s"), 1);
+        // Rejected: the trip fails at once (it used to stay "returning" with no goal).
+        e.on_command("start", &mut io);
+        e.on_command("home", &mut io);
+        e.on_goal_response(io.goals.last().unwrap().seq, false, &mut io);
+        assert_eq!(e.state(), State::Done);
     }
 }
