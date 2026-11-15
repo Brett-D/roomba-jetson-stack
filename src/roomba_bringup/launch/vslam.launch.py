@@ -101,8 +101,9 @@ def _watchdog(context):
         bringup = FindPackageShare('roomba_bringup').perform(context)
         nodes += [
             # Calibrated wheel twist and bias-free gyro with honest covariances for the EKF.
-            Node(package='roomba_perception', executable='ekf_inputs', name='ekf_inputs',
-                 output='screen'),
+            # Rust port (roomba_rs): identical output on a recorded drive, ~1/7 of the CPU.
+            Node(package='roomba_rs' if LaunchConfiguration('rust_nodes').perform(context) == 'true'
+                 else 'roomba_perception', executable='ekf_inputs', name='ekf_inputs', output='screen'),
             Node(package='robot_localization', executable='ekf_node', name='ekf_filter_node',
                  output='screen', parameters=[os.path.join(bringup, 'config', 'ekf_robot.yaml')],
                  remappings=[('odometry/filtered', '/odom')]),
@@ -125,6 +126,8 @@ def generate_launch_description():
         PythonExpression(["'", LaunchConfiguration('platform'), "' != 'robot'"]), value_type=bool)
 
     args = [
+        DeclareLaunchArgument('rust_nodes', default_value='true',
+                              description='Use the Rust ports (package roomba_rs) of nodes that have one'),
         DeclareLaunchArgument('mode', default_value='auto',
                               description='auto (reuse saved map if present), mapping (new map), localization'),
         DeclareLaunchArgument('odometry', default_value='basalt',

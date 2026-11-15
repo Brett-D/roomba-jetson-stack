@@ -13,7 +13,7 @@ The serial driver lives in its own repository and is included here as a submodul
 |---|---|
 | `src/roomba_bringup` | Launch files (`robot.launch.py`, `vslam.launch.py`, `nav.launch.py`, `handheld_slam.launch.py`), Nav2 configs, robot driver config |
 | `src/roomba_perception` | VSLAM watchdog/odometry filter with wheel bridging, EKF input conditioning (`ekf_inputs`), floor obstacle detection, explorer, ignore zones, nav coach, person detector, IMU calibration |
-| `src/roomba_rs` | Rust ports of hot-path nodes (rclrs): `floor_obstacles` (same topics/parameters as the Python node, ~1/7 of the CPU). `nav.launch.py rust_nodes:=false` switches back to the Python nodes |
+| `src/roomba_rs` | Rust ports of hot-path nodes (rclrs): `floor_obstacles` and `ekf_inputs` (same topics, parameters and output as the Python nodes, ~1/7 of the CPU). `rust_nodes:=false` switches back to the Python nodes |
 | `src/roomba_web` | Web app on port 8080: live map, robot status, drive pad, tap-to-go navigation, login |
 | `src/mynteye_d1000_driver` | ROS 2 node for the MYNT EYE D1000 stereo/depth/IMU camera |
 | `src/basalt_vio_ros` | ROS 2 wrapper for Basalt visual-inertial odometry |
@@ -57,12 +57,13 @@ source /opt/ros/jazzy/setup.bash
 rosdep install --from-paths src --ignore-src -y
 # Rust toolchain for src/roomba_rs (cargo fetches rclrs; message crates come from /opt/ros)
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
-sudo apt install -y libclang-dev && source ~/.cargo/env
+sudo apt install -y libclang-dev mold && source ~/.cargo/env   # mold: GNU ld takes 10+ min to link
 colcon build --symlink-install
 ```
 
-`tools/ab_floor_obstacles.sh` replays part of a recorded drive through the Python and Rust
-`floor_obstacles` side by side and compares their output frame by frame and their CPU use.
+Python vs Rust checks on a recorded drive: `tools/ab_floor_obstacles.sh` (side by side, frame by
+frame, plus CPU), `tools/ab_ekf_offline.py` (same message sequence into both, every output compared)
+and `tools/ab_ekf_inputs.sh` (CPU).
 
 ## Run
 

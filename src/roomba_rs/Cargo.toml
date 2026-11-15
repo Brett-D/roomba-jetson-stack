@@ -12,11 +12,16 @@ path = "src/lib.rs"
 name = "floor_obstacles"
 path = "src/bin/floor_obstacles.rs"
 
+[[bin]]
+name = "ekf_inputs"
+path = "src/bin/ekf_inputs.rs"
+
 [dependencies]
 anyhow = "1"
 libc = "0.2"
 rclrs = "0.8"
 ros-env = "0.3"
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [profile.release]
 opt-level = 3

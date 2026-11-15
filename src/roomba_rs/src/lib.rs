@@ -1,4 +1,5 @@
 //! Pure processing used by the Rust nodes, kept free of ROS types so it can be unit tested.
+pub mod ekf;
 pub mod floor;
 pub mod geometry;
 pub mod static_tf;
