@@ -349,6 +349,8 @@ struct Sim {
     metrics: Metrics,
     out_dir: String,
     world_path: String,
+    /// Explorer parameter overrides of an experiment (twin2d.launch.py explorer_params).
+    explorer_params: serde_json::Map<String, Value>,
     clock: Clock,
     // timeline
     event_done: Vec<bool>,
@@ -890,7 +892,7 @@ impl Sim {
         let costmap = lock(&self.shared).costmap.clone();
         let frontiers = match costmap {
             Some(cm) => {
-                let (groups, png) = metrics::frontier_report(&cm, self.pos());
+                let (groups, png) = metrics::frontier_report(&cm, self.pos(), &self.explorer_params);
                 if let Some(png) = png {
                     std::fs::write(format!("{}/costmap_end.png", self.out_dir), png)?;
                 }
@@ -1092,6 +1094,7 @@ struct Params {
     cam_pitch: f64,
     seed: i64,
     exit_on_finish: bool,
+    explorer_params: String,
 }
 
 fn main() -> Result<()> {
@@ -1110,10 +1113,21 @@ fn main() -> Result<()> {
         cam_pitch: d.float("cam_pitch", 0.0)?,
         seed: d.int("seed", -1)?,
         exit_on_finish: d.boolean("exit_on_finish", true)?,
+        explorer_params: d.string("explorer_params", "")?,
     };
     if p.cam_pitch.abs() > 1e-6 {
         log!(node.warn(), "cam_pitch {} ignored: the twin's camera renders level", p.cam_pitch);
     }
+    // Explorer parameter overrides of an experiment: the frontier report judges with the same values.
+    let explorer_params: serde_json::Map<String, Value> = if p.explorer_params.trim().is_empty() {
+        serde_json::Map::new()
+    } else {
+        let v: serde_yaml::Value = serde_yaml::from_str(&p.explorer_params).context("explorer_params")?;
+        match serde_json::to_value(v)? {
+            Value::Object(m) => m,
+            _ => bail!("explorer_params must be a mapping"),
+        }
+    };
     let mut scenario = if p.scenario.is_empty() { Scenario::parse("")? } else { Scenario::load(&p.scenario)? };
     if p.seed >= 0 {
         scenario.seed = p.seed as u64;
@@ -1323,6 +1337,7 @@ fn main() -> Result<()> {
         metrics: Metrics::default(),
         out_dir: p.out_dir.clone(),
         world_path: p.world.clone(),
+        explorer_params: explorer_params.clone(),
         clock: node.get_clock(),
         event_done: vec![false; n_events],
         tracking_lost_until: f64::NEG_INFINITY,

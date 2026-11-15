@@ -83,6 +83,7 @@ def _setup(context):
             'cam_pitch': float(lc('cam_pitch')),
             'seed': int(lc('seed')),
             'exit_on_finish': lc('exit_on_finish') == 'true',
+            'explorer_params': lc('explorer_params'),
         }],
     )
     actions = [

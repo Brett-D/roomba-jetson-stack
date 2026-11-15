@@ -371,17 +371,31 @@ pub struct CostGrid {
     pub data: Vec<i8>,
 }
 
+/// The explorer's frontier parameters (its defaults, as nav.launch.py runs it), with the overrides
+/// of an experiment (twin2d.launch.py explorer_params, same names as the explorer's parameters).
+pub fn explorer_frontier_params(res: f64, overrides: &serde_json::Map<String, Value>) -> crate::explorer::FrontierParams {
+    let f = |k: &str, d: f64| overrides.get(k).and_then(Value::as_f64).unwrap_or(d);
+    crate::explorer::FrontierParams {
+        free_max: f("free_cost_max", 40.0) as i64,
+        pass_max: f("passable_cost_max", 98.0) as i64,
+        clear_max: f("goal_cost_max", 15.0) as i64,
+        min_cells: f("min_frontier_cells", 10.0) as i64,
+        standoff_cells: f("goal_standoff_m", 0.3) / res,
+        search_cells: f("goal_search_radius_m", 0.8) / res,
+    }
+}
+
 /// Every frontier group on the final global costmap (any size) and whether the explorer could
-/// use it, judged with its own functions and default parameters (min_frontier_cells 10, goal 0.3 m
-/// back from the frontier in cells of cost <= 15 within 0.8 m, reachable through cost <= 98).
+/// use it, judged with its own functions and parameters (by default min_frontier_cells 10, goal
+/// 0.3 m back from the frontier in cells of cost <= 15 within 0.8 m, reachable through cost <= 98).
 /// Also returns a PNG of the costmap with the groups coloured by verdict.
-pub fn frontier_report(cm: &CostGrid, robot: P2) -> (Vec<Value>, Option<Vec<u8>>) {
-    use crate::explorer::{frontier_goals, FrontierParams};
+pub fn frontier_report(cm: &CostGrid, robot: P2, overrides: &serde_json::Map<String, Value>) -> (Vec<Value>, Option<Vec<u8>>) {
+    use crate::explorer::frontier_goals;
     let (w, h, res) = (cm.width, cm.height, cm.res);
     if w == 0 || h == 0 || cm.data.len() != w * h {
         return (Vec::new(), None);
     }
-    let fp = FrontierParams { free_max: 40, pass_max: 98, clear_max: 15, min_cells: 10, standoff_cells: 0.3 / res, search_cells: 0.8 / res };
+    let fp = explorer_frontier_params(res, overrides);
     let rc = (((robot[1] - cm.origin[1]) / res) as i64, ((robot[0] - cm.origin[0]) / res) as i64);
     let (goals, seed) = frontier_goals(&cm.data, w, h, rc, &fp);
     // The robot's reachable component, as frontier_goals computes it.
@@ -486,7 +500,7 @@ pub fn frontier_report(cm: &CostGrid, robot: P2) -> (Vec<Value>, Option<Vec<u8>>
         let p = xy(centroid.0, centroid.1);
         let goal = goals.iter().find(|g| g.centroid == centroid);
         let (code, verdict) = if (n as i64) < fp.min_cells {
-            ('S', "too small (< 10 cells)".to_string())
+            ('S', format!("too small (< {} cells)", fp.min_cells))
         } else if !reachable {
             let how = if entry == i32::MAX {
                 "no known path to it".to_string()
@@ -498,7 +512,12 @@ pub fn frontier_report(cm: &CostGrid, robot: P2) -> (Vec<Value>, Option<Vec<u8>>
             let gp = xy(g.goal.0 as f64, g.goal.1 as f64);
             ('U', format!("usable: goal ({:.2}, {:.2}), {:.1} m from the robot", gp[0], gp[1], (gp[0] - robot[0]).hypot(gp[1] - robot[1])))
         } else {
-            ('C', "no clear spot (cost <= 15, 0.3 m from unknown) within 0.8 m".to_string())
+            ('C', format!(
+                "no clear spot to look from (cost <= {}, {:.2} m from unknown) within {:.2} m",
+                fp.clear_max,
+                fp.standoff_cells * res,
+                fp.search_cells * res
+            ))
         };
         codes.push(code);
         if n >= 3 {
@@ -608,7 +627,7 @@ mod tests {
             }
         }
         let cm = CostGrid { width: w, height: h, res: 0.05, origin: [0.0, 0.0], data: data.clone() };
-        let (groups, png) = frontier_report(&cm, [0.5, 1.0]);
+        let (groups, png) = frontier_report(&cm, [0.5, 1.0], &serde_json::Map::new());
         assert!(png.is_some());
         assert_eq!(groups.len(), 1, "{groups:?}");
         assert!(groups[0]["verdict"].as_str().unwrap().starts_with("usable"), "{groups:?}");
@@ -616,7 +635,7 @@ mod tests {
             data[r * w + 20] = 100;
         }
         let cm = CostGrid { data, ..cm };
-        let (groups, _) = frontier_report(&cm, [0.5, 1.0]);
+        let (groups, _) = frontier_report(&cm, [0.5, 1.0], &serde_json::Map::new());
         let pocket = groups.iter().find(|g| g["verdict"].as_str().unwrap().starts_with("not reachable")).expect("pocket");
         assert!(pocket["verdict"].as_str().unwrap().contains("crosses cost 100"), "{pocket}");
     }
