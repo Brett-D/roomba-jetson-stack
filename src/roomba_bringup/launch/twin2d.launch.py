@@ -103,6 +103,16 @@ def _setup(context):
         actions.append(Node(package='roomba_rs' if rust else 'roomba_driver', executable='roomba_driver',
                             name='roomba_driver', output='screen', parameters=[driver_params]))
     if lc('nav') == 'true':
+        # Experiments only (e.g. explorer_params:='{passable_cost_max: 252}'): parameter overrides for
+        # the nodes of nav.launch.py, applied as global parameters so nav.launch.py stays untouched.
+        # Nodes that don't declare a name ignore it.
+        overrides = yaml.safe_load(lc('explorer_params')) if lc('explorer_params') else {}
+        if not isinstance(overrides, dict):
+            raise RuntimeError('explorer_params must be a YAML mapping, e.g. {passable_cost_max: 252}')
+        for name, value in overrides.items():
+            actions.append(SetParameter(name=str(name), value=value))
+        if overrides:
+            actions.append(LogInfo(msg=f'[twin2d] experiment: nav/explorer parameter overrides {overrides}'))
         actions.append(IncludeLaunchDescription(
             PythonLaunchDescriptionSource(os.path.join(bringup, 'launch', 'nav.launch.py')),
             launch_arguments=[
@@ -154,6 +164,9 @@ def generate_launch_description():
         DeclareLaunchArgument('cam_pitch', default_value='0.0'),
         DeclareLaunchArgument('floor_height', default_value='',
                               description='floor_obstacles camera height (empty: cam_z x the scenario depth_scale)'),
+        DeclareLaunchArgument('explorer_params', default_value='',
+                              description='Experiments: YAML mapping of parameter overrides for the explorer '
+                                          '(and the other nav.launch.py nodes), e.g. {passable_cost_max: 252}'),
         # A run must stop quickly; nothing here saves a database on shutdown.
         DeclareLaunchArgument('sigkill_timeout', default_value='10'),
         SetParameter(name='use_sim_time', value=False),

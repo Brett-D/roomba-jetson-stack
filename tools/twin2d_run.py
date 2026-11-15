@@ -190,7 +190,7 @@ def run_one(scenario, seed, out_root, launch_args, sample_s):
     result_file = os.path.join(out, 'result.json')
     result = json.load(open(result_file)) if os.path.isfile(result_file) else {'outcome': 'no result.json'}
     result['run'] = {'out_dir': out, 'wall_s': round(time.monotonic() - started, 1), 'overran': overran,
-                     'left_running': left, 'cpu': cpu}
+                     'left_running': left, 'launch_args': launch_args, 'cpu': cpu}
     with open(os.path.join(out, 'run.json'), 'w') as f:
         json.dump(result['run'], f, indent=1)
     return stem, seed, result
@@ -247,7 +247,20 @@ def main():
     rows, results = [], []
     for sc in scenarios:
         for seed in seeds:
-            stem, seed_used, result = run_one(sc, seed, out_root, shlex.split(a.launch_args), a.sample_s)
+            for attempt in range(2):
+                stem, seed_used, result = run_one(sc, seed, out_root, shlex.split(a.launch_args), a.sample_s)
+                # Nav2's lifecycle bring-up occasionally hangs (a lost change_state response): the
+                # explorer then never starts. That says nothing about the scenario: run it again.
+                infra = (result.get('outcome') == 'explorer_failed_to_start'
+                         and 'Navigation is not running' in result.get('outcome_detail', ''))
+                if not infra or attempt == 1:
+                    break
+                print('   Nav2 never came up (lifecycle bring-up hung): running it again', flush=True)
+                result['run']['retried_after'] = 'Nav2 bring-up hung'
+                failed = os.path.join(out_root, 'nav2_bringup_failures')
+                os.makedirs(failed, exist_ok=True)
+                with open(os.path.join(failed, f'{stem}_{int(time.time())}.json'), 'w') as f:
+                    json.dump(result, f, indent=1)
             seed_used = result.get('seed', seed_used)
             rows.append(row(stem, seed_used, result))
             results.append({'scenario': stem, 'seed': seed_used, 'result': result})

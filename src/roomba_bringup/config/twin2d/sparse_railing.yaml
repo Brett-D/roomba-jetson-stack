@@ -1,0 +1,16 @@
+# The same railing as invisible_railing, but the stereo depth catches its posts now and then (15 %
+# of frames per post): RTAB-Map maps them as a row of dots, which map_gap_filler should join into a
+# fence before the robot drives into it.
+name: sparse_railing
+description: Railing across the open area at y = 1.3 whose posts the depth camera sees sporadically.
+seed: 1
+duration_s: 1800
+start: {x: 0.0, y: 0.0, yaw_deg: 0}
+dock: true
+railings:
+  - name: open_area_railing
+    points: [[1.2, 1.3], [4.4, 1.3]]
+    depth: sparse
+    sparse_prob: 0.15
+    post_spacing_m: 0.12
+    height_m: 0.9

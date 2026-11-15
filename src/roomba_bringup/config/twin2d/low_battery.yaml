@@ -1,12 +1,12 @@
-# The pack runs low part-way through: the explorer should notice (battery_state below
-# low_battery_fraction 0.2, through the driver's smoothed voltage gauge) and drive back to where it
-# started.
+# The pack runs low part-way through (the whole house takes the explorer ~4 minutes, so at 100 s):
+# the explorer should notice (battery_state below low_battery_fraction 0.2, through the driver's
+# voltage gauge, smoothed over 30 s) and drive back to where it started.
 name: low_battery
-description: Battery drops to 17 % at 240 s; the explorer should return to the start.
+description: Battery drops to 17 % at 100 s; the explorer should return to the start.
 seed: 1
 duration_s: 1200
 start: {x: 0.0, y: 0.0, yaw_deg: 0}
 dock: true
 battery: {soc: 0.5}
 events:
-  - {t: 240, battery_soc: 0.17}
+  - {t: 100, battery_soc: 0.17}
