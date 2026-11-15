@@ -11,15 +11,15 @@ The serial driver lives in its own repository and is included here as a submodul
 
 | Path | Contents |
 |---|---|
-| `src/roomba_bringup` | Launch files (`robot.launch.py`, `vslam.launch.py`, `nav.launch.py`, `handheld_slam.launch.py`), Nav2 configs, robot driver config |
+| `src/roomba_bringup` | Launch files (`robot.launch.py`, `vslam.launch.py`, `nav.launch.py`, `handheld_slam.launch.py`, `twin2d.launch.py`), Nav2 configs, robot driver config, digital-twin scenarios (`config/twin2d/`) |
 | `src/roomba_perception` | VSLAM watchdog/odometry filter with wheel bridging, EKF input conditioning (`ekf_inputs`), floor obstacle detection, explorer, ignore zones, nav coach, person detector, IMU calibration |
-| `src/roomba_rs` | Rust ports of the robot's ROS 2 nodes (rclrs): `floor_obstacles`, `ekf_inputs`, `vslam_watchdog`, `map_gap_filler`, `ignore_zones`, `roomba_driver`, `web_server`, `set_password`, `explorer`, `nav_coach` and `person_detector` (TensorRT and OpenCV through a small C++ shim in `native/`) (same topics, services, parameters, files and output as the Python nodes at a fraction of the CPU; `vendor/` holds generated Rust bindings for the Isaac ROS VSLAM interfaces). `tf_buffer`/`tf_listener` give rclrs nodes a tf2-equivalent TF buffer (bit-identical lookups). `rust_nodes:=false` switches back to the Python nodes |
+| `src/roomba_rs` | Rust ports of the robot's ROS 2 nodes (rclrs): `floor_obstacles`, `ekf_inputs`, `vslam_watchdog`, `map_gap_filler`, `ignore_zones`, `roomba_driver`, `web_server`, `set_password`, `explorer`, `nav_coach` and `person_detector` (TensorRT and OpenCV through a small C++ shim in `native/`) (same topics, services, parameters, files and output as the Python nodes at a fraction of the CPU; `vendor/` holds generated Rust bindings for the Isaac ROS VSLAM interfaces). `tf_buffer`/`tf_listener` give rclrs nodes a tf2-equivalent TF buffer (bit-identical lookups). `rust_nodes:=false` switches back to the Python nodes. `twin2d` is the 2D digital twin (see [Digital twin (2D)](#digital-twin-2d)) |
 | `src/roomba_web` | Web app on port 8080: live map, robot status, drive pad, tap-to-go navigation, login (the page, and the Python server used with `rust_nodes:=false`) |
 | `src/mynteye_d1000_driver` | ROS 2 node for the MYNT EYE D1000 stereo/depth/IMU camera |
 | `src/basalt_vio_ros` | ROS 2 wrapper for Basalt visual-inertial odometry |
 | `src/roomba-serial-ros2` | Roomba Open Interface driver (submodule) |
-| `scripts/` | `run_robot.sh`, `stop_slam.sh`, `graceful.py` (`ros2 launch` that SIGTERM / SIGINT stop cleanly), `record_run.sh` / `compare_pipelines.sh` (A vs B on a recorded drive), mapping/replay helpers, setup scripts |
-| `tools/` | Probes and diagnostics (motion step test, costmap/obstacle probes, map render, TF/drift/CPU-GPU checks, comparison monitor/renderer, Python vs Rust A/B checks); `tools/oi_tests/` holds early serial/OI bench scripts |
+| `scripts/` | `run_robot.sh`, `stop_slam.sh`, `graceful.py` (`ros2 launch` that SIGTERM / SIGINT stop cleanly), `record_run.sh` / `compare_pipelines.sh` (A vs B on a recorded drive), `run_twin2d.sh` (the 2D digital twin), mapping/replay helpers, setup scripts |
+| `tools/` | Probes and diagnostics (motion step test, costmap/obstacle probes, map render, TF/drift/CPU-GPU checks, comparison monitor/renderer, Python vs Rust A/B checks), `twin2d_world.py` / `twin2d_plan.py` / `twin2d_run.py` (digital twin floor plan from the map database or a vector plan, scenario runner); `tools/oi_tests/` holds early serial/OI bench scripts |
 | `docs/` | Wiring and power diagrams |
 | `hardware/platform` | 3D-printed platform: STLs, fit tests and the Python generator |
 
@@ -143,6 +143,120 @@ publishes `/vslam_filter/status`. The collision monitor always uses floor_obstac
 `~/bags/robot_<stamp>` (mcap, about 1.2 GB/min uncompressed). `compare_pipelines.sh` replays it through A and B
 (sim time, camera and Roomba drivers off), each into its own RTAB-Map database, and writes metrics (tracking losses,
 loop closures, map area, end-vs-start pose, CPU/GPU), a side-by-side map image and an overlay to `/data/maps/compare/`.
+
+## Digital twin (2D)
+
+`twin2d` (`src/roomba_rs`, launch `twin2d.launch.py`, script `scripts/run_twin2d.sh`) runs the robot's
+real navigation stack on a simulated Roomba in a 2D model of the house, on the Jetson, headless, so
+navigation and explorer problems can be reproduced, measured and used as regression tests.
+
+**What is real and what is simulated.** Real (the same binaries and configs as on the robot,
+`rust_nodes:=true`): `roomba_driver` (on a pty instead of the serial adapter, through a generated
+params file in the run directory), the camera mount TF, `imu_filter_madgwick`, `ignore_zones`,
+`nav.launch.py` (floor_obstacles, map_gap_filler, Nav2 with `nav2_robot.yaml`, nav_coach, explorer)
+and the web app. The twin node replaces the hardware, the VIO/watchdog and RTAB-Map:
+
+- *World*: the floor plan is the 2D grid of Brett's saved RTAB-Map database (map frame, 5 cm cells),
+  extracted with `tools/twin2d_world.py` (`rtabmap-export --map --opt 2` on a copy, then cleaned
+  conservatively: 1-2 cell free "spikes" traced through gaps removed, small enclosed unknown holes
+  filled). Every cell that isn't free is a full-height wall. Scenario files add doors (open/close
+  at given times), railings (invisible or sparse to the depth camera, seen by the bumpers and light
+  bumpers), obstacles with a height range (low thresholds, table tops the robot drives under),
+  people walking paths, cliffs (stairs), the dock, battery and tracking-loss events.
+  A vector floor plan can stand in for the grid: `tools/twin2d_plan.py --plan floorplan.json` (walls,
+  doors, doorways, rooms, stair openings, railings in the map frame; the reader accepts the usual
+  layouts) rasterises it onto the same cells and writes a `twin_overlay` next to the map YAML with
+  the plan's doors (closable; scenario doors given by name only, e.g.
+  `doors: [{name: kitchen, events: [...]}]`, are the plan's), stair openings as cliffs and railings
+  the depth camera can't see. Run it with `world:=/data/twin/twin2d/world_plan/plan.yaml`; coverage
+  is then measured against the whole floor, including rooms the robot never mapped.
+- *Roomba*: differential drive from the wheel speeds the Open Interface was told (acceleration
+  limit, optional turn scrub), collisions (it stops at what it hits, bumper pressed), bumper switches,
+  the six light bumpers (IR ray casts; this unit's front-left is the sensitive one), wall and cliff
+  sensors, falling down stairs, and the Ridgid pack's voltage under load. Its Open Interface on the
+  pty behaves like `tools/fake_roomba.py` and the robot: Off/Passive/Safe/Full (Safe drops to Passive
+  on a cliff or wheel drop), streams in both driver layouts every 15 ms, queries, pause/resume, reset.
+- *Camera*: 16UC1 depth registered to the left camera with the real intrinsics (640x360, 15 Hz,
+  0.3-7 m, optional noise, dropout and the real camera's short scale), 2.5D ray casting against walls,
+  bodies with heights, floor and ceiling (it looks down into stairwells); the camera driver's static
+  TF; a 200 Hz IMU (gravity, yaw rate, bias, noise) in `camera_imu_frame`; a grey preview image.
+- *Localisation*: `map -> odom -> base_link` from the ground truth (optionally drifting odometry that
+  RTAB-Map's map -> odom corrects every N s), `/odom`, `/vslam_filter/status`, `/visual_slam/status`.
+- *Mapping*: `/rtabmap/map` (latched) and `/rtabmap/mapPath` built the way RTAB-Map builds them on the
+  robot: a node per second when the robot moved, each from the decimated depth cloud (2.5 m range,
+  ground under 6 cm, obstacles to 1 m, noise filter, ray tracing, footprint), merged with RTAB-Map's
+  hit/miss log-odds. It starts unknown (or `initial_map: known`).
+
+Real time only, by design. The whole stack in the twin uses about 1.2 of the Jetson's 6 cores
+(twin2d itself about 0.2: 200 Hz physics and IMU, the 15 ms OI stream, depth frames rendered in
+5-9 ms at 15 Hz), so the CPU would allow roughly 3-4x. But the real nodes keep wall-clock time: the
+driver's safety logic, bump reflex and serial stream (`mono()`), the explorer's goal, response and
+finish timeouts (`mono()`), floor_obstacles' 6 Hz frame limit (`Instant`), nav_coach and the web app.
+On an accelerated `/clock` the driver would have to be replaced by an emulation, the explorer would
+wait 3x longer in simulated time and floor_obstacles would see a third of the frames: the timing
+being tested would no longer be the robot's.
+
+**Run it.**
+
+```bash
+tools/twin2d_world.py                         # once: /data/twin/twin2d/world/house.{pgm,yaml} from the map DB copy
+scripts/run_twin2d.sh scenario:=src/roomba_bringup/config/twin2d/explore_from_dock.yaml \
+                      out_dir:=/data/twin/twin2d/runs/try1          # foreground, ends by itself
+scripts/run_twin2d.sh exit_on_finish:=false foxglove:=true          # keep it running to watch / drive
+tools/twin2d_run.py explore_from_dock door_closes stairs --seeds 1,2   # batch, summary table
+```
+
+`ROS_DOMAIN_ID` defaults to 68 and discovery stays on the machine. Watch it in the web app at
+`http://<jetson>:18097` (password in `<out_dir>/home/.config/roomba_web/initial_password`; the real
+`~/.config/roomba_web` is never touched) or Foxglove (`foxglove:=true`, `ws://<jetson>:18765`:
+`/twin/world`, `/twin/ground_truth`, `/twin/state`, `/twin/events`, `/rtabmap/map`, costmaps, ...).
+The twin starts the explorer itself (`explorer.autostart_s`) and plays the operator: when the robot
+leaves Safe mode (cliff) and the explorer stops, it carries the robot back from the edge, re-enables
+driving and restarts the explorer (`operator.delay_s`, `max_interventions`).
+
+**Scenarios** (`src/roomba_bringup/config/twin2d/*.yaml`: explore_from_dock, door_closes,
+invisible_railing, sparse_railing, nose_to_wall, low_battery, person_walking, stairs, furniture; every
+key is optional, unknown keys are errors; see `src/roomba_rs/src/twin/scenario.rs` for all of them):
+
+```yaml
+name: door_closes
+seed: 1                        # noise, sparse posts; runs are repeatable apart from the real nodes' timing
+duration_s: 1800               # simulated seconds before the run ends (if the explorer isn't done)
+start: {x: 0.0, y: 0.0, yaw_deg: 0}   # map frame
+dock: true                     # a 0.32 x 0.15 m box behind the start pose
+initial_map: unknown           # or known
+explorer: {autostart_s: 15}    # negative: don't start it (drive from the web app)
+operator: {enabled: true, delay_s: 10, max_interventions: 3}
+battery: {soc: 0.95, capacity_ah: 4.0, drain_scale: 1}
+robot: {turn_efficiency: 1.0, stuck_bump_right: false}
+sensors: {depth_noise_a: 0.002, depth_noise_b: 0.003, depth_dropout: 0, depth_scale: 1.0}
+odometry: {scale_error: 0, yaw_drift_deg_per_m: 0, correction_period_s: 1}
+doors:     [{name: d, segment: [[-1.6, -1.2], [-0.75, -1.2]], events: [{t: 60, state: closed}, {t: 420, state: open}]}]
+railings:  [{name: r, points: [[1.2, 1.3], [4.4, 1.3]], depth: none}]        # none | sparse | solid
+obstacles: [{name: o, polygon: [[...]], zmin: 0.4, zmax: 0.45, depth: solid}]  # or circle: [x, y, r], segment
+people:    [{name: p, path: [[1.8, -0.35], [1.8, 2.4]], speed_mps: 0.7, from_s: 18, until_s: 618}]
+cliffs:    [{name: stairs, polygon: [[2.0, 2.3], [3.4, 2.3], [3.4, 2.95], [2.0, 2.95]]}]
+events:    [{t: 240, battery_soc: 0.17}, {t: 300, tracking_lost_s: 10}, {t: 400, explorer: stop}]
+```
+
+**Outputs** (in `out_dir`): `result.json` (outcome: explored / timeout / fell / stopped / ...,
+coverage of the true free floor and of the places the robot fits, over time; distance; every bump
+and contact with what was hit and where; stuck episodes - no 0.25 m of progress for 30 s while a Nav2
+goal is active - and idle waits (the explorer "exploring" without a goal); Nav2 goals sent / succeeded
+/ aborted / canceled and "false successes" (success reported more than 0.5 m from the goal); Nav2
+recoveries; driver bump stops and back-ups; collision monitor stops; explorer status, goals skipped
+and bump marks; operator interventions; battery; and `frontiers_at_end`: every frontier left on Nav2's
+global costmap with the explorer's verdict on it, judged with its own functions - too small,
+usable, no clear spot, or not reachable with the cheapest crossing cost into it), `trajectory.png`
+(map against the true floor plan: mapped free white, true floor never mapped pink, path blue to
+green, bumps orange crosses, stuck episodes magenta circles, doors brown, railings purple; the legend
+is in `result.json`), `costmap_end.png` (the final global costmap with the frontiers coloured by
+verdict: usable green, too small orange, unreachable red, no clear spot magenta), `timeline.csv`,
+`events.jsonl` (doors, bumps, explorer messages, Nav2 goals, driver and Nav2 warnings), the
+generated driver params, the zones file. `tools/twin2d_run.py` adds `cpu.json` (CPU per process)
+per run and `summary.md` / `summary.json`. A/B experiments with explorer parameters, without editing
+the robot's config: `explorer_params:='{passable_cost_max: 252}'` (twin2d.launch.py, or
+`tools/twin2d_run.py --launch-args "explorer_params:='{passable_cost_max: 252}'"`).
 
 ## Known quirks
 
