@@ -1,8 +1,11 @@
-//! Pure processing used by the Rust nodes, kept free of ROS types so it can be unit tested.
+//! Processing used by the Rust nodes, kept free of ROS types so it can be unit tested - except
+//! `tf_listener`, the /tf subscriptions feeding `tf_buffer` (tf2's BufferCore for rclrs nodes).
 pub mod ekf;
 pub mod floor;
 pub mod geometry;
 pub mod static_tf;
+pub mod tf_buffer;
+pub mod tf_listener;
 pub mod watchdog;
 
 /// Restores the default action (terminate) for SIGINT and SIGTERM. A process started in the
