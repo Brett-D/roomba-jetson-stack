@@ -24,4 +24,9 @@ pkill -9 -f '/opt/ros/jazzy/lib/(robot_localization|nvblox_ros)/' 2>/dev/null
 pkill -9 -f "roomba_(perception|web|driver|rs)/|basalt_vio_ros/|static_transform_publisher" 2>/dev/null
 pkill -9 -f "/opt/ros/jazzy/lib/nav2_" 2>/dev/null
 sleep 1
+# Processes killed with -9 leave Fast DDS shared-memory files behind, which can hang the next
+# launch while it sets up shared memory: remove the ones no running process still has open.
+for f in /dev/shm/fastrtps_* /dev/shm/sem.fastrtps_*; do
+    [ -e "$f" ] && ! fuser -s "$f" 2>/dev/null && rm -f "$f"
+done
 pgrep -af 'rtabmap|foxglove|d1000_node|imu_filter|republish|component_container|person_detector|ignore_zones|vslam_watchdog|basalt_vio_node|web_server|nav2_|floor_obstacles|nav_coach|explorer|roomba_driver|static_transform|ekf_node|ekf_inputs|nvblox_node' | grep -v pgrep || echo "all stopped"
