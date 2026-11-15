@@ -358,7 +358,9 @@ def generate_launch_description():
             # Mapping mode deletes the database, so zones drawn on the old map are set aside.
             'clear_on_start': PythonExpression(["'", localization, "' != 'true'"]),
         }],
-        condition=IfCondition(LaunchConfiguration('people')),
+        # Always on: besides the person detector's exclusion zones it serves the keep-out mask the
+        # costmaps use, including the explorer's bump and cliff marks (it once ran only with
+        # people:=true, so with the detector off every bump mark was silently dropped).
     )
 
     web_app = Node(

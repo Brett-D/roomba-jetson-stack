@@ -52,11 +52,20 @@ echo "Recording to $OUT (Ctrl-C to stop)"
 # Job control: the recorder gets its own process group and a normal SIGINT disposition (a
 # non-interactive shell would start it with SIGINT ignored); Ctrl-C reaches this script, whose
 # trap stops the recorder cleanly so the mcap file is finalized.
+# Started in the background (setsid/nohup), bash hands the recorder SIGINT *ignored* and Python
+# then never installs its handler: the --duration stop and Ctrl-C did nothing and one run filled
+# the disk. Reset SIGINT to default right before exec so the recorder handles it again.
 set -m
-ros2 bag record -s mcap "${COMPRESS[@]}" -o "$OUT" --topics "${TOPICS[@]}" > "${OUT}.log" 2>&1 &
+python3 -c 'import os, signal, sys; signal.signal(signal.SIGINT, signal.SIG_DFL); os.execvp(sys.argv[1], sys.argv[1:])' \
+  ros2 bag record -s mcap "${COMPRESS[@]}" -o "$OUT" --topics "${TOPICS[@]}" > "${OUT}.log" 2>&1 &
 REC=$!
 set +m
-trap 'kill -INT $REC 2>/dev/null' INT TERM
+STOP_AT=""
+stop_rec() {   # SIGINT finalizes the mcap; escalate if the recorder doesn't exit
+  [ -z "$STOP_AT" ] && STOP_AT=$(date +%s) && kill -INT $REC 2>/dev/null
+}
+trap stop_rec INT TERM
+MIN_FREE=$((3 * 1000 * 1000 * 1000))   # stop with 3 GB left on the disk
 
 START=$(date +%s.%N)
 LAST_T=$START; LAST_B=0
@@ -65,7 +74,15 @@ while kill -0 $REC 2>/dev/null; do
   NOW=$(date +%s.%N)
   ELAPSED=$(echo "$NOW - $START" | bc)
   if [ "$DURATION" != 0 ] && [ "$(echo "$ELAPSED >= $DURATION" | bc)" = 1 ]; then
-    kill -INT $REC 2>/dev/null
+    stop_rec
+  fi
+  if [ "$(df -B1 --output=avail "$(dirname "$OUT")" | tail -1)" -lt $MIN_FREE ] && [ -z "$STOP_AT" ]; then
+    echo "  disk almost full: stopping"; stop_rec
+  fi
+  if [ -n "$STOP_AT" ]; then
+    WAITED=$(( $(date +%s) - STOP_AT ))
+    [ $WAITED -ge 15 ] && kill -TERM $REC 2>/dev/null
+    [ $WAITED -ge 30 ] && { echo "  recorder ignored SIGINT/SIGTERM: killed (run ros2 bag reindex)"; kill -KILL $REC 2>/dev/null; }
   fi
   if [ "$(echo "$NOW - $LAST_T >= 15" | bc)" = 1 ]; then
     B=$(du -sb "$OUT" 2>/dev/null | cut -f1); B=${B:-0}
