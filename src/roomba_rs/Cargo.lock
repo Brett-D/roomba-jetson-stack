@@ -661,6 +661,7 @@ name = "roomba_rs"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "futures",
  "isaac_ros_visual_slam_interfaces",
  "libc",
  "rclrs",

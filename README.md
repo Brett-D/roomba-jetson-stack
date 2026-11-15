@@ -13,7 +13,7 @@ The serial driver lives in its own repository and is included here as a submodul
 |---|---|
 | `src/roomba_bringup` | Launch files (`robot.launch.py`, `vslam.launch.py`, `nav.launch.py`, `handheld_slam.launch.py`), Nav2 configs, robot driver config |
 | `src/roomba_perception` | VSLAM watchdog/odometry filter with wheel bridging, EKF input conditioning (`ekf_inputs`), floor obstacle detection, explorer, ignore zones, nav coach, person detector, IMU calibration |
-| `src/roomba_rs` | Rust ports of hot-path nodes (rclrs): `floor_obstacles`, `ekf_inputs`, `vslam_watchdog`, `map_gap_filler` and `ignore_zones` (same topics, parameters, files and output as the Python nodes at a fraction of the CPU; `vendor/` holds generated Rust bindings for the Isaac ROS VSLAM interfaces). `tf_buffer`/`tf_listener` give rclrs nodes a tf2-equivalent TF buffer (bit-identical lookups). `rust_nodes:=false` switches back to the Python nodes |
+| `src/roomba_rs` | Rust ports of hot-path nodes (rclrs): `floor_obstacles`, `ekf_inputs`, `vslam_watchdog`, `map_gap_filler`, `ignore_zones` and the Roomba serial driver `roomba_driver` (same topics, services, parameters, files and output as the Python nodes at a fraction of the CPU; `vendor/` holds generated Rust bindings for the Isaac ROS VSLAM interfaces). `tf_buffer`/`tf_listener` give rclrs nodes a tf2-equivalent TF buffer (bit-identical lookups). `rust_nodes:=false` switches back to the Python nodes |
 | `src/roomba_web` | Web app on port 8080: live map, robot status, drive pad, tap-to-go navigation, login |
 | `src/mynteye_d1000_driver` | ROS 2 node for the MYNT EYE D1000 stereo/depth/IMU camera |
 | `src/basalt_vio_ros` | ROS 2 wrapper for Basalt visual-inertial odometry |
@@ -72,6 +72,11 @@ records its grid and path; `tools/ab_map_gap_filler_offline.py` compares the fil
 cell and `tools/ab_ignore_zones_offline.py` the zone outputs (JSON, masks, markers, zones file) on
 scripted and random commands, clicks and bump marks; `tools/ab_scene_filter.py` checks the zone/line
 of sight helpers and `tools/ab_zones_gap_filler_cpu.sh` measures CPU and memory of both pairs.
+For the driver, `tools/fake_roomba.py` simulates the
+Roomba on a pseudo-terminal (scripted sensors, bumps, cliffs, charging, bad checksums, stream
+dropouts, sleep, reset); `tools/ab_driver.sh` runs both drivers through the same scenario
+(`tools/ab_driver_harness.py`) and `tools/ab_driver_compare.py` compares the serial bytes, topics,
+service responses, logs and shutdown bytes; `tools/ab_driver_cpu.sh` measures CPU.
 
 ## Run
 

@@ -15,7 +15,8 @@ Replays (scripts/compare_pipelines.sh) add camera:=false driver:=false use_sim_t
 Frames: map (RTAB-Map) -> odom (vslam_watchdog: VIO, wheel-bridged; or the EKF) -> base_link (Roomba centre
 on the floor, x forward) -> camera_link (static mount below) -> optical / IMU frames (camera driver).
 roomba_driver drives the wheels from /cmd_vel (Nav2's collision monitor, or the web app's drive pad)
-and publishes /wheel/odom, /battery_state and /roomba/sensors.
+and publishes /wheel/odom, /battery_state and /roomba/sensors. rust_nodes:=false runs the original
+Python nodes (driver included) instead of their Rust ports in roomba_rs.
 
 Camera mount defaults: centred, facing forward, level, lens 0.153 m ahead of the Roomba's centre
 (1.7 cm behind the front bumper edge) and 0.13 m above the floor (tape measure). In the depth
@@ -36,7 +37,8 @@ from launch_ros.substitutions import FindPackageShare
 
 # Passed through to vslam.launch.py unchanged.
 VSLAM_ARGS = ['mode', 'odometry', 'database_path', 'foxglove', 'people', 'web', 'web_port',
-              'ir_depth_only', 'ir_intensity', 'ground_constraint', 'fusion', 'camera', 'use_sim_time']
+              'ir_depth_only', 'ir_intensity', 'ground_constraint', 'fusion', 'camera', 'use_sim_time',
+              'rust_nodes']
 
 
 def _check_args(context):
@@ -81,6 +83,9 @@ def generate_launch_description():
         DeclareLaunchArgument('ir_intensity', default_value='4'),
         DeclareLaunchArgument('nav', default_value='true', description='Run Nav2'),
         DeclareLaunchArgument('driver', default_value='true', description='Run the Roomba base driver'),
+        DeclareLaunchArgument('rust_nodes', default_value='true',
+                              description='Use the Rust ports (package roomba_rs) of nodes that have one, the '
+                                          'Roomba driver included; false = the original Python nodes'),
         DeclareLaunchArgument('driver_params', default_value=PathJoinSubstitution(
             [bringup, 'config', 'roomba_driver_robot.yaml'])),
         DeclareLaunchArgument('nav_params', default_value=PythonExpression([
@@ -114,8 +119,10 @@ def generate_launch_description():
         ],
     )
 
+    # Rust port (roomba_rs): same topics, services, parameters and serial bytes, ~1/10 of the CPU.
     driver = Node(
-        package='roomba_driver', executable='roomba_driver', name='roomba_driver', output='screen',
+        package=PythonExpression(["'roomba_rs' if '", lc('rust_nodes'), "' == 'true' else 'roomba_driver'"]),
+        executable='roomba_driver', name='roomba_driver', output='screen',
         parameters=[lc('driver_params')],
         condition=IfCondition(lc('driver')),
     )
@@ -126,6 +133,7 @@ def generate_launch_description():
             ('params_file', lc('nav_params')),
             ('base_frame', 'base_link'),
             ('robot_mode', 'true'),
+            ('rust_nodes', lc('rust_nodes')),
             ('fallback_camera_height_m', lc('floor_height')),
             # Rigid mount: pin the floor instead of re-detecting it every frame (the floor
             # often fills too little of the view to detect, e.g. facing furniture on carpet).
