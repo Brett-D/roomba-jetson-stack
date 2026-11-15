@@ -331,8 +331,9 @@ pub struct DoorCfg {
     pub segment: Option<[P2; 2]>,
     #[serde(default = "default_thickness")]
     pub thickness: f64,
+    /// Closed at the start (default open).
     #[serde(default)]
-    pub closed: bool,
+    pub closed: Option<bool>,
     #[serde(default)]
     pub events: Vec<DoorEvent>,
 }
@@ -340,6 +341,35 @@ pub struct DoorCfg {
 impl DoorCfg {
     pub fn shape(&self) -> Result<Shape> {
         area_shape(&self.polygon, &self.circle, &self.segment, self.thickness).with_context(|| format!("door {}", self.name))
+    }
+
+    fn has_geometry(&self) -> bool {
+        self.polygon.is_some() || self.circle.is_some() || self.segment.is_some()
+    }
+
+    pub fn closed_at_start(&self) -> bool {
+        self.closed.unwrap_or(false)
+    }
+}
+
+/// What a world brings with it besides its grid - a floor plan's doors, railings, stair openings
+/// (cliffs) and fixed obstacles - in the scenario file's format. A world's map YAML names it with
+/// `twin_overlay: <file>` (tools/twin2d_world.py --plan writes both).
+#[derive(Deserialize, Clone, Debug, Default)]
+#[serde(default, deny_unknown_fields)]
+pub struct WorldOverlay {
+    pub name: String,
+    pub description: String,
+    pub doors: Vec<DoorCfg>,
+    pub railings: Vec<RailingCfg>,
+    pub obstacles: Vec<ObstacleCfg>,
+    pub cliffs: Vec<CliffCfg>,
+}
+
+impl WorldOverlay {
+    pub fn load(path: &str) -> Result<WorldOverlay> {
+        let text = std::fs::read_to_string(path).with_context(|| format!("cannot read world overlay {path}"))?;
+        serde_yaml::from_str(&text).with_context(|| format!("world overlay {path}"))
     }
 }
 
@@ -497,7 +527,10 @@ impl Scenario {
             bail!("initial_map must be unknown or known, not '{}'", self.initial_map);
         }
         for d in &self.doors {
-            d.shape()?;
+            // A door with only a name takes its geometry from the world (merge_world).
+            if d.has_geometry() {
+                d.shape()?;
+            }
             for e in &d.events {
                 if !matches!(e.state.as_str(), "open" | "closed") {
                     bail!("door {}: state must be open or closed, not '{}'", d.name, e.state);
@@ -548,6 +581,35 @@ impl Scenario {
         [self.start.x, self.start.y, self.start.yaw_deg.to_radians()]
     }
 
+    /// Adds a world's own objects (its overlay). A scenario door given by name only (with events)
+    /// is the world's door of that name; world doors the scenario doesn't mention keep their
+    /// state; the scenario's own `closed` wins over the world's.
+    pub fn merge_world(&mut self, w: &WorldOverlay) -> Result<()> {
+        for wd in &w.doors {
+            match self.doors.iter_mut().find(|d| d.name == wd.name) {
+                Some(sd) => {
+                    if !sd.has_geometry() {
+                        sd.polygon = wd.polygon.clone();
+                        sd.circle = wd.circle;
+                        sd.segment = wd.segment;
+                        sd.thickness = wd.thickness;
+                    }
+                    if sd.closed.is_none() {
+                        sd.closed = wd.closed;
+                    }
+                }
+                None => self.doors.push(wd.clone()),
+            }
+        }
+        if let Some(d) = self.doors.iter().find(|d| !d.has_geometry()) {
+            bail!("door {}: no geometry, and the world has no door of that name", d.name);
+        }
+        self.railings.extend(w.railings.iter().cloned());
+        self.obstacles.extend(w.obstacles.iter().cloned());
+        self.cliffs.extend(w.cliffs.iter().cloned());
+        self.check()
+    }
+
     /// Adds the scenario's doors, railings, obstacles, people (inactive until they appear), dock
     /// and cliffs to the world. Returns the body index of each door and person, in file order.
     pub fn populate(&self, world: &mut World) -> Result<(Vec<usize>, Vec<usize>)> {
@@ -563,7 +625,7 @@ impl Scenario {
                 depth: DepthVis::Solid,
                 ir: true,
                 blocks: true,
-                active: d.closed,
+                active: d.closed_at_start(),
             });
         }
         for r in &self.railings {
@@ -783,6 +845,30 @@ events:
         assert!(Scenario::parse("events: [{t: 1}]").is_err());
         assert!(Scenario::parse("events: [{t: 1, battery_soc: 0.1, end: true}]").is_err());
         assert!(Scenario::parse("doors: [{name: d, segment: [[0,0],[1,0]], events: [{t: 1, state: ajar}]}]").is_err());
+    }
+
+    #[test]
+    fn world_overlay_doors_merge_by_name() {
+        let overlay: WorldOverlay = serde_yaml::from_str(
+            r#"
+name: plan
+doors:
+  - {name: kitchen, segment: [[0, 0], [0.8, 0]], closed: true}
+  - {name: bath, segment: [[2, 0], [2.7, 0]]}
+railings: [{name: stair_rail, points: [[0, 3], [2, 3]]}]
+cliffs: [{name: stairs, polygon: [[0, 3], [2, 3], [2, 4], [0, 4]]}]
+"#,
+        )
+        .unwrap();
+        let mut s = Scenario::parse("doors: [{name: kitchen, events: [{t: 10, state: open}]}]").unwrap();
+        s.merge_world(&overlay).unwrap();
+        assert_eq!(s.doors.len(), 2);
+        let k = &s.doors[0];
+        assert!(k.closed_at_start() && k.segment.is_some() && k.events.len() == 1);
+        assert!(!s.doors[1].closed_at_start());
+        assert_eq!((s.railings.len(), s.cliffs.len()), (1, 1));
+        let mut bad = Scenario::parse("doors: [{name: garage, events: [{t: 10, state: open}]}]").unwrap();
+        assert!(bad.merge_world(&overlay).is_err());
     }
 
     #[test]

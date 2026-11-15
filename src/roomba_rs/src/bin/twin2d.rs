@@ -42,7 +42,7 @@ use roomba_rs::twin::metrics::{self, driving_state, round, CostGrid, Metrics, Sa
 use roomba_rs::twin::oi_sim::OiSim;
 use roomba_rs::twin::physics::{wrap, Pack, Robot, StepEvent};
 use roomba_rs::twin::rng::Rng;
-use roomba_rs::twin::scenario::{person_position, Scenario};
+use roomba_rs::twin::scenario::{person_position, Scenario, WorldOverlay};
 use roomba_rs::twin::world::{Body, Grid, Kind, World, P2};
 use roomba_rs::watchdog::ParamSource;
 
@@ -461,7 +461,7 @@ impl Sim {
         let r = self.robot.cfg.radius_m;
         for (n, d) in self.scenario.doors.clone().iter().enumerate() {
             let id = self.door_ids[n];
-            let mut want = d.closed;
+            let mut want = d.closed_at_start();
             for e in &d.events {
                 if t >= e.t {
                     want = e.state == "closed";
@@ -1123,6 +1123,19 @@ fn main() -> Result<()> {
         let _ = std::fs::copy(&p.scenario, format!("{}/scenario.yaml", p.out_dir));
     }
     let grid = Grid::load(&p.world)?;
+    if let Some(path) = roomba_rs::twin::world::overlay_path(&p.world)? {
+        let overlay = WorldOverlay::load(&path)?;
+        scenario.merge_world(&overlay)?;
+        log!(
+            node.info(),
+            "world overlay {path} ('{}'): {} doors, {} railings, {} obstacles, {} cliffs",
+            overlay.name,
+            overlay.doors.len(),
+            overlay.railings.len(),
+            overlay.obstacles.len(),
+            overlay.cliffs.len()
+        );
+    }
     let mut world = World::new(grid);
     let (door_ids, people_ids) = scenario.populate(&mut world)?;
     let start = scenario.start_pose();

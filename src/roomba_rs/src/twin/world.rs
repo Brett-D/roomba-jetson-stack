@@ -57,6 +57,17 @@ struct MapYaml {
     negate: i32,
     #[serde(default = "default_free_thresh")]
     free_thresh: f64,
+    /// The world's own objects (doors, railings, cliffs: scenario::WorldOverlay), next to the YAML.
+    #[serde(default)]
+    twin_overlay: Option<String>,
+}
+
+/// The `twin_overlay` file a world's map YAML names, as a path (None if it names none).
+pub fn overlay_path(yaml_path: &str) -> Result<Option<String>> {
+    let text = std::fs::read_to_string(yaml_path).with_context(|| format!("cannot read {yaml_path}"))?;
+    let m: MapYaml = serde_yaml::from_str(&text).with_context(|| format!("bad map yaml {yaml_path}"))?;
+    let dir = std::path::Path::new(yaml_path).parent().unwrap_or(std::path::Path::new("."));
+    Ok(m.twin_overlay.map(|o| dir.join(o).to_string_lossy().to_string()))
 }
 
 fn default_free_thresh() -> f64 {
