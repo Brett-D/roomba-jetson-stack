@@ -25,14 +25,21 @@ pub mod watchdog;
 pub mod web;
 pub mod zones;
 
-/// Restores the default action (terminate) for SIGINT and SIGTERM. A process started in the
-/// background by a non-interactive shell (run_robot.sh, record scripts) inherits SIGINT as
-/// ignored, and rclrs installs no handler, so without this Ctrl-C / launch shutdown would not
-/// stop the node. Call first thing in main().
+/// Makes SIGINT and SIGTERM end the process at once with exit status 0, as an rclpy node exits on
+/// Ctrl-C (killed by the signal, launch reported every Rust node as "process has died" with an
+/// ERROR line at each shutdown). A process started in the background by a non-interactive shell
+/// (run_robot.sh, record scripts) inherits SIGINT as ignored, and rclrs installs no handler, so
+/// without this Ctrl-C / launch shutdown would not stop the node. Call first thing in main().
+/// Nodes that need to act on shutdown block the signals afterwards and take them with
+/// [`node_params::on_signal`].
 pub fn default_signals() {
-    // SAFETY: signal() with SIG_DFL only changes this process's signal dispositions.
+    extern "C" fn exit_now(_: libc::c_int) {
+        // SAFETY: _exit is async-signal-safe.
+        unsafe { libc::_exit(0) }
+    }
+    // SAFETY: signal() only changes this process's signal dispositions; the handler only calls _exit.
     unsafe {
-        libc::signal(libc::SIGINT, libc::SIG_DFL);
-        libc::signal(libc::SIGTERM, libc::SIG_DFL);
+        libc::signal(libc::SIGINT, exit_now as extern "C" fn(libc::c_int) as libc::sighandler_t);
+        libc::signal(libc::SIGTERM, exit_now as extern "C" fn(libc::c_int) as libc::sighandler_t);
     }
 }
