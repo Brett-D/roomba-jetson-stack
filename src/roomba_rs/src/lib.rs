@@ -3,6 +3,7 @@ pub mod ekf;
 pub mod floor;
 pub mod geometry;
 pub mod static_tf;
+pub mod watchdog;
 
 /// Restores the default action (terminate) for SIGINT and SIGTERM. A process started in the
 /// background by a non-interactive shell (run_robot.sh, record scripts) inherits SIGINT as

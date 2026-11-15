@@ -13,13 +13,13 @@ The serial driver lives in its own repository and is included here as a submodul
 |---|---|
 | `src/roomba_bringup` | Launch files (`robot.launch.py`, `vslam.launch.py`, `nav.launch.py`, `handheld_slam.launch.py`), Nav2 configs, robot driver config |
 | `src/roomba_perception` | VSLAM watchdog/odometry filter with wheel bridging, EKF input conditioning (`ekf_inputs`), floor obstacle detection, explorer, ignore zones, nav coach, person detector, IMU calibration |
-| `src/roomba_rs` | Rust ports of hot-path nodes (rclrs): `floor_obstacles` and `ekf_inputs` (same topics, parameters and output as the Python nodes, ~1/7 of the CPU). `rust_nodes:=false` switches back to the Python nodes |
+| `src/roomba_rs` | Rust ports of hot-path nodes (rclrs): `floor_obstacles`, `ekf_inputs` and `vslam_watchdog` (same topics, parameters and output as the Python nodes at 1/7 to 1/12 of the CPU; `vendor/` holds generated Rust bindings for the Isaac ROS VSLAM interfaces). `rust_nodes:=false` switches back to the Python nodes |
 | `src/roomba_web` | Web app on port 8080: live map, robot status, drive pad, tap-to-go navigation, login |
 | `src/mynteye_d1000_driver` | ROS 2 node for the MYNT EYE D1000 stereo/depth/IMU camera |
 | `src/basalt_vio_ros` | ROS 2 wrapper for Basalt visual-inertial odometry |
 | `src/roomba-serial-ros2` | Roomba Open Interface driver (submodule) |
 | `scripts/` | `run_robot.sh`, `stop_slam.sh`, `record_run.sh` / `compare_pipelines.sh` (A vs B on a recorded drive), mapping/replay helpers, setup scripts |
-| `tools/` | Probes and diagnostics (motion step test, costmap/obstacle probes, map render, TF/drift/CPU-GPU checks, comparison monitor/renderer); `tools/oi_tests/` holds early serial/OI bench scripts |
+| `tools/` | Probes and diagnostics (motion step test, costmap/obstacle probes, map render, TF/drift/CPU-GPU checks, comparison monitor/renderer, Python vs Rust A/B checks); `tools/oi_tests/` holds early serial/OI bench scripts |
 | `docs/` | Wiring and power diagrams |
 | `hardware/platform` | 3D-printed platform: STLs, fit tests and the Python generator |
 
@@ -63,7 +63,10 @@ colcon build --symlink-install
 
 Python vs Rust checks on a recorded drive: `tools/ab_floor_obstacles.sh` (side by side, frame by
 frame, plus CPU), `tools/ab_ekf_offline.py` (same message sequence into both, every output compared)
-and `tools/ab_ekf_inputs.sh` (CPU).
+and `tools/ab_ekf_inputs.sh` (CPU). For the watchdog, `tools/record_vio_replay.sh` first replays a
+raw recording through the VIO and records its output; `tools/ab_watchdog_offline.py` then feeds that
+to both watchdogs (TF, odometry, status, service calls and logs compared, optionally with injected
+faults) and `tools/ab_watchdog.sh` measures CPU.
 
 ## Run
 

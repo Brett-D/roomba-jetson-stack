@@ -467,6 +467,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "isaac_ros_visual_slam_interfaces"
+version = "4.6.0"
+dependencies = [
+ "ros-env",
+ "rosidl_runtime_rs",
+]
+
+[[package]]
 name = "itertools"
 version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -641,6 +649,7 @@ name = "roomba_rs"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "isaac_ros_visual_slam_interfaces",
  "libc",
  "rclrs",
  "ros-env",

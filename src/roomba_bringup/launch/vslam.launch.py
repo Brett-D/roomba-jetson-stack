@@ -86,6 +86,9 @@ def _watchdog(context):
     if fusion == 'ekf' and platform != 'robot':
         raise RuntimeError('fusion:=ekf needs wheel odometry: robot only (robot.launch.py)')
     params = {'base_frame': LaunchConfiguration('base_frame').perform(context)}
+    # Rust ports (roomba_rs) of the watchdog and ekf_inputs: identical output on recorded drives
+    # (tools/ab_watchdog_offline.py, tools/ab_ekf_offline.py) at a fraction of the CPU.
+    pkg = 'roomba_rs' if LaunchConfiguration('rust_nodes').perform(context) == 'true' else 'roomba_perception'
     if platform == 'robot':
         params.update({
             'max_speed_mps': 0.6,
@@ -101,14 +104,12 @@ def _watchdog(context):
         bringup = FindPackageShare('roomba_bringup').perform(context)
         nodes += [
             # Calibrated wheel twist and bias-free gyro with honest covariances for the EKF.
-            # Rust port (roomba_rs): identical output on a recorded drive, ~1/7 of the CPU.
-            Node(package='roomba_rs' if LaunchConfiguration('rust_nodes').perform(context) == 'true'
-                 else 'roomba_perception', executable='ekf_inputs', name='ekf_inputs', output='screen'),
+            Node(package=pkg, executable='ekf_inputs', name='ekf_inputs', output='screen'),
             Node(package='robot_localization', executable='ekf_node', name='ekf_filter_node',
                  output='screen', parameters=[os.path.join(bringup, 'config', 'ekf_robot.yaml')],
                  remappings=[('odometry/filtered', '/odom')]),
         ]
-    return [Node(package='roomba_perception', executable='vslam_watchdog', name='vslam_watchdog',
+    return [Node(package=pkg, executable='vslam_watchdog', name='vslam_watchdog',
                  output='screen', parameters=[params])] + nodes
 
 

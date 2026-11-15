@@ -16,8 +16,14 @@ path = "src/bin/floor_obstacles.rs"
 name = "ekf_inputs"
 path = "src/bin/ekf_inputs.rs"
 
+[[bin]]
+name = "vslam_watchdog"
+path = "src/bin/vslam_watchdog.rs"
+
 [dependencies]
 anyhow = "1"
+# Generated bindings for NVIDIA's message package (its debs ship none), see vendor/.../regenerate.sh
+isaac_ros_visual_slam_interfaces = { path = "vendor/isaac_ros_visual_slam_interfaces" }
 libc = "0.2"
 rclrs = "0.8"
 ros-env = "0.3"
