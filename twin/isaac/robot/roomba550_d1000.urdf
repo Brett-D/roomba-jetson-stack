@@ -1,0 +1,181 @@
+<?xml version="1.0"?>
+<!--
+  Roomba 550 + MYNT EYE D1000-120 for the Isaac Sim training twin.
+
+  Frames match the real robot (robot.launch.py camera_mount_tf + the D1000 driver's /tf_static,
+  read from the fresh_map8 recording, see twin/isaac/README.md):
+    base_link                  Roomba centre on the floor, x forward, z up
+    camera_link                lens centre line, 0.153 m ahead, 0.13 m up (tape measure)
+    camera_left_optical_frame  y +0.05919 (baseline 0.118378 m), z forward / x right / y down
+    camera_right_optical_frame y -0.05919
+    camera_imu_frame           child of the left optical frame, values copied from the driver's TF
+  Drive: wheel base 0.235 m, wheel diameter 0.072 m (roomba_driver_robot.yaml / kinematics.rs).
+  Casters: a front caster wheel and a rear skid, modelled as spheres on base_link; the Isaac Sim
+  build script gives them a zero-friction material.
+-->
+<robot name="roomba550_d1000">
+
+  <material name="roomba_black"><color rgba="0.08 0.08 0.09 1"/></material>
+  <material name="roomba_grey"><color rgba="0.35 0.36 0.38 1"/></material>
+  <material name="wheel_black"><color rgba="0.03 0.03 0.03 1"/></material>
+  <material name="camera_black"><color rgba="0.12 0.12 0.13 1"/></material>
+  <material name="lens"><color rgba="0.02 0.02 0.05 1"/></material>
+  <material name="payload"><color rgba="0.55 0.12 0.10 1"/></material>
+
+  <!-- ===================== base ===================== -->
+  <link name="base_link">
+    <inertial>
+      <!-- Roomba + Jetson + Ridgid pack ~4.2 kg, centre of mass slightly ahead of the axle -->
+      <origin xyz="0.01 0 0.05" rpy="0 0 0"/>
+      <mass value="4.2"/>
+      <inertia ixx="0.0326" ixy="0" ixz="0" iyy="0.0326" iyz="0" izz="0.0607"/>
+    </inertial>
+    <!-- body shell: 0.34 m diameter, bottom 12 mm above the floor, top at 0.092 m -->
+    <visual name="body">
+      <origin xyz="0 0 0.052" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.17" length="0.080"/></geometry>
+      <material name="roomba_black"/>
+    </visual>
+    <visual name="top_plate">
+      <origin xyz="0 0 0.0925" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.155" length="0.002"/></geometry>
+      <material name="roomba_grey"/>
+    </visual>
+    <!-- Jetson + power bank + Ridgid pack on the lid (visual only) -->
+    <visual name="payload">
+      <origin xyz="-0.06 0 0.122" rpy="0 0 0"/>
+      <geometry><box size="0.14 0.12 0.06"/></geometry>
+      <material name="payload"/>
+    </visual>
+    <!-- camera mast from the lid up to the D1000 -->
+    <visual name="camera_mast">
+      <origin xyz="0.140 0 0.105" rpy="0 0 0"/>
+      <geometry><box size="0.025 0.040 0.024"/></geometry>
+      <material name="camera_black"/>
+    </visual>
+    <collision name="body">
+      <origin xyz="0 0 0.052" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.17" length="0.080"/></geometry>
+    </collision>
+    <collision name="payload">
+      <origin xyz="-0.06 0 0.122" rpy="0 0 0"/>
+      <geometry><box size="0.14 0.12 0.06"/></geometry>
+    </collision>
+    <!-- front caster wheel and rear skid -->
+    <collision name="caster_front">
+      <origin xyz="0.13 0 0.015" rpy="0 0 0"/>
+      <geometry><sphere radius="0.015"/></geometry>
+    </collision>
+    <collision name="caster_rear">
+      <origin xyz="-0.13 0 0.017" rpy="0 0 0"/>
+      <geometry><sphere radius="0.015"/></geometry>
+    </collision>
+  </link>
+
+  <!-- ===================== wheels ===================== -->
+  <link name="left_wheel_link">
+    <inertial>
+      <mass value="0.15"/>
+      <inertia ixx="5.4e-5" ixy="0" ixz="0" iyy="9.7e-5" iyz="0" izz="5.4e-5"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="1.5707963 0 0"/>
+      <geometry><cylinder radius="0.036" length="0.020"/></geometry>
+      <material name="wheel_black"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="1.5707963 0 0"/>
+      <geometry><cylinder radius="0.036" length="0.020"/></geometry>
+    </collision>
+  </link>
+  <joint name="left_wheel_joint" type="continuous">
+    <parent link="base_link"/>
+    <child link="left_wheel_link"/>
+    <origin xyz="0 0.1175 0.036" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit effort="2.0" velocity="12.0"/>
+    <dynamics damping="0.0" friction="0.0"/>
+  </joint>
+
+  <link name="right_wheel_link">
+    <inertial>
+      <mass value="0.15"/>
+      <inertia ixx="5.4e-5" ixy="0" ixz="0" iyy="9.7e-5" iyz="0" izz="5.4e-5"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="1.5707963 0 0"/>
+      <geometry><cylinder radius="0.036" length="0.020"/></geometry>
+      <material name="wheel_black"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="1.5707963 0 0"/>
+      <geometry><cylinder radius="0.036" length="0.020"/></geometry>
+    </collision>
+  </link>
+  <joint name="right_wheel_joint" type="continuous">
+    <parent link="base_link"/>
+    <child link="right_wheel_link"/>
+    <origin xyz="0 -0.1175 0.036" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit effort="2.0" velocity="12.0"/>
+    <dynamics damping="0.0" friction="0.0"/>
+  </joint>
+
+  <!-- ===================== camera ===================== -->
+  <!-- D1000-120 housing ~165 x 31.5 x 29.6 mm; camera_link sits on the lens line at the front face -->
+  <link name="camera_link">
+    <inertial>
+      <origin xyz="-0.015 0 0" rpy="0 0 0"/>
+      <mass value="0.2"/>
+      <inertia ixx="4.7e-4" ixy="0" ixz="0" iyy="3.2e-5" iyz="0" izz="4.7e-4"/>
+    </inertial>
+    <visual name="housing">
+      <origin xyz="-0.0155 0 0" rpy="0 0 0"/>
+      <geometry><box size="0.030 0.165 0.0296"/></geometry>
+      <material name="camera_black"/>
+    </visual>
+    <visual name="lens_left">
+      <origin xyz="0.0005 0.05919 0" rpy="0 1.5707963 0"/>
+      <geometry><cylinder radius="0.008" length="0.002"/></geometry>
+      <material name="lens"/>
+    </visual>
+    <visual name="lens_right">
+      <origin xyz="0.0005 -0.05919 0" rpy="0 1.5707963 0"/>
+      <geometry><cylinder radius="0.008" length="0.002"/></geometry>
+      <material name="lens"/>
+    </visual>
+    <collision>
+      <origin xyz="-0.0155 0 0" rpy="0 0 0"/>
+      <geometry><box size="0.030 0.165 0.0296"/></geometry>
+    </collision>
+  </link>
+  <joint name="camera_mount_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="camera_link"/>
+    <origin xyz="0.153 0 0.13" rpy="0 0 0"/>
+  </joint>
+
+  <link name="camera_left_optical_frame"/>
+  <joint name="camera_left_optical_joint" type="fixed">
+    <parent link="camera_link"/>
+    <child link="camera_left_optical_frame"/>
+    <origin xyz="0 0.0591889534 0" rpy="-1.5707963268 0 -1.5707963268"/>
+  </joint>
+
+  <link name="camera_right_optical_frame"/>
+  <joint name="camera_right_optical_joint" type="fixed">
+    <parent link="camera_link"/>
+    <child link="camera_right_optical_frame"/>
+    <origin xyz="0 -0.0591889534 0" rpy="-1.5707963268 0 -1.5707963268"/>
+  </joint>
+
+  <!-- driver TF: left optical -> imu, xyzw (0.999987, 0.002164, 0.003472, -0.002883),
+       i.e. x right, y up, z backward relative to the robot -->
+  <link name="camera_imu_frame"/>
+  <joint name="camera_imu_joint" type="fixed">
+    <parent link="camera_left_optical_frame"/>
+    <child link="camera_imu_frame"/>
+    <origin xyz="0.0477928466 -0.0020221540 -0.0012811425" rpy="-3.135841 -0.006957 0.004309"/>
+  </joint>
+
+</robot>
