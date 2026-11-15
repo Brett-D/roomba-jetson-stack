@@ -32,12 +32,13 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 ap = argparse.ArgumentParser()
 ap.add_argument('--seconds', type=float, default=60.0, help='simulated seconds to run')
 ap.add_argument('--people', type=int, default=4)
-ap.add_argument('--look', default='scan', choices=['scan', 'clean'])
+ap.add_argument('--look', default='remodel', choices=['remodel', 'scan', 'clean'])
 ap.add_argument('--drive', default='none', choices=['none', 'path'])
 ap.add_argument('--path-start', type=int, default=0, help='index into the RTAB-Map path to start from')
 ap.add_argument('--speed', type=float, default=0.2)
 ap.add_argument('--record', default=None, help='directory for captured frames')
 ap.add_argument('--record-every', type=int, default=3, help='save every Nth published image frame')
+ap.add_argument('--drive-log', default=None, help='CSV of the path drive (1 Hz: pose, path index, stuck flag)')
 args, _ = ap.parse_known_args()
 
 # Bundled ROS 2 Jazzy: must be on the DLL path before rclpy / the bridge load.
@@ -283,6 +284,12 @@ wall0 = time.monotonic()
 n_upd = n_img = 0
 import cv2  # noqa: E402
 
+drive_log = None
+if args.drive_log:
+    os.makedirs(os.path.dirname(os.path.abspath(args.drive_log)), exist_ok=True)
+    drive_log = csv.writer(open(args.drive_log, 'w', newline=''))
+    drive_log.writerow(['t', 'x', 'y', 'yaw_deg', 'path_idx', 'v_cmd', 'w_cmd', 'moved_5s_m', 'stuck'])
+hist = []      # (t, x, y) for the stuck detector
 print('LOOP_START', flush=True)
 
 while app.is_running():
@@ -303,6 +310,17 @@ while app.is_running():
     art.set_dof_velocity_targets(tgt)
     app_update(1)
     n_upd += 1
+    if drive_log is not None and n_upd % 60 == 0:      # 1 Hz drive log
+        p1, _, yaw1 = pose()
+        t1 = SimulationManager.get_simulation_time()
+        hist.append((t1, p1[0], p1[1]))
+        old = [h for h in hist if t1 - h[0] >= 5.0]
+        moved = math.hypot(p1[0] - old[-1][1], p1[1] - old[-1][2]) if old else float('nan')
+        stuck = int(bool(old) and moved < 0.05 and abs(v) > 0)
+        drive_log.writerow([f'{t1:.2f}', f'{p1[0]:.3f}', f'{p1[1]:.3f}', f'{math.degrees(yaw1):.1f}',
+                            pp.i if pp else -1, f'{v:.2f}', f'{w:.2f}', f'{moved:.3f}', stuck])
+        if n_upd % 600 == 0:
+            print(f'DRIVE t {t1:.0f} idx {pp.i if pp else -1} pose {p1[0]:.2f} {p1[1]:.2f} stuck {stuck}', flush=True)
     t = SimulationManager.get_simulation_time()
     ck = Clock()
     ck.clock = stamp(t)

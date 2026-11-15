@@ -121,8 +121,7 @@ rail_out = []
 for rail in pl.railing_polylines(plan):
     ptsm = frame.m(rail['pts'])
     z0 = -0.03 if rail.get('outdoor') else 0.0
-    els += rl.railing_elements(ptsm, z0=z0)
-    rail_out.append({'name': rail['name'], 'pts_m': ptsm})
+    rail_out.append({'name': rail['name'], 'pts_m': ptsm, 'els': rl.railing_elements(ptsm, z0=z0)})
 
 # ---------------- fixtures ----------------
 for f in plan['fixtures']:
@@ -258,6 +257,11 @@ for (mat, label, col), g in groups.items():
     name = f'{label}_{mat}' + ('' if col else '_vis')
     write_mesh(f'/Remodel/Geometry/{name}', g, mat, label, col)
     mesh_count += 1
+# one mesh pair per railing so each railing is its own instance (boxes / instance masks per railing)
+UsdGeom.Scope.Define(stage, '/Remodel/Railings')
+for r in rail_out:
+    for mat in ('rail_wood', 'rail_metal'):
+        write_mesh(f'/Remodel/Railings/{r["name"]}_{mat}', [e for e in r['els'] if e['mat'] == mat], mat, 'railing', True)
 UsdGeom.Scope.Define(stage, '/Remodel/Floors')
 for name, r, fl in floor_meshes:
     write_mesh(f'/Remodel/Floors/{name}', fl, fl[0]['mat'], 'floor', True)

@@ -7,7 +7,7 @@ import cv2
 import numpy as np
 
 PAL = np.array([[0, 0, 0], [60, 120, 60], [170, 170, 170], [30, 90, 200], [220, 220, 120], [0, 0, 255],
-                [0, 165, 255], [255, 0, 255]], np.uint8)   # BGR per semantic class id
+                [0, 165, 255], [255, 0, 255], [40, 90, 140], [200, 0, 200], [255, 230, 120]], np.uint8)   # BGR per class id
 
 ap = argparse.ArgumentParser()
 ap.add_argument('root')
