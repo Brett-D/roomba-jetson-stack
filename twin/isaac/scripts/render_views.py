@@ -17,7 +17,7 @@ ap = argparse.ArgumentParser()
 ap.add_argument('--n', type=int, default=8)
 ap.add_argument('--real', default=r'E:\twin\real_frames\left')
 ap.add_argument('--out', default=r'E:\twin\screens')
-ap.add_argument('--dome', type=float, default=1000.0)
+ap.add_argument('--dome', type=float, default=300.0)
 args, _ = ap.parse_known_args()
 
 from isaacsim import SimulationApp  # noqa: E402
@@ -33,22 +33,17 @@ from pxr import Gf, UsdGeom, UsdLux  # noqa: E402
 import twin_common as tc  # noqa: E402
 
 rep.settings.set_render_rtx_realtime(antialiasing='DLAA')   # DLAA/DLSS carry the denoiser; FXAA leaves path-tracing noise
-stage = omni.usd.get_context().get_stage()
-UsdGeom.SetStageUpAxis(stage, UsdGeom.Tokens.z)
-UsdGeom.SetStageMetersPerUnit(stage, 1.0)
-house = stage.DefinePrim('/World/House', 'Xform')
-house.GetReferences().AddReference(tc.HOUSE_USD)
+from twin_scene import TwinScene  # noqa: E402
+
+sc = TwinScene(look='scan')
+stage = sc.stage
+sc.add_lights(dome=args.dome)
+house = sc.house
 look = house.GetVariantSets().GetVariantSet('look')
-dome = UsdLux.DomeLight.Define(stage, '/World/Dome')
-dome.CreateIntensityAttr(args.dome)
-info = json.load(open(os.path.splitext(tc.ROBOT_USD)[0] + '_info.json'))
-robot = stage.DefinePrim('/World/Roomba', 'Xform')
-robot.GetReferences().AddReference(tc.ROBOT_USD)
-rx = UsdGeom.Xformable(robot)
-rx.ClearXformOpOrder()
-t_op = rx.AddTranslateOp()
-r_op = rx.AddRotateZOp()
-left_cam = info['cameras']['left'].replace(info['root'], '/World/Roomba', 1)
+sc.add_robot(0.0, 0.0, 0.0)
+t_op, r_op = sc.robot_t, sc.robot_r
+left_cam = sc.cam_paths['left']
+ceiling = UsdGeom.Imageable(stage.GetPrimAtPath('/World/House/Ceiling'))
 
 # overview cameras
 top = UsdGeom.Camera.Define(stage, '/World/TopCam')
@@ -79,11 +74,13 @@ def grab(cam, w, h, frames=12):
 
 t_op.Set(Gf.Vec3d(0, 0, 0))
 r_op.Set(0.0)
+ceiling.MakeInvisible()        # overview cameras look down through the ceiling
 for lk in ('scan', 'clean'):
     look.SetVariantSelection(lk)
     Image.fromarray(grab('/World/TopCam', 1280, 1280, 20)).save(os.path.join(args.out, f'house_topdown_{lk}.png'))
     Image.fromarray(grab('/World/ObliqueCam', 1600, 900, 20)).save(os.path.join(args.out, f'house_oblique_{lk}.png'))
 
+ceiling.MakeVisible()
 # robot-eye views at real frame poses
 poses = []
 for ln in open(tc.POSES_TXT):
