@@ -5,21 +5,26 @@
 # first stream request and records the outputs, then sends SIGTERM to check the shutdown bytes.
 # tools/ab_driver_compare.py then compares the two runs. Never touches the real robot's port: the
 # driver gets a generated parameter file whose port is the pty.
-#   tools/ab_driver.sh                 CONFIG=robot (roomba_bringup/config/roomba_driver_robot.yaml)
-#   CONFIG=default tools/ab_driver.sh  the driver package's defaults, plus publish_tf: true
-#   SCENARIO=replug tools/ab_driver.sh the port appears late, then is unplugged for 2.5 s (reconnects)
-# env: OUT (/data/rs_lanes/driver/ab), RS (Rust binary), IMPLS ("py rs"), ROS_DOMAIN_ID (61)
+#   tools/ab_driver.sh                    CONFIG=robot (roomba_bringup/config/roomba_driver_robot.yaml)
+#   CONFIG=default tools/ab_driver.sh     the driver package's defaults, plus publish_tf: true
+#   SCENARIO=replug tools/ab_driver.sh    the port appears late, then is unplugged for 2.5 s (reconnects)
+#   SCENARIO=lightbump tools/ab_driver.sh 16 light-bumper hits while driving at 0.25 m/s; the compare
+#                                         reports each stop's latency and the distance driven meanwhile
+# env: OUT (/data/rs_lanes/driver/ab), RS (Rust binary), IMPLS ("py rs"), ROS_DOMAIN_ID (61),
+#      WS (install space with the drivers; default: the workspace these tools are in)
 HERE=$(cd "$(dirname "$0")" && pwd)
-source /opt/ros/jazzy/setup.bash; source ~/roomba_ws/install/setup.bash
+WS=${WS:-$HERE/../install}
+[ -f "$WS/setup.bash" ] || WS=~/roomba_ws/install
+source /opt/ros/jazzy/setup.bash; source "$WS/setup.bash"
 export ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-61}
 CONFIG=${CONFIG:-robot}; OUT=${OUT:-/data/rs_lanes/driver/ab}; IMPLS=${IMPLS:-py rs}; SCENARIO=${SCENARIO:-ab}
-END=$([ "$SCENARIO" = replug ] && echo 20 || echo 70.5)
+case $SCENARIO in replug) END=20 ;; lightbump) END=42.5 ;; *) END=70.5 ;; esac
 RS=${RS:-$(ros2 pkg prefix roomba_rs)/lib/roomba_rs/roomba_driver}
 PY=$(ros2 pkg prefix roomba_driver)/lib/roomba_driver/roomba_driver
 case $CONFIG in
-  # The bump reflex reverses 0.08 m at 0.1 m/s = 0.8 s, which ends exactly on a 50 ms supervisor tick,
-  # so timer jitter decides whether that tick still reverses (in two Python runs as well): 0.0825 m.
-  robot) SRC=$HERE/../src/roomba_bringup/config/roomba_driver_robot.yaml; EXTRA=bump_backup_distance_m=0.0825 ;;
+  # The bump reflex reverses 0.08 m at 0.1 m/s = 0.8 s, which ends exactly on a 50 ms supervisor tick.
+  # Both drivers count the reflex steps in supervisor ticks, so timer jitter can't add a reverse command.
+  robot) SRC=$HERE/../src/roomba_bringup/config/roomba_driver_robot.yaml; EXTRA= ;;
   default) SRC=$(ros2 pkg prefix roomba_driver)/share/roomba_driver/config/roomba_driver.yaml; EXTRA=publish_tf=true ;;
   *) echo "CONFIG must be robot or default"; exit 1 ;;
 esac

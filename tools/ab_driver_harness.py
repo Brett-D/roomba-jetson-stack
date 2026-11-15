@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Drives one roomba_driver through the scenario of tools/fake_roomba.py --scenario ab and records
 everything it publishes (tools/ab_driver.sh runs it for the Python and the Rust driver). With
---scenario replug it sends nothing and only records (the fake Roomba's port comes and goes).
+--scenario lightbump it only sends cmd_vel (forward at 0.25 m/s); with --scenario replug it sends
+nothing and only records (the fake Roomba's port comes and goes).
 
 Waits for the fake Roomba's t0 file (first stream request), then at fixed times after t0 publishes
 cmd_vel and the roomba/* actuator topics and calls every roomba/* service, recording the
@@ -14,6 +15,7 @@ import json
 import math
 import os
 import signal
+import sys
 import time
 
 import rclpy
@@ -28,6 +30,9 @@ from tf2_msgs.msg import TFMessage
 
 from roomba_msgs.msg import CleaningMotors, Drive, DriveDirect, DrivePwm, Leds, SchedulingLeds, SensorState
 from roomba_msgs.srv import DefineSong, PlaySong, PressButtons, SetDayTime, SetMode, SetSchedule
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from fake_roomba import LIGHT_HITS  # noqa: E402
 
 
 def every(start, count, dt, action):
@@ -51,12 +56,24 @@ def srv(name, cls, **fields):
     return ('srv', name, cls, fields)
 
 
+def lightbump_schedule():
+    """Forward at 0.25 m/s (Nav2's speed) all along. No command in the 0.3 s after each hit's onset
+    or around the end of its bump reflex (1.3 s after the first supervisor tick after the hit), so
+    whether a command lands before the stop or after the reflex doesn't depend on timing (the gaps
+    are under the 0.5 s command timeout). Hits within 3 s of the last reflex only stop."""
+    hits = [a for a, _, _ in LIGHT_HITS['lightbump']]
+    times = [round(1.0 + i * 0.1, 3) for i in range(410)]
+    return [(t, twist(0.25, 0.0)) for t in times
+            if not any(a <= t < a + 0.3 or a + 1.25 <= t < a + 1.45 for a in hits)]
+
+
 def schedule():
     s = []
     s += every(2.0, 30, 0.1, twist(0.2, 0.0))           # straight; stops on the 0.5 s timeout
     s += every(6.0, 20, 0.1, twist(0.0, 1.0))           # spin in place
-    # Light-bumper hit at 10.0 while driving. Its signal only comes in the secondary stream layout (~5 Hz),
-    # so no command is sent while the hit (10.0-10.2) or the end of the backup (11.27-11.47) is detected.
+    # Light-bumper hit at 10.0 while driving. Its signal is in every primary stream frame, so the stop
+    # follows within ~30 ms; no command is sent while the hit (10.0-10.3) or the end of the backup
+    # (1.3 s after the first supervisor tick after the hit: 11.3-11.4) is detected.
     s += every(9.0, 10, 0.1, twist(0.15, 0.0))
     s += every(10.3, 10, 0.1, twist(0.15, 0.0))         # ignored during the backup
     s += every(11.6, 9, 0.1, twist(0.15, 0.0))
@@ -135,7 +152,7 @@ class Harness(Node):
         self.sensor_fields = [k for k in SensorState.get_fields_and_field_types() if k != 'header']
         self.pubs = {}
         self.srv_clients = {}
-        self.plan = schedule() if args.scenario == 'ab' else []
+        self.plan = {'ab': schedule, 'lightbump': lightbump_schedule}.get(args.scenario, list)()
         for _, action in self.plan:
             if action[0] == 'pub' and action[1] not in self.pubs:
                 self.pubs[action[1]] = self.create_publisher(type(action[2]), f'{ns}/{action[1]}', 10)
@@ -229,7 +246,7 @@ def main():
     ap.add_argument('--t0-file', required=True)
     ap.add_argument('--out', required=True)
     ap.add_argument('--end', type=float, default=70.5)
-    ap.add_argument('--scenario', default='ab', choices=('ab', 'replug'))
+    ap.add_argument('--scenario', default='ab', choices=('ab', 'lightbump', 'replug'))
     ap.add_argument('--ns', default='', help='namespace of the driver')
     ap.add_argument('--driver-pid-file', default='', help='file with the driver pid, sent SIGTERM at --end')
     args = ap.parse_args()

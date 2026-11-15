@@ -371,10 +371,13 @@ pub fn stream_payload_length(ids: &[u8]) -> Result<usize, String> {
 }
 
 /// Streaming every sensor in one frame (group 100, 84 bytes) makes the robot send frames with bad
-/// checksums in Safe/Full mode, so the driver streams a ~70-byte primary set every 15 ms and swaps
-/// in the remaining sensors (with the safety and odometry packets) a few times a second.
-pub const STREAM_PRIMARY: [u8; 6] = [6, 43, 44, 45, 54, 55];
-pub const STREAM_SECONDARY: [u8; 14] = [7, 9, 10, 11, 12, 35, 43, 44, 106, 52, 53, 56, 57, 58];
+/// checksums in Safe/Full mode, so the driver streams a 70-byte primary set every 15 ms and swaps
+/// in the remaining sensors (with the safety, mode and odometry packets) in a 46-byte frame a few
+/// times a second. The primary set carries everything the driver acts on: bumps, wheel drops,
+/// cliffs, the light bumpers with their signals (light_bumper_stop_signal is checked every frame),
+/// the charger and the battery.
+pub const STREAM_PRIMARY: [u8; 8] = [0, 4, 35, 43, 44, 45, 106, 58];
+pub const STREAM_SECONDARY: [u8; 11] = [7, 9, 10, 11, 12, 5, 43, 44, 52, 53, 107];
 /// Bytes that fit in 15 ms at 115200 baud.
 pub const MAX_STREAM_FRAME: usize = 172;
 
@@ -751,10 +754,11 @@ mod tests {
 
     #[test]
     fn driver_stream_layouts_cover_every_sensor_and_fit() {
+        let ids_of = |layout: &[u8]| -> std::collections::BTreeSet<u8> { layout.iter().flat_map(|&p| packet_ids(p).unwrap()).collect() };
         let mut covered = std::collections::BTreeSet::new();
         for layout in [&STREAM_PRIMARY[..], &STREAM_SECONDARY[..]] {
-            assert!(stream_payload_length(layout).unwrap() + 3 <= 75);
-            let ids: std::collections::BTreeSet<u8> = layout.iter().flat_map(|&p| packet_ids(p).unwrap()).collect();
+            assert!(stream_payload_length(layout).unwrap() + 3 <= 70); // largest frames proven clean in Safe mode
+            let ids = ids_of(layout);
             for p in [7, 9, 10, 11, 12, 35, 43, 44] {
                 assert!(ids.contains(&p));
             }
@@ -762,6 +766,8 @@ mod tests {
         }
         assert_eq!(covered, packet_ids(100).unwrap().into_iter().collect());
         assert_ne!(stream_payload_length(&STREAM_PRIMARY), stream_payload_length(&STREAM_SECONDARY));
+        // The light-bumper stop (flags, front signals) is checked on every primary frame, not ~5 times a second.
+        assert!([45, 47, 48, 49, 50].iter().all(|p| ids_of(&STREAM_PRIMARY).contains(p)));
     }
 
     #[test]

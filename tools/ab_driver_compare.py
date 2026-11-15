@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Compares two roomba_driver runs of tools/ab_driver.sh (e.g. the Python and the Rust driver on the
 same fake_roomba.py scenario): commands written to the serial port (byte for byte, in order, and
-their timing), the shutdown bytes, stream layout requests, roomba/mode, service responses,
-odometry / joint states at stationary checkpoints, /tf, battery_state, roomba/sensors value
-sequences and the log lines.
+their timing), the shutdown bytes, stream layout requests and their frame sizes, roomba/mode,
+service responses, odometry / joint states at stationary checkpoints, /tf, battery_state,
+roomba/sensors value sequences and the log lines. Also reports how long each light-bumper stop took
+(scripted hit -> stop command on the serial port) and the drive_direct steps of each bump reflex.
 
   tools/ab_driver_compare.py RUN_A RUN_B       (directories with serial.jsonl, harness.json, driver.log)
 """
@@ -13,13 +14,14 @@ import math
 import os
 import re
 import statistics
+import struct
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from fake_roomba import command_length  # noqa: E402
+from fake_roomba import FMT, LIGHT_HITS, command_length, ids_of  # noqa: E402
 
-PRIMARY = bytes([148, 6, 6, 43, 44, 45, 54, 55])
-SECONDARY = bytes([148, 14, 7, 9, 10, 11, 12, 35, 43, 44, 106, 52, 53, 56, 57, 58])
+LAYOUTS = {}   # stream request bytes -> 'primary' / 'secondary' (the driver's first two layouts)
+STOP = bytes([145, 0, 0, 0, 0])
 CHECKPOINTS = [1.9, 6.0, 9.0, 13.5, 16.0, 29.9, 54.9, 58.4, 70.0]   # robot standing still
 NAMES = {7: 'reset', 128: 'start', 131: 'safe', 132: 'full', 134: 'spot', 137: 'drive', 138: 'motors', 139: 'leds',
          140: 'song', 141: 'play', 144: 'pwm_motors', 145: 'drive_direct', 146: 'drive_pwm', 148: 'stream',
@@ -33,8 +35,11 @@ def load(d):
     run['h'] = json.load(open(f'{d}/harness.json'))
     t0 = run['t0']['t0']
     buf, times, cmds = bytearray(), [], []
+    run['scenario'] = 'ab'
     for line in open(f'{d}/serial.jsonl'):
         e = json.loads(line)
+        if e['ev'] == 'start':
+            run['scenario'] = e.get('scenario', 'ab')
         if e['ev'] != 'rx':
             continue
         for b in bytes.fromhex(e['data']):
@@ -64,9 +69,54 @@ def load(d):
 
 def show(c):
     op = c[0]
-    if c in (PRIMARY, SECONDARY):
-        return 'stream ' + ('primary' if c == PRIMARY else 'secondary')
+    if c in LAYOUTS:
+        return 'stream ' + LAYOUTS[c]
     return f"{NAMES.get(op, op)} {c[1:].hex(' ')}".strip()
+
+
+def layouts(cmds):
+    """The stream layouts the driver requested, in order of their first request (primary first)."""
+    seen = []
+    for _, c in cmds:
+        if c[0] == 148 and c not in seen:
+            seen.append(c)
+    return seen
+
+
+def frame_bytes(request):
+    """Size of the stream frames for a stream request: header, count, ids, data, checksum."""
+    return 3 + sum(1 + sum(struct.calcsize('>' + FMT[i]) for i in ids_of(pid)) for pid in request[2:])
+
+
+def light_stops(run, kill):
+    """(hit onset, seconds until the first stop command, speed) for each scripted light-bumper hit."""
+    out = []
+    for onset, _, speed in LIGHT_HITS.get(run['scenario'], []):
+        stop = next((t for t, c in run['cmds'] if onset <= t < kill and c == STOP), None)
+        out.append((onset, stop - onset if stop is not None and stop - onset < 1.0 else None, speed))
+    return out
+
+
+def reflexes(run, kill):
+    """(start, reverse commands, turn commands, stopped after) of each bump reflex: a run of equal
+    drive_direct reverse commands followed by turn-in-place ones."""
+    dd = [(t, *struct.unpack('>hh', c[1:])[::-1]) for t, c in run['cmds'] if c[0] == 145 and t < kill]
+    out, i = [], 0
+    while i < len(dd):
+        t, left, right = dd[i]
+        if not left == right < 0:
+            i += 1
+            continue
+        j = i
+        while j < len(dd) and dd[j][1:] == (left, right):
+            j += 1
+        k = j
+        while k < len(dd) and dd[k][1] == -dd[k][2] != 0 and dd[k][1:] == dd[j][1:]:
+            k += 1
+        stop = dd[k][1:] == (0, 0) if k < len(dd) else False
+        out.append((t, j - i, k - j, stop))
+        i = max(k, i + 1)
+    return out
 
 
 def mask_cmd(t, c):
@@ -132,9 +182,11 @@ def runs_of(values):
 
 def main():
     a, b = load(sys.argv[1]), load(sys.argv[2])
-    print(f'A = {a["dir"]}\nB = {b["dir"]}')
+    print(f'A = {a["dir"]}\nB = {b["dir"]}  (scenario {a["scenario"]})')
     ha, hb = a['h'], b['h']
     ok = True
+    for c, name in zip(layouts(a['cmds']), ('primary', 'secondary')):
+        LAYOUTS[c] = name
 
     print('\n== serial commands (excluding stream layout requests) ==')
     kill_a, kill_b = ha['sigterm'], hb['sigterm']
@@ -165,13 +217,41 @@ def main():
     ok &= tail_a == tail_b
 
     print('\n== stream layout requests ==')
+    for run in (a, b):
+        desc = ', '.join(f'{LAYOUTS.get(c, "other")} {list(c[2:])} ({frame_bytes(c)}-byte frames)'
+                         for c in layouts(run['cmds']))
+        print(f'  {os.path.basename(run["dir"])}: {desc}')
+    same_layouts = layouts(a['cmds']) == layouts(b['cmds'])
+    print(f'  layouts {"IDENTICAL" if same_layouts else "DIFFER"}')
+    ok &= same_layouts
     for run, kill in ((a, kill_a), (b, kill_b)):
         st = [(t, c) for t, c in run['cmds'] if c[0] == 148 and t < kill]
-        prim = sum(c == PRIMARY for _, c in st)
-        sec = sum(c == SECONDARY for _, c in st)
+        prim = sum(LAYOUTS.get(c) == 'primary' for _, c in st)
+        sec = sum(LAYOUTS.get(c) == 'secondary' for _, c in st)
         span = kill - 0.0
         print(f'  {os.path.basename(run["dir"])}: primary {prim}, secondary {sec} ({sec / span:.2f}/s), '
               f'other {len(st) - prim - sec}')
+
+    if LIGHT_HITS.get(a['scenario']):
+        print('\n== light-bumper stops (scripted hit -> stop command received) ==')
+        for run, kill in ((a, kill_a), (b, kill_b)):
+            stops = light_stops(run, kill)
+            lat = [s for _, s, _ in stops if s is not None]
+            dist = [s * v * 1000 for _, s, v in stops if s is not None]
+            name = os.path.basename(run['dir'])
+            if not lat:
+                print(f'  {name}: no stop within 1 s of a hit (light-bumper stop off?)')
+                continue
+            print(f'  {name}: {len(lat)}/{len(stops)} hits stopped; latency median {statistics.median(lat) * 1000:.0f} ms, '
+                  f'mean {statistics.mean(lat) * 1000:.0f} ms, max {max(lat) * 1000:.0f} ms; driven meanwhile mean '
+                  f'{statistics.mean(dist):.1f} mm, max {max(dist):.1f} mm')
+            print('    ' + ' '.join(f'{s * 1000:.0f}' if s is not None else '-' for _, s, _ in stops) + ' ms')
+
+    print('\n== bump reflexes (drive_direct steps) ==')
+    for run, kill in ((a, kill_a), (b, kill_b)):
+        print(f'  {os.path.basename(run["dir"])}: ' + ('; '.join(
+            f'{t:.2f} s reverse x{nr}, turn x{nt}{", stop" if stop else ""}' for t, nr, nt, stop in reflexes(run, kill))
+            or 'none'))
 
     print('\n== roomba/mode ==')
     ma, mb = [m['data'] for m in ha['mode']], [m['data'] for m in hb['mode']]
@@ -215,7 +295,8 @@ def main():
     for key in ('odom', 'joints', 'tf', 'battery', 'sensors'):
         first = [f'{h[key][0]["t"] or 0:.2f}' if h[key] else '-' for h in (ha, hb)]
         print(f'  {key}: A {len(ha[key])}, B {len(hb[key])} messages (first received at {first[0]} / {first[1]} s)')
-    for t in [c for c in CHECKPOINTS if c < min(kill_a, kill_b)]:
+    # (lightbump: the scripted wheels never stand still)
+    for t in [c for c in CHECKPOINTS if c < min(kill_a, kill_b) and a['scenario'] != 'lightbump']:
         oa, ob = last_before(ha['odom'], t), last_before(hb['odom'], t)
         ja, jb = last_before(ha['joints'], t), last_before(hb['joints'], t)
         if not (oa and ob and ja and jb):

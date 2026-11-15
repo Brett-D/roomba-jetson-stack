@@ -77,7 +77,8 @@ For the driver, `tools/fake_roomba.py` simulates the
 Roomba on a pseudo-terminal (scripted sensors, bumps, cliffs, charging, bad checksums, stream
 dropouts, sleep, reset); `tools/ab_driver.sh` runs both drivers through the same scenario
 (`tools/ab_driver_harness.py`) and `tools/ab_driver_compare.py` compares the serial bytes, topics,
-service responses, logs and shutdown bytes; `tools/ab_driver_cpu.sh` measures CPU.
+service responses, logs and shutdown bytes (`SCENARIO=lightbump` times the light-bumper stops);
+`tools/ab_driver_cpu.sh` measures CPU.
 `tools/ab_web.sh` runs both web servers side by side on scripted topics and compares every HTTP
 response (all routes, methods and login states), websocket state, MJPEG frame and published command;
 `tools/ab_web_images.py` checks the camera preview JPEGs and map PNGs against OpenCV byte for byte

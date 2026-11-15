@@ -11,8 +11,12 @@ The sensor values are a deterministic script of the time since the first stream 
 frame by frame (15 ms ticks from t0), so two drivers run against it see the same data:
   --scenario ab      ~70 s: driving, light-bumper and bumper hits, buttons, wheel drop, cliff,
                      corrupted checksums, a split frame, garbage bytes, a 0.8 s stream dropout,
-                     4 s asleep (OI off afterwards), charging states, a reset with boot text.
+                     4 s asleep (OI off afterwards), docking (seen first in a secondary-layout
+                     frame), charging states, a reset with boot text.
                      tools/ab_driver_harness.py sends the matching commands.
+  --scenario lightbump  ~42 s driving forward at 0.25 m/s with 16 front light-bumper hits
+                     (LIGHT_HITS) at different phases of the stream: tools/ab_driver_compare.py
+                     reports how long each stop took and how far the robot drove meanwhile.
   --scenario steady  endless slow driving at the real stream rate (CPU measurements).
   --scenario replug  robot standing still; the port appears only 6 s after start (the driver must
                      retry opening it), and 10 s after t0 the adapter is "unplugged" for 2.5 s (the
@@ -36,6 +40,13 @@ import tty
 
 TICK = 0.015
 M_PER_COUNT = math.pi * 0.072 / 508.8
+# Front-left light-bumper hits (signal 250): (onset s, duration s, speed the robot drives at, m/s).
+LIGHT_HITS = {
+    'ab': [(10.0, 0.6, 0.15)],
+    'lightbump': [(round(2.0 + 2.5137 * i, 4), 0.4, 0.25) for i in range(16)],
+}
+DOCK_AT = 36.5      # ab: docking from here on, in the first secondary-layout frame
+UNDOCK_AT = 40.5
 
 # ------------------------------------------------------------------ OI tables (as in oi.py)
 FMT = {7: 'B', 8: 'B', 9: 'B', 10: 'B', 11: 'B', 12: 'B', 13: 'B', 14: 'B', 15: 'B', 16: 'B', 17: 'B',
@@ -92,6 +103,10 @@ class Script:
         self.left = 65000.0     # encoder counts; the left one rolls over when driving forward
         self.right = 100.0
         self.k = 0
+        self.dock_k = None      # tick of the docking frame
+
+    def docked(self, k):
+        return self.dock_k is not None and self.dock_k <= k and k * TICK < UNDOCK_AT
 
     def wheel_speeds(self, t):
         """Scripted wheel speeds (m/s), roughly what the driver commands at that time."""
@@ -99,6 +114,8 @@ class Script:
             return (0.1, 0.12) if int(t) % 20 < 10 else (-0.05, 0.05)
         if self.scenario == 'replug':
             return 0.0, 0.0
+        if self.scenario == 'lightbump':
+            return 0.25, 0.25
         for a, b, left, right in ((2.2, 5.2, 0.2, 0.2), (6.2, 8.2, -0.1175, 0.1175), (9.2, 10.0, 0.15, 0.15),
                                   (10.0, 10.8, -0.1, -0.1), (10.8, 11.27, 0.1, -0.1), (11.3, 12.5, 0.15, 0.15),
                                   (13.75, 14.55, -0.1, -0.1), (14.55, 15.02, 0.1, -0.1), (55.0, 55.5, 0.1, 0.13),
@@ -126,13 +143,14 @@ class Script:
         bump_right = ab and window(t, 15.0, 15.5)
         drop_left = ab and window(t, 17.0, 18.0)
         cliff_fr = ab and window(t, 21.0, 21.6)
-        home_base = ab and window(t, 36.5, 40.5)
+        home_base = ab and self.docked(k)
         charging = 0
-        if ab and window(t, 36.5, 39.5):
+        if ab and window(t, DOCK_AT, 39.5):
             charging = 2
         elif ab and window(t, 42.5, 44.5):
             charging = 5
-        light_fl = 250 if ab and window(t, 10.0, 10.6) else (40 if moving else 12)
+        hit = any(window(t, a, a + d) for a, d, _ in LIGHT_HITS.get(self.scenario, ()))
+        light_fl = 250 if hit else (40 if moving else 12)
         buttons = 0b11 if ab and window(t, 16.0, 16.6) else 0
         # Battery: 20.2 V, 30 mV lower every 4 s (steps at 4k + 2.5 s), sagging under load.
         volts = 20200 - 30 * int(max(t - 2.5, 0) // 4 + (t >= 2.5)) if ab else 19800
@@ -156,15 +174,16 @@ class Script:
     def safety(self, k):
         """Wheel drop / cliff / charger active at tick k (Safe mode drops to Passive).
 
-        The charger shows up (packet 34) 0.3 s before the robot leaves Safe: packet 34 is only in the
-        driver's primary stream layout, so if the drop were first seen in a secondary frame it would
-        look like a drop without a safety reason (and Safe would be requested again). Both drivers
-        share that race; which one hits it depends on the layout rotation, so the A/B avoids it.
+        Docking happens in the first frame from DOCK_AT of the driver's secondary stream layout (the
+        one without packet 34): the drop to Passive and the charger (packet 34) appear together, but
+        the driver sees the drop first and the charger only in the next primary frame. It must not
+        take that for a drop without a safety reason and ask for Safe again. (Charging, packet 21,
+        starts at DOCK_AT itself so battery_state doesn't depend on the rotation phase.)
         """
         if self.scenario != 'ab':
             return False
         t = k * TICK
-        return window(t, 17.0, 18.0) or window(t, 21.0, 21.6) or window(t, 36.8, 40.5)
+        return window(t, 17.0, 18.0) or window(t, 21.0, 21.6) or self.docked(k)
 
     def asleep(self, t):
         return self.scenario == 'ab' and window(t, 30.0, 34.0)
@@ -316,6 +335,10 @@ class FakeRoomba:
         self.k += 1
         t = self.k * TICK
         sc = self.script
+        if sc.scenario == 'ab' and sc.dock_k is None and t >= DOCK_AT and self.streaming and self.layout \
+                and 34 not in {i for pid in self.layout for i in ids_of(pid)}:
+            sc.dock_k = self.k
+            self._event('dock')
         if self.mode == 2 and sc.safety(self.k):
             self.set_mode(1, now)
         if sc.asleep(t):
@@ -410,7 +433,7 @@ def main():
     ap.add_argument('--link', required=True, help='symlink to create for the pty slave (the driver port)')
     ap.add_argument('--log', required=True, help='JSON lines log of received bytes and events')
     ap.add_argument('--t0-file', required=True, help='written with the time of the first stream request')
-    ap.add_argument('--scenario', default='ab', choices=('ab', 'steady', 'replug'))
+    ap.add_argument('--scenario', default='ab', choices=('ab', 'lightbump', 'steady', 'replug'))
     ap.add_argument('--duration', type=float, default=0.0, help='exit after this many seconds (0 = on SIGTERM)')
     FakeRoomba(ap.parse_args()).run()
 

@@ -15,6 +15,11 @@ use crate::roomba::lock;
 
 /// Sensor data older than this means contact with the robot is lost.
 pub const STALE_AFTER_S: f64 = 1.0;
+/// Period of the supervisor timer (contact loss, mode changes, bump reflex, drive watchdog).
+pub const SUPERVISE_PERIOD_S: f64 = 0.05;
+/// Longest wait for the charger packet (34, only in the primary stream layout) after a drop to
+/// Passive was seen in a secondary frame.
+const CHARGER_WAIT_S: f64 = 1.0;
 const BUMP_FIELDS: [F; 2] = [F::BumpLeft, F::BumpRight];
 /// (flag, signal) of the front light bumpers; the first two are on the left.
 const LIGHT_BUMP_FIELDS: [(F, F); 4] = [
@@ -62,6 +67,12 @@ fn is_control(mode: Option<i64>) -> bool {
 /// Conditions that keep the robot out of (or drop it from) Safe mode.
 pub fn blockers(values: &SensorValues) -> String {
     BLOCKERS.iter().filter(|&&f| values.flag(f)).map(|f| f.name()).collect::<Vec<_>>().join(", ")
+}
+
+/// Supervisor ticks until a bump reflex step ends: the first tick at or after its end.
+/// A step ending exactly on a tick ends on it, rather than timer jitter deciding on one more command.
+fn ticks(seconds: f64) -> i64 {
+    (seconds / SUPERVISE_PERIOD_S - 1e-6).ceil() as i64
 }
 
 /// Node parameters used by the logic.
@@ -149,7 +160,8 @@ pub struct OdomSnapshot {
     pub velocities: [f64; 2],
 }
 
-type ModeEvent = (Option<i64>, i64, SensorValues);
+/// (previous mode, new mode, merged values, monotonic time since when it waits for the charger packet).
+type ModeEvent = (Option<i64>, i64, SensorValues, Option<f64>);
 
 pub struct Core {
     pub cfg: Config,
@@ -168,8 +180,10 @@ pub struct Core {
     pub driving_forward: bool,
     pub bumped: bool,
     bump_side: i32,
-    /// (left mm/s, right mm/s, end monotonic) steps of the bump reflex.
-    backup: Option<VecDeque<(i64, i64, f64)>>,
+    /// (left mm/s, right mm/s, end supervisor tick) steps of the bump reflex.
+    backup: Option<VecDeque<(i64, i64, i64)>>,
+    /// Monotonic time of the reflex's first supervisor tick.
+    backup_start: f64,
     /// Side of a bump waiting for the backup reflex.
     backup_request: i32,
     /// Monotonic starts of recent reflexes (rate limit).
@@ -203,6 +217,7 @@ impl Core {
             bumped: false,
             bump_side: 0,
             backup: None,
+            backup_start: 0.0,
             backup_request: 0,
             backup_times: Vec::new(),
             last_drive_time: 0.0,
@@ -247,8 +262,21 @@ impl Core {
             return;
         };
         if Some(mode) != self.mode {
-            self.mode_event = Some((self.mode, mode, self.values));
+            // A drop from Safe/Full to Passive without a cliff or wheel drop is re-entered unless
+            // the robot is on the charger, which only primary frames show. If a secondary frame
+            // shows the drop first, wait for the next primary frame: the charger state merged so
+            // far is from before the drop.
+            let wait = is_control(self.mode)
+                && mode == oi::MODE_PASSIVE as i64
+                && !frame.has(F::HomeBaseAvailable)
+                && blockers(&self.values).is_empty();
+            self.mode_event = Some((self.mode, mode, self.values, wait.then_some(monotonic)));
             self.mode = Some(mode);
+        } else if frame.has(F::HomeBaseAvailable) {
+            if let Some(event) = self.mode_event.as_mut().filter(|e| e.3.is_some()) {
+                event.2 = self.values;
+                event.3 = None;
+            }
         }
         let light = self.cfg.bump_stop_light;
         let bumped = BUMP_FIELDS.iter().any(|&f| self.values.flag(f))
@@ -307,10 +335,11 @@ impl Core {
         let turn_s = if c.backup_speed != 0.0 { c.backup_turn * c.wheel_base / 2.0 / c.backup_speed } else { 0.0 };
         // Hit on the left -> turn right (clockwise): left wheel forward, right wheel back.
         let turn = if side > 0 { (v, -v) } else { (-v, v) };
-        let reverse_end = now + reverse_s.min(1.5);
+        let (reverse_s, turn_s) = (reverse_s.min(1.5), turn_s.min(1.0));
+        self.backup_start = now;
         self.backup = Some(VecDeque::from([
-            (-v, -v, reverse_end),
-            (turn.0, turn.1, now + reverse_s.min(1.5) + turn_s.min(1.0)),
+            (-v, -v, ticks(reverse_s)),
+            (turn.0, turn.1, ticks(reverse_s + turn_s)),
         ]));
     }
 
@@ -322,13 +351,15 @@ impl Core {
                 self.start_backup(side, now);
             }
         }
+        // Steps end on a count of supervisor ticks since the start, not on a clock comparison.
+        let tick = ((now - self.backup_start) / SUPERVISE_PERIOD_S).round_ties_even() as i64;
         let Some(steps) = self.backup.as_mut() else { return false };
         if !is_control(self.mode) {
             // cliff / wheel drop: the firmware already stopped it
             self.backup = None;
             return false;
         }
-        while steps.front().is_some_and(|s| now >= s.2) {
+        while steps.front().is_some_and(|s| tick >= s.2) {
             steps.pop_front();
         }
         let Some(&(left, right, _)) = steps.front() else {
@@ -359,7 +390,9 @@ impl Core {
             self.mode = None;
             self.mode_event = None;
         }
-        let event = self.mode_event.take();
+        // (A drop seen in a secondary frame waits for the next primary frame: see on_frame.)
+        let waiting = matches!(self.mode_event, Some((.., Some(since))) if now - since < CHARGER_WAIT_S);
+        let event = if waiting { None } else { self.mode_event.take() };
         let have_data = self.mode.is_some();
         if lost {
             let r = link.write(&oi::drive_direct(0.0, 0.0));
@@ -374,7 +407,7 @@ impl Core {
                  press Clean to wake it, or wire DTR to pin 5 and set wake_with_dtr)",
             );
         }
-        if let Some((previous, mode, values)) = event {
+        if let Some((previous, mode, values, _)) = event {
             self.report_mode_change(previous, mode, &values, now, link, out);
         }
         if have_data && self.apply_initial_mode {
@@ -869,6 +902,28 @@ mod tests {
         (t * 1e9) as i64
     }
 
+    /// A frame of one of the driver's stream layouts: zeros, the mode, and values it carries.
+    fn layout_frame(layout: &[u8], mode: i32, set: &[(F, i32)]) -> SensorValues {
+        let mut v = SensorValues::default();
+        for &pid in layout {
+            v.update(&oi::decode(pid, &vec![0; oi::packet_size(pid).unwrap()]).unwrap());
+        }
+        v.set(F::OiMode, mode);
+        for &(f, x) in set {
+            assert!(v.has(f), "{} is not in this layout", f.name());
+            v.set(f, x);
+        }
+        v
+    }
+
+    fn primary(mode: i32, set: &[(F, i32)]) -> SensorValues {
+        layout_frame(&oi::STREAM_PRIMARY, mode, set)
+    }
+
+    fn secondary(mode: i32, set: &[(F, i32)]) -> SensorValues {
+        layout_frame(&oi::STREAM_SECONDARY, mode, set)
+    }
+
     /// A safe-mode frame just before a supervisor cycle, so contact isn't lost.
     fn tick(c: &mut Core, now: f64, link: &FakeLink, log: &Log) {
         c.on_frame(&frame(2, (0, 0), &[]), ns(now - 0.001), now - 0.001, link, log);
@@ -1019,10 +1074,74 @@ mod tests {
         assert!(link.modes.borrow().is_empty());
         // Without a safety reason (OI restarted) the requested mode is re-entered.
         c.on_frame(&frame(2, (0, 0), &[(F::CliffFrontRight, 0)]), ns(12.1), 12.1, &link, &log);
-        c.on_frame(&frame(1, (0, 0), &[]), ns(12.2), 12.2, &link, &log);
+        c.on_frame(&primary(1, &[]), ns(12.2), 12.2, &link, &log);
         c.supervise(12.21, &link, &log);
         assert_eq!(log.take(), ["OI mode safe -> passive (no safety reason; re-entering safe)"]);
         assert_eq!(*link.modes.borrow(), [2]);
+    }
+
+    #[test]
+    fn light_bumper_stop_is_checked_on_every_primary_frame() {
+        let (mut c, link, log) = running(robot_cfg());
+        c.on_cmd_vel(0.25, 0.0, 12.0, &link, &log);
+        c.on_frame(&primary(2, &[(F::LightBumpFrontLeftSignal, 230)]), ns(12.015), 12.015, &link, &log);
+        assert_eq!(link.writes.borrow().last().unwrap(), &STOP);
+        assert_eq!(log.take(), ["bumper hit: backing up"]);
+    }
+
+    #[test]
+    fn drop_to_passive_first_seen_in_a_secondary_frame_waits_for_the_charger() {
+        let (mut c, link, log) = running(Config::default());
+        // Docked: the drop and the charger come together, but the first frame showing the drop is a
+        // secondary one, without the charger packet.
+        c.on_frame(&secondary(1, &[]), ns(12.0), 12.0, &link, &log);
+        c.supervise(12.01, &link, &log);
+        assert!(log.take().is_empty());
+        c.on_frame(&primary(1, &[(F::HomeBaseAvailable, 1)]), ns(12.015), 12.015, &link, &log);
+        c.supervise(12.06, &link, &log);
+        assert_eq!(log.take(), ["OI mode safe -> passive (home_base_available)"]);
+        assert!(link.modes.borrow().is_empty()); // safe is not asked for on the charger
+        // A drop without a reason (the OI restarted) is still undone once a primary frame confirms it.
+        tick(&mut c, 12.1, &link, &log);
+        c.on_frame(&primary(2, &[]), ns(12.11), 12.11, &link, &log);
+        c.on_frame(&secondary(1, &[]), ns(12.2), 12.2, &link, &log);
+        c.supervise(12.21, &link, &log);
+        assert_eq!(log.take(), ["OI mode passive -> safe"]);
+        c.on_frame(&primary(1, &[]), ns(12.215), 12.215, &link, &log);
+        c.supervise(12.26, &link, &log);
+        assert_eq!(log.take(), ["OI mode safe -> passive (no safety reason; re-entering safe)"]);
+        assert_eq!(*link.modes.borrow(), [2]);
+        // Without any primary frame the drop is judged on what is known after CHARGER_WAIT_S.
+        c.on_frame(&secondary(2, &[]), ns(12.3), 12.3, &link, &log);
+        c.supervise(12.31, &link, &log);
+        c.on_frame(&secondary(1, &[]), ns(12.4), 12.4, &link, &log);
+        c.supervise(12.41, &link, &log);
+        c.on_frame(&secondary(1, &[]), ns(13.0), 13.0, &link, &log);
+        c.supervise(13.39, &link, &log);
+        assert_eq!(log.take(), ["OI mode passive -> safe"]);
+        c.supervise(13.41, &link, &log);
+        assert_eq!(log.take(), ["OI mode safe -> passive (no safety reason; re-entering safe)"]);
+    }
+
+    #[test]
+    fn bump_reflex_steps_end_on_supervisor_ticks_whatever_the_timer_jitter() {
+        let (mut c, link, log) = running(robot_cfg());
+        c.on_cmd_vel(0.2, 0.0, 12.0, &link, &log);
+        c.on_frame(&frame(2, (0, 0), &[(F::BumpLeft, 1)]), ns(12.1), 12.1, &link, &log);
+        assert_eq!(log.take(), ["bumper hit: backing up"]);
+        link.writes.borrow_mut().clear();
+        // The reflex reverses 0.8 s = exactly 16 ticks. Its first tick ran 3 ms late, so by the clock
+        // the tick 0.8 s later comes 3 ms early and would reverse once more.
+        tick(&mut c, 12.153, &link, &log);
+        for k in 1..=26 {
+            tick(&mut c, 12.15 + k as f64 * 0.05, &link, &log);
+        }
+        let writes = link.writes.borrow();
+        let count = |cmd: Vec<u8>| writes.iter().filter(|w| **w == cmd).count();
+        assert_eq!(count(oi::drive_direct(-100.0, -100.0)), 16);
+        assert_eq!(count(oi::drive_direct(100.0, -100.0)), 10);
+        assert_eq!(writes.last().unwrap(), &STOP);
+        assert_eq!(log.take(), ["bump backup done"]);
     }
 
     #[test]

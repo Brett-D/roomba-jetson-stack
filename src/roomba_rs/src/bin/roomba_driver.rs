@@ -28,7 +28,7 @@ use rclrs::*;
 use ros_env::{builtin_interfaces, geometry_msgs, nav_msgs, roomba_msgs, sensor_msgs, std_msgs, std_srvs, tf2_msgs};
 
 use roomba_rs::battery::Gauge;
-use roomba_rs::driver::{set_mode_service, Config, Core, Level, Link, OdomSnapshot, Out};
+use roomba_rs::driver::{self, set_mode_service, Config, Core, Level, Link, OdomSnapshot, Out};
 use roomba_rs::oi::{self, mode_str, Field as F, SensorValues};
 use roomba_rs::roomba::{lock, mono, tty_opener, Roomba};
 
@@ -583,7 +583,7 @@ fn main() -> Result<()> {
         pub_battery.publish(msg).ok();
     })?));
     let c = ctx.clone();
-    timers.push(Box::new(node.create_timer_repeating(Duration::from_millis(50).node_time(), move || {
+    timers.push(Box::new(node.create_timer_repeating(Duration::from_secs_f64(driver::SUPERVISE_PERIOD_S).node_time(), move || {
         c.with(|core, l, o, now| core.supervise(now, l, o))
     })?));
     let c = ctx.clone();
