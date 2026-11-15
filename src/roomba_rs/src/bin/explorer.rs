@@ -300,6 +300,6 @@ fn main() -> Result<()> {
     let _tick = worker.create_timer_repeating(Duration::from_secs(1).node_time(), |s: &mut State| s.core.tick(&mut s.io))?;
 
     log!(node.info(), "explorer (Rust) running");
-    executor.spin(SpinOptions::default()).first_error()?;
+    roomba_rs::node_params::spin(&mut executor)?;
     Ok(())
 }

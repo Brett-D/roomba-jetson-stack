@@ -190,6 +190,6 @@ fn main() -> Result<()> {
         let out = s.core.expire(wall());
         s.emit(out);
     })?;
-    executor.spin(SpinOptions::default()).first_error()?;
+    roomba_rs::node_params::spin(&mut executor)?;
     Ok(())
 }

@@ -278,6 +278,6 @@ fn main() -> Result<()> {
     )?;
 
     log!(node.info(), "floor_obstacles (Rust) running");
-    executor.spin(SpinOptions::default()).first_error()?;
+    roomba_rs::node_params::spin(&mut executor)?;
     Ok(())
 }

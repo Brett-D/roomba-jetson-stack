@@ -629,14 +629,16 @@ fn main() -> Result<()> {
         })?;
     }
 
-    let (stop_tx, stop_rx) = futures::channel::oneshot::channel::<()>();
+    let stopping = Arc::new(AtomicBool::new(false));
+    let (flag, commands) = (Arc::clone(&stopping), Arc::clone(executor.commands()));
     std::thread::Builder::new().name("signals".into()).spawn(move || {
         let mut sig = 0;
         // SAFETY: waits for one of the blocked signals in `signals`.
         unsafe { libc::sigwait(&signals, &mut sig) };
-        let _ = stop_tx.send(());
+        flag.store(true, Ordering::SeqCst);
+        commands.halt_spinning();
     })?;
-    let errors = executor.spin(SpinOptions::default().until_promise_resolved(stop_rx));
+    let errors = roomba_rs::node_params::spin_until(&mut executor, || stopping.load(Ordering::SeqCst));
 
     // Stop everything and hand the robot back in Passive mode so its buttons work.
     shutting_down.store(true, Ordering::SeqCst);

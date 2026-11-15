@@ -967,7 +967,7 @@ fn main() -> Result<()> {
         .with_context(|| format!("cannot listen on port {port}"))?;
     std::thread::Builder::new().name("http".into()).spawn(move || rt.block_on(serve(app, listener)))?;
     // The executor also runs the drive pad deadman: if it stops, the whole node stops.
-    executor.spin(SpinOptions::default()).first_error()?;
+    roomba_rs::node_params::spin(&mut executor)?;
     drop(keep);
     Ok(())
 }

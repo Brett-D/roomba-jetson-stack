@@ -84,6 +84,6 @@ fn main() -> Result<()> {
     })?;
 
     log!(node.info(), "nav_coach (Rust) running");
-    executor.spin(SpinOptions::default()).first_error()?;
+    roomba_rs::node_params::spin(&mut executor)?;
     Ok(())
 }

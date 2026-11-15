@@ -220,6 +220,6 @@ fn main() -> Result<()> {
     let _timer = worker.create_timer_repeating(Duration::from_secs(1), |s: &mut State| s.status())?;
 
     log!(node.info(), "ekf_inputs (Rust) running");
-    executor.spin(SpinOptions::default()).first_error()?;
+    roomba_rs::node_params::spin(&mut executor)?;
     Ok(())
 }

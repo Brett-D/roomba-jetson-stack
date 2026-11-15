@@ -352,6 +352,6 @@ fn main() -> Result<()> {
     let worker_tf = WaitingTf { buffer: Arc::clone(tf.buffer()) };
     let (worker_queue, worker_node) = (Arc::clone(&queue), node.clone());
     std::thread::Builder::new().name("person_detector".into()).spawn(move || run_worker(det, worker_queue, pubs, worker_tf, worker_node))?;
-    executor.spin(SpinOptions::default()).first_error()?;
+    roomba_rs::node_params::spin(&mut executor)?;
     Ok(())
 }

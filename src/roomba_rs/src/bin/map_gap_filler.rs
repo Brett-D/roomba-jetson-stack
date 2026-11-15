@@ -107,7 +107,7 @@ fn main() -> Result<()> {
             s.filler.on_path(m.poses.iter().map(|p| (p.pose.position.x, p.pose.position.y)).collect());
         },
     )?;
-    executor.spin(SpinOptions::default()).first_error()?;
+    roomba_rs::node_params::spin(&mut executor)?;
     Ok(())
 }
 

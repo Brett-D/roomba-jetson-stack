@@ -79,3 +79,22 @@ pub fn on_signal(set: libc::sigset_t, f: impl FnOnce() + Send + 'static) {
         std::process::exit(0);
     });
 }
+
+/// Spins the executor for the node's lifetime. Jazzy's rcl_wait returns RCL_RET_TIMEOUT when a wait
+/// that ended for a ROS-time timer finds the timer not due yet because the system clock was stepped
+/// back meanwhile (WSL2's time sync steps it every ~30 s; NTP can too). rclrs 0.8 reports that as
+/// an error and stops spinning, which ended the node: spin again when only timeouts were reported.
+pub fn spin(executor: &mut Executor) -> Result<(), RclrsError> {
+    spin_until(executor, || false).first_error()
+}
+
+/// [`spin`] that also returns once `done()` holds after a spin ends (set the flag `done` reads
+/// before calling `halt_spinning`). Returns the errors other than those timeouts.
+pub fn spin_until(executor: &mut Executor, done: impl Fn() -> bool) -> Vec<RclrsError> {
+    loop {
+        let errors = executor.spin(SpinOptions::default());
+        if errors.is_empty() || done() || errors.iter().any(|e| !e.is_timeout()) {
+            return errors.into_iter().filter(|e| !e.is_timeout()).collect();
+        }
+    }
+}

@@ -276,6 +276,6 @@ fn main() -> Result<()> {
     })?;
 
     log!(node.info(), "vslam_watchdog (Rust) running");
-    executor.spin(SpinOptions::default()).first_error()?;
+    roomba_rs::node_params::spin(&mut executor)?;
     Ok(())
 }
