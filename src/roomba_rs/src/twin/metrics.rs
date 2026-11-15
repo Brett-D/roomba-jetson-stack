@@ -160,7 +160,8 @@ impl Metrics {
 
 pub fn round(x: f64, places: i32) -> f64 {
     let s = 10f64.powi(places);
-    (x * s).round() / s
+    // + 0.0: an empty float sum is -0.0
+    (x * s).round() / s + 0.0
 }
 
 // ---------------------------------------------------------------- the plot
@@ -375,7 +376,7 @@ pub struct CostGrid {
 /// back from the frontier in cells of cost <= 15 within 0.8 m, reachable through cost <= 98).
 /// Also returns a PNG of the costmap with the groups coloured by verdict.
 pub fn frontier_report(cm: &CostGrid, robot: P2) -> (Vec<Value>, Option<Vec<u8>>) {
-    use crate::explorer::{find_frontiers, frontier_goals, FrontierParams};
+    use crate::explorer::{frontier_goals, FrontierParams};
     let (w, h, res) = (cm.width, cm.height, cm.res);
     if w == 0 || h == 0 || cm.data.len() != w * h {
         return (Vec::new(), None);
@@ -406,23 +407,103 @@ pub fn frontier_report(cm: &CostGrid, robot: P2) -> (Vec<Value>, Option<Vec<u8>>
         }
     }
     let xy = |r: f64, c: f64| [cm.origin[0] + (c + 0.5) * res, cm.origin[1] + (r + 0.5) * res];
+    // Bottleneck cost from the robot to every known cell: the lowest possible highest cost along an
+    // 8-connected path through known cells (what a planner allowed up to that cost could reach).
+    let mut bottleneck = vec![i32::MAX; w * h];
+    if let Some(s) = seed {
+        let mut heap = std::collections::BinaryHeap::new();
+        let k0 = s.0 * w + s.1;
+        bottleneck[k0] = cm.data[k0].max(0) as i32;
+        heap.push(std::cmp::Reverse((bottleneck[k0], k0)));
+        while let Some(std::cmp::Reverse((b, k))) = heap.pop() {
+            if b > bottleneck[k] {
+                continue;
+            }
+            let (r, c) = ((k / w) as i64, (k % w) as i64);
+            for dr in -1i64..=1 {
+                for dc in -1i64..=1 {
+                    let (nr, nc) = (r + dr, c + dc);
+                    if nr < 0 || nc < 0 || nr >= h as i64 || nc >= w as i64 {
+                        continue;
+                    }
+                    let n = nr as usize * w + nc as usize;
+                    if cm.data[n] < 0 {
+                        continue;
+                    }
+                    let nb = b.max(cm.data[n] as i32);
+                    if nb < bottleneck[n] {
+                        bottleneck[n] = nb;
+                        heap.push(std::cmp::Reverse((nb, n)));
+                    }
+                }
+            }
+        }
+    }
+    let frontier_cell = |r: usize, c: usize| {
+        let g = cm.data[r * w + c];
+        let unknown = |r: isize, c: isize| r < 0 || c < 0 || r >= h as isize || c >= w as isize || cm.data[r as usize * w + c as usize] < 0;
+        let (ri, ci) = (r as isize, c as isize);
+        g >= 0 && g as i64 <= fp.free_max && (unknown(ri - 1, ci) || unknown(ri + 1, ci) || unknown(ri, ci - 1) || unknown(ri, ci + 1))
+    };
+    // Frontier groups (8-connected, as the explorer groups them) with their cells.
+    let mut label = vec![0usize; w * h];
+    let mut groups: Vec<Vec<usize>> = Vec::new();
+    for r0 in 0..h {
+        for c0 in 0..w {
+            if label[r0 * w + c0] != 0 || !frontier_cell(r0, c0) {
+                continue;
+            }
+            groups.push(Vec::new());
+            let id = groups.len();
+            let mut stack = vec![(r0, c0)];
+            label[r0 * w + c0] = id;
+            while let Some((r, c)) = stack.pop() {
+                groups[id - 1].push(r * w + c);
+                for dr in -1i64..=1 {
+                    for dc in -1i64..=1 {
+                        let (nr, nc) = (r as i64 + dr, c as i64 + dc);
+                        if nr < 0 || nc < 0 || nr >= h as i64 || nc >= w as i64 {
+                            continue;
+                        }
+                        let (nr, nc) = (nr as usize, nc as usize);
+                        if label[nr * w + nc] == 0 && frontier_cell(nr, nc) {
+                            label[nr * w + nc] = id;
+                            stack.push((nr, nc));
+                        }
+                    }
+                }
+            }
+        }
+    }
     let mut out = Vec::new();
-    let mut verdicts = Vec::new();
-    for f in find_frontiers(&cm.data, w, h, fp.free_max, 3, &reach) {
-        let p = xy(f.centroid.0, f.centroid.1);
-        let goal = goals.iter().find(|g| g.centroid == f.centroid);
-        let (code, verdict) = if (f.size as i64) < fp.min_cells {
+    let mut codes = Vec::with_capacity(groups.len());
+    for cells in &groups {
+        let n = cells.len();
+        let (sr, sc) = cells.iter().fold((0u64, 0u64), |a, &k| (a.0 + (k / w) as u64, a.1 + (k % w) as u64));
+        let centroid = (sr as f64 / n as f64, sc as f64 / n as f64);
+        let reachable = cells.iter().any(|&k| reach[k]);
+        let entry = cells.iter().map(|&k| bottleneck[k]).min().unwrap_or(i32::MAX);
+        let p = xy(centroid.0, centroid.1);
+        let goal = goals.iter().find(|g| g.centroid == centroid);
+        let (code, verdict) = if (n as i64) < fp.min_cells {
             ('S', "too small (< 10 cells)".to_string())
-        } else if !f.reachable {
-            ('R', "not reachable (behind cells of cost > 98)".to_string())
+        } else if !reachable {
+            let how = if entry == i32::MAX {
+                "no known path to it".to_string()
+            } else {
+                format!("the cheapest way in crosses cost {entry}; the explorer only uses cells <= {}", fp.pass_max)
+            };
+            ('R', format!("not reachable: {how}"))
         } else if let Some(g) = goal {
             let gp = xy(g.goal.0 as f64, g.goal.1 as f64);
             ('U', format!("usable: goal ({:.2}, {:.2}), {:.1} m from the robot", gp[0], gp[1], (gp[0] - robot[0]).hypot(gp[1] - robot[1])))
         } else {
             ('C', "no clear spot (cost <= 15, 0.3 m from unknown) within 0.8 m".to_string())
         };
-        verdicts.push((f.centroid, code));
-        out.push(json!({"x": round(p[0], 2), "y": round(p[1], 2), "cells": f.size, "verdict": verdict}));
+        codes.push(code);
+        if n >= 3 {
+            out.push(json!({"x": round(p[0], 2), "y": round(p[1], 2), "cells": n, "verdict": verdict}));
+        }
     }
     // The picture: costmap greys, frontier cells by verdict, the robot.
     let scale = 3;
@@ -445,30 +526,22 @@ pub fn frontier_report(cm: &CostGrid, robot: P2) -> (Vec<Value>, Option<Vec<u8>>
             }
         }
     }
-    let labels_src = &cm.data;
-    let unknown = |r: isize, c: isize| r < 0 || c < 0 || r >= h as isize || c >= w as isize || labels_src[r as usize * w + c as usize] < 0;
     for r in 0..h {
         for c in 0..w {
-            let g = cm.data[r * w + c];
-            let (ri, ci) = (r as isize, c as isize);
-            if g >= 0 && g as i64 <= fp.free_max && (unknown(ri - 1, ci) || unknown(ri + 1, ci) || unknown(ri, ci - 1) || unknown(ri, ci + 1)) {
-                // Colour by the verdict of the nearest group centroid.
-                let near = verdicts.iter().min_by(|a, b| {
-                    let da = (a.0 .0 - r as f64).powi(2) + (a.0 .1 - c as f64).powi(2);
-                    let db = (b.0 .0 - r as f64).powi(2) + (b.0 .1 - c as f64).powi(2);
-                    da.total_cmp(&db)
-                });
-                // BGR: usable green, too small orange, unreachable red, no clear spot magenta.
-                let col = match near.map(|n| n.1) {
-                    Some('U') => [0, 200, 0],
-                    Some('S') => [0, 140, 255],
-                    Some('C') => [255, 0, 255],
-                    _ => [0, 0, 255],
-                };
-                for dy in 0..scale {
-                    for dx in 0..scale {
-                        cv.set((c * scale + dx) as i64, (cv.h - 1 - (r * scale + dy)) as i64, col);
-                    }
+            let id = label[r * w + c];
+            if id == 0 {
+                continue;
+            }
+            // BGR: usable green, too small orange, unreachable red, no clear spot magenta.
+            let col = match codes[id - 1] {
+                'U' => [0, 200, 0],
+                'S' => [0, 140, 255],
+                'C' => [255, 0, 255],
+                _ => [0, 0, 255],
+            };
+            for dy in 0..scale {
+                for dx in 0..scale {
+                    cv.set((c * scale + dx) as i64, (cv.h - 1 - (r * scale + dy)) as i64, col);
                 }
             }
         }
@@ -544,6 +617,7 @@ mod tests {
         }
         let cm = CostGrid { data, ..cm };
         let (groups, _) = frontier_report(&cm, [0.5, 1.0]);
-        assert!(groups.iter().any(|g| g["verdict"].as_str().unwrap().starts_with("not reachable")), "{groups:?}");
+        let pocket = groups.iter().find(|g| g["verdict"].as_str().unwrap().starts_with("not reachable")).expect("pocket");
+        assert!(pocket["verdict"].as_str().unwrap().contains("crosses cost 100"), "{pocket}");
     }
 }

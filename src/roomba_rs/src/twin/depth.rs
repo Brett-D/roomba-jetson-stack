@@ -20,6 +20,8 @@ use super::world::{DepthVis, World, P2, WALL_HEIGHT_M};
 /// How far the floor drops inside a cliff area (stairs going down), as the depth camera sees it.
 pub const CLIFF_DROP_M: f64 = 1.0;
 
+const NORMALS: usize = 1 << 16;
+
 /// Pinhole intrinsics (rectified, no distortion).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Intrinsics {
@@ -76,6 +78,9 @@ pub struct Camera {
     inv: Vec<f64>,
     /// Per row: y_n = (v - cy) / fy.
     yn: Vec<f64>,
+    /// Standard normal samples: per-pixel noise is a table lookup (Box-Muller per pixel cost
+    /// more than the ray casting).
+    normals: Vec<f32>,
 }
 
 /// Where the camera is: the left lens in the map frame.
@@ -105,7 +110,9 @@ impl Camera {
             inv.push(1.0 / (1.0 + xn * xn).sqrt());
         }
         let yn = (0..k.height).map(|v| (v as f64 - k.cy) / k.fy).collect();
-        Camera { k, azimuth, inv, yn }
+        let mut table_rng = Rng::new(0x5eed);
+        let normals = (0..NORMALS).map(|_| table_rng.normal() as f32).collect();
+        Camera { k, azimuth, inv, yn, normals }
     }
 
     /// The 3D point of pixel (u, v) at optical depth z_m, in the lens's level frame
@@ -142,6 +149,8 @@ impl Camera {
         let o: P2 = [lens.x, lens.y];
         let a_cos: Vec<f64> = self.azimuth.iter().map(|a| (lens.yaw + a).cos()).collect();
         let a_sin: Vec<f64> = self.azimuth.iter().map(|a| (lens.yaw + a).sin()).collect();
+        let noisy = opts.noise_a > 0.0 || opts.noise_b > 0.0;
+        let mut x = rng.next_u64() | 1;
         let mut hits: Vec<(f64, f64, f64, f64, usize)> = Vec::new();
         for u in 0..w {
             let d = [a_cos[u], a_sin[u]];
@@ -208,11 +217,17 @@ impl Camera {
                 }
                 // Optical depth Z = s * inv, as the camera reports it.
                 let mut z = best * inv * opts.scale;
-                if opts.noise_a > 0.0 || opts.noise_b > 0.0 {
-                    z += rng.gauss(opts.noise_a + opts.noise_b * z * z);
-                }
-                if opts.dropout > 0.0 && rng.uniform() < opts.dropout {
-                    continue;
+                if noisy || opts.dropout > 0.0 {
+                    // xorshift64: a cheap per-pixel stream seeded from the frame's generator.
+                    x ^= x << 13;
+                    x ^= x >> 7;
+                    x ^= x << 17;
+                    if noisy {
+                        z += (opts.noise_a + opts.noise_b * z * z) * self.normals[(x >> 48) as usize % NORMALS] as f64;
+                    }
+                    if opts.dropout > 0.0 && ((x & 0xFFFF_FFFF) as f64 / 4_294_967_296.0) < opts.dropout {
+                        continue;
+                    }
                 }
                 if z < opts.min_range || z > opts.max_range {
                     continue;
@@ -338,6 +353,22 @@ mod tests {
         assert!((at(&img4, uc, 0) as i32 - 1000).abs() <= 10, "{}", at(&img4, uc, 0));
         // Slope ~0.3: still under the top at its front edge, it hits the underside (z = 0.6) at ~1.57 m.
         assert!((at(&img4, uc, 70) as i32 - 1570).abs() <= 10, "{}", at(&img4, uc, 70));
+    }
+
+    #[test]
+    fn depth_noise_grows_with_distance_and_dropout_drops_pixels() {
+        let cam = Camera::new(D1000);
+        let world = room();
+        let opts = RenderOpts { noise_a: 0.002, noise_b: 0.003, dropout: 0.1, ..Default::default() };
+        let img = cam.render(&world, lens(), &opts, &mut Rng::new(5), None);
+        // The wall 3 m ahead, rows 60-170 of the centre columns: sigma 0.002 + 0.003 * 9 = 29 mm.
+        let wall: Vec<f64> = (300..340).flat_map(|u| (60..170).map(move |v| (u, v))).map(|(u, v)| at(&img, u, v) as f64).collect();
+        let seen: Vec<f64> = wall.iter().copied().filter(|&d| d > 0.0).collect();
+        let dropped = 1.0 - seen.len() as f64 / wall.len() as f64;
+        assert!((dropped - 0.1).abs() < 0.03, "{dropped}");
+        let mean = seen.iter().sum::<f64>() / seen.len() as f64;
+        let sd = (seen.iter().map(|d| (d - mean) * (d - mean)).sum::<f64>() / seen.len() as f64).sqrt();
+        assert!((mean - 3000.0).abs() < 5.0 && (sd - 29.0).abs() < 4.0, "{mean} {sd}");
     }
 
     #[test]

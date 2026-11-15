@@ -1377,8 +1377,9 @@ fn main() -> Result<()> {
         })?;
     }
     let _ = executor.spin(SpinOptions::default().until_promise_resolved(stop_rx));
-    drop((subs, timers));
-    Ok(())
+    // The results are written. Exit without tearing down the render thread's publishers one by one
+    // (rmw complains about each once the context is gone).
+    std::process::exit(0);
 }
 
 fn sim_loop(sim: &mut Sim, stop: &AtomicBool) {
