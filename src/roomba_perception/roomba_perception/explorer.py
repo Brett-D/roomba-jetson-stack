@@ -199,6 +199,10 @@ class Explorer(Node):
         # A frontier whose way in keeps hitting something the camera can't see (railing posts,
         # glass) is skipped after this many bumps (0 = never).
         self.bumps_per_goal = int(p('bumps_per_goal', 2).value)
+        # Areas that failed (blocked, bumped, timed out) are skipped, but a door shut or a chair
+        # moved since: before giving up, retry them - again only after some goal has been reached.
+        self.retry_failed = bool(p('retry_failed_before_finish', True).value)
+        self.reached_at_retry = -1
         self.goal_bumps = 0
         self.bumped = False
         self.bump_points = []        # (x, y, monotonic) of recent marks
@@ -374,6 +378,7 @@ class Explorer(Node):
             self.blacklist = []
             self.visited = []
             self.reached = self.failed = 0
+            self.reached_at_retry = -1
         self.no_frontier_since = None
         self.resume_after_home = self.final_check = False
         self._slow_turns(True)
@@ -464,6 +469,13 @@ class Explorer(Node):
                 self.message = 'No reachable unmapped areas right now; checking again…'
                 return
             self.no_frontier_since = None
+            if self.retry_failed and self.blacklist and self.reached != self.reached_at_retry:
+                self.reached_at_retry = self.reached
+                self.get_logger().info(f'No unmapped areas left except {len(self.blacklist)} that failed '
+                                       'earlier: trying those again')
+                self.message = 'Retrying areas that failed earlier…'
+                self.blacklist = []
+                return
             if self.final_check:
                 self.final_check = False
                 self._finish('Exploration finished: no reachable unmapped areas left'
