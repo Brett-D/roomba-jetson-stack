@@ -920,10 +920,6 @@ mod tests {
         layout_frame(&oi::STREAM_PRIMARY, mode, set)
     }
 
-    fn secondary(mode: i32, set: &[(F, i32)]) -> SensorValues {
-        layout_frame(&oi::STREAM_SECONDARY, mode, set)
-    }
-
     /// A safe-mode frame just before a supervisor cycle, so contact isn't lost.
     fn tick(c: &mut Core, now: f64, link: &FakeLink, log: &Log) {
         c.on_frame(&frame(2, (0, 0), &[]), ns(now - 0.001), now - 0.001, link, log);
@@ -1091,36 +1087,41 @@ mod tests {
 
     #[test]
     fn drop_to_passive_first_seen_in_a_secondary_frame_waits_for_the_charger() {
-        let (mut c, link, log) = running(Config::default());
-        // Docked: the drop and the charger come together, but the first frame showing the drop is a
-        // secondary one, without the charger packet.
-        c.on_frame(&secondary(1, &[]), ns(12.0), 12.0, &link, &log);
-        c.supervise(12.01, &link, &log);
-        assert!(log.take().is_empty());
-        c.on_frame(&primary(1, &[(F::HomeBaseAvailable, 1)]), ns(12.015), 12.015, &link, &log);
-        c.supervise(12.06, &link, &log);
-        assert_eq!(log.take(), ["OI mode safe -> passive (home_base_available)"]);
-        assert!(link.modes.borrow().is_empty()); // safe is not asked for on the charger
-        // A drop without a reason (the OI restarted) is still undone once a primary frame confirms it.
-        tick(&mut c, 12.1, &link, &log);
-        c.on_frame(&primary(2, &[]), ns(12.11), 12.11, &link, &log);
-        c.on_frame(&secondary(1, &[]), ns(12.2), 12.2, &link, &log);
-        c.supervise(12.21, &link, &log);
-        assert_eq!(log.take(), ["OI mode passive -> safe"]);
-        c.on_frame(&primary(1, &[]), ns(12.215), 12.215, &link, &log);
-        c.supervise(12.26, &link, &log);
-        assert_eq!(log.take(), ["OI mode safe -> passive (no safety reason; re-entering safe)"]);
-        assert_eq!(*link.modes.borrow(), [2]);
-        // Without any primary frame the drop is judged on what is known after CHARGER_WAIT_S.
-        c.on_frame(&secondary(2, &[]), ns(12.3), 12.3, &link, &log);
-        c.supervise(12.31, &link, &log);
-        c.on_frame(&secondary(1, &[]), ns(12.4), 12.4, &link, &log);
-        c.supervise(12.41, &link, &log);
-        c.on_frame(&secondary(1, &[]), ns(13.0), 13.0, &link, &log);
-        c.supervise(13.39, &link, &log);
-        assert_eq!(log.take(), ["OI mode passive -> safe"]);
-        c.supervise(13.41, &link, &log);
-        assert_eq!(log.take(), ["OI mode safe -> passive (no safety reason; re-entering safe)"]);
+        for name in ["v2", "legacy"] {
+            let (prim, sec) = oi::stream_layouts(name).unwrap();
+            let primary = |mode: i32, set: &[(F, i32)]| layout_frame(prim, mode, set);
+            let secondary = |mode: i32, set: &[(F, i32)]| layout_frame(sec, mode, set);
+            let (mut c, link, log) = running(Config::default());
+            // Docked: the drop and the charger come together, but the first frame showing the drop is a
+            // secondary one, without the charger packet.
+            c.on_frame(&secondary(1, &[]), ns(12.0), 12.0, &link, &log);
+            c.supervise(12.01, &link, &log);
+            assert!(log.take().is_empty());
+            c.on_frame(&primary(1, &[(F::HomeBaseAvailable, 1)]), ns(12.015), 12.015, &link, &log);
+            c.supervise(12.06, &link, &log);
+            assert_eq!(log.take(), ["OI mode safe -> passive (home_base_available)"]);
+            assert!(link.modes.borrow().is_empty()); // safe is not asked for on the charger
+            // A drop without a reason (the OI restarted) is still undone once a primary frame confirms it.
+            tick(&mut c, 12.1, &link, &log);
+            c.on_frame(&primary(2, &[]), ns(12.11), 12.11, &link, &log);
+            c.on_frame(&secondary(1, &[]), ns(12.2), 12.2, &link, &log);
+            c.supervise(12.21, &link, &log);
+            assert_eq!(log.take(), ["OI mode passive -> safe"]);
+            c.on_frame(&primary(1, &[]), ns(12.215), 12.215, &link, &log);
+            c.supervise(12.26, &link, &log);
+            assert_eq!(log.take(), ["OI mode safe -> passive (no safety reason; re-entering safe)"]);
+            assert_eq!(*link.modes.borrow(), [2]);
+            // Without any primary frame the drop is judged on what is known after CHARGER_WAIT_S.
+            c.on_frame(&secondary(2, &[]), ns(12.3), 12.3, &link, &log);
+            c.supervise(12.31, &link, &log);
+            c.on_frame(&secondary(1, &[]), ns(12.4), 12.4, &link, &log);
+            c.supervise(12.41, &link, &log);
+            c.on_frame(&secondary(1, &[]), ns(13.0), 13.0, &link, &log);
+            c.supervise(13.39, &link, &log);
+            assert_eq!(log.take(), ["OI mode passive -> safe"]);
+            c.supervise(13.41, &link, &log);
+            assert_eq!(log.take(), ["OI mode safe -> passive (no safety reason; re-entering safe)"]);
+        }
     }
 
     #[test]

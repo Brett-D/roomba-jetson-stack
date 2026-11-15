@@ -142,13 +142,13 @@ fn trigger(r: (bool, String)) -> std_srvs::srv::Trigger_Response {
 }
 
 /// node.py `_connect`: open the port, start the OI and the stream. True once that worked.
-fn connect(robot: &Arc<Roomba>, node: &Node) -> bool {
+fn connect(robot: &Arc<Roomba>, node: &Node, (primary, secondary): (&[u8], &[u8])) -> bool {
     if robot.streaming() {
         return true;
     }
     let started = robot.open().and_then(|_| robot.start()).and_then(|_| {
         std::thread::sleep(Duration::from_millis(50));
-        robot.start_stream() // primary + secondary layouts, every sensor
+        robot.start_stream_with(primary, Some(secondary), 0.2) // every sensor between them
     });
     if let Err(e) = started {
         log!(node.warn().throttle(Duration::from_secs(30)), "cannot open {}: {e}; retrying", robot.port);
@@ -337,6 +337,12 @@ fn main() -> Result<()> {
     let wake_with_dtr = p.b("wake_with_dtr", false)?;
     let keep_awake_s = p.f("keep_awake_period_s", 60.0)?;
     let scroll_period = p.f("display_scroll_period_s", 0.35)?;
+    // Sensor stream layouts (oi.rs): v2 has the light-bumper signals in every 15 ms frame; legacy
+    // is the older set proven on the robot, where they come only ~5 times a second.
+    let layouts = match oi::stream_layouts(&p.s("stream_layout", "v2")?.to_lowercase()) {
+        Ok(layouts) => layouts,
+        Err(e) => bail!("{e}"),
+    };
     // Safe mode doesn't stop on bumps; the camera can't see the last ~30 cm, so the bumper is
     // the last line of defence. Forward motion is refused while a bumper is pressed.
     let bump_stop = p.b("bump_stop", true)?;
@@ -607,7 +613,7 @@ fn main() -> Result<()> {
     }
 
     log!(node.info(), "Roomba driver starting on {port} at {baud} baud (initial mode {initial_mode})");
-    if !connect(&robot, &node) {
+    if !connect(&robot, &node, layouts) {
         // Like the Python node's 2 s connect timer (created before the first attempt).
         let (r, n, stop) = (Arc::clone(&robot), node.clone(), Arc::clone(&shutting_down));
         std::thread::Builder::new().name("connect".into()).spawn(move || {
@@ -616,7 +622,7 @@ fn main() -> Result<()> {
                 let due = created + Duration::from_secs(2) * k;
                 k += 1;
                 std::thread::sleep(due.saturating_duration_since(Instant::now()));
-                if stop.load(Ordering::SeqCst) || connect(&r, &n) {
+                if stop.load(Ordering::SeqCst) || connect(&r, &n, layouts) {
                     break;
                 }
             }

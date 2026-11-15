@@ -10,6 +10,7 @@
 #   SCENARIO=replug tools/ab_driver.sh    the port appears late, then is unplugged for 2.5 s (reconnects)
 #   SCENARIO=lightbump tools/ab_driver.sh 16 light-bumper hits while driving at 0.25 m/s; the compare
 #                                         reports each stop's latency and the distance driven meanwhile
+#   LAYOUT=legacy tools/ab_driver.sh      with stream_layout: legacy (output in <scenario>_<config>_legacy)
 # env: OUT (/data/rs_lanes/driver/ab), RS (Rust binary), IMPLS ("py rs"), ROS_DOMAIN_ID (61),
 #      WS (install space with the drivers; default: the workspace these tools are in)
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -28,9 +29,11 @@ case $CONFIG in
   default) SRC=$(ros2 pkg prefix roomba_driver)/share/roomba_driver/config/roomba_driver.yaml; EXTRA=publish_tf=true ;;
   *) echo "CONFIG must be robot or default"; exit 1 ;;
 esac
+[ -n "$LAYOUT" ] && EXTRA="${EXTRA:+$EXTRA,}stream_layout=$LAYOUT"
+RUN=$OUT/${SCENARIO}_$CONFIG${LAYOUT:+_$LAYOUT}
 
 for impl in $IMPLS; do
-  D=$OUT/${SCENARIO}_$CONFIG/$impl; rm -rf "$D"; mkdir -p "$D"
+  D=$RUN/$impl; rm -rf "$D"; mkdir -p "$D"
   BIN=$([ "$impl" = rs ] && echo "$RS" || echo "$PY")
   python3 "$HERE/fake_roomba.py" --link "$D/tty" --log "$D/serial.jsonl" --t0-file "$D/t0.json" --scenario "$SCENARIO" &
   FAKE=$!
@@ -67,4 +70,4 @@ EOF
   wait $DRV; echo "$impl: driver exit code $?"
   sleep 0.5; kill -TERM $FAKE; wait $FAKE
 done
-python3 "$HERE/ab_driver_compare.py" "$OUT/${SCENARIO}_$CONFIG/py" "$OUT/${SCENARIO}_$CONFIG/rs"
+python3 "$HERE/ab_driver_compare.py" "$RUN/py" "$RUN/rs"

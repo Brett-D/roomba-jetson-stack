@@ -39,3 +39,9 @@ roomba_driver:
     battery_gauge: voltage
     battery_cells: 5
     wake_with_dtr: false
+    # Sensor stream layouts (70- and 46-byte frames either way). v2: the light-bumper signals come in
+    # every 15 ms frame, so the light_bumper_stop_signal stop reacts within ~30 ms. v2 streams packet
+    # groups (0, 4, 5, 107) this Roomba hasn't streamed before: if the stream misbehaves (restarts,
+    # sensors stuck at 0), use legacy, the older layouts proven here, where the light-bumper signals
+    # come only ~5 times a second (a stop up to ~5 cm late at 0.25 m/s).
+    stream_layout: v2

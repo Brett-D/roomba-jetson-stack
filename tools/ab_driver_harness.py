@@ -57,14 +57,16 @@ def srv(name, cls, **fields):
 
 
 def lightbump_schedule():
-    """Forward at 0.25 m/s (Nav2's speed) all along. No command in the 0.3 s after each hit's onset
-    or around the end of its bump reflex (1.3 s after the first supervisor tick after the hit), so
-    whether a command lands before the stop or after the reflex doesn't depend on timing (the gaps
-    are under the 0.5 s command timeout). Hits within 3 s of the last reflex only stop."""
+    """Forward at 0.25 m/s (Nav2's speed) all along. No command in the 0.7 s after each hit's onset
+    (until the light bumper reads clear again, also with stream_layout legacy) or around the end of
+    its bump reflex (~1.3 s after the hit), so whether a command lands before the stop, while the
+    bumper reads pressed or after the reflex doesn't depend on timing. The robot is stopped during
+    the first gap and the second is under the 0.5 s command timeout. Hits within 3 s of the last
+    reflex only stop."""
     hits = [a for a, _, _ in LIGHT_HITS['lightbump']]
     times = [round(1.0 + i * 0.1, 3) for i in range(410)]
     return [(t, twist(0.25, 0.0)) for t in times
-            if not any(a <= t < a + 0.3 or a + 1.25 <= t < a + 1.45 for a in hits)]
+            if not any(a <= t < a + 0.7 or a + 1.25 <= t < a + 1.6 for a in hits)]
 
 
 def schedule():

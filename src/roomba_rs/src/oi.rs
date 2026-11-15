@@ -375,9 +375,22 @@ pub fn stream_payload_length(ids: &[u8]) -> Result<usize, String> {
 /// in the remaining sensors (with the safety, mode and odometry packets) in a 46-byte frame a few
 /// times a second. The primary set carries everything the driver acts on: bumps, wheel drops,
 /// cliffs, the light bumpers with their signals (light_bumper_stop_signal is checked every frame),
-/// the charger and the battery.
+/// the charger and the battery. This is stream_layout v2, the default.
 pub const STREAM_PRIMARY: [u8; 8] = [0, 4, 35, 43, 44, 45, 106, 58];
 pub const STREAM_SECONDARY: [u8; 11] = [7, 9, 10, 11, 12, 5, 43, 44, 52, 53, 107];
+/// The layouts before v2 (same 70/46-byte frames, proven clean on a Roomba 550): the light-bump
+/// signals come only in the secondary frame, so light_bumper_stop_signal is checked ~5 times a second.
+pub const STREAM_PRIMARY_LEGACY: [u8; 6] = [6, 43, 44, 45, 54, 55];
+pub const STREAM_SECONDARY_LEGACY: [u8; 14] = [7, 9, 10, 11, 12, 35, 43, 44, 106, 52, 53, 56, 57, 58];
+
+/// (primary, secondary) stream layouts for the driver's stream_layout parameter.
+pub fn stream_layouts(name: &str) -> Result<(&'static [u8], &'static [u8]), String> {
+    match name {
+        "v2" => Ok((&STREAM_PRIMARY, &STREAM_SECONDARY)),
+        "legacy" => Ok((&STREAM_PRIMARY_LEGACY, &STREAM_SECONDARY_LEGACY)),
+        other => Err(format!("stream_layout must be v2 or legacy, not '{other}'")),
+    }
+}
 /// Bytes that fit in 15 ms at 115200 baud.
 pub const MAX_STREAM_FRAME: usize = 172;
 
@@ -755,19 +768,31 @@ mod tests {
     #[test]
     fn driver_stream_layouts_cover_every_sensor_and_fit() {
         let ids_of = |layout: &[u8]| -> std::collections::BTreeSet<u8> { layout.iter().flat_map(|&p| packet_ids(p).unwrap()).collect() };
-        let mut covered = std::collections::BTreeSet::new();
-        for layout in [&STREAM_PRIMARY[..], &STREAM_SECONDARY[..]] {
-            assert!(stream_payload_length(layout).unwrap() + 3 <= 70); // largest frames proven clean in Safe mode
-            let ids = ids_of(layout);
-            for p in [7, 9, 10, 11, 12, 35, 43, 44] {
-                assert!(ids.contains(&p));
+        for name in ["v2", "legacy"] {
+            let (primary, secondary) = stream_layouts(name).unwrap();
+            let mut covered = std::collections::BTreeSet::new();
+            for layout in [primary, secondary] {
+                assert!(stream_payload_length(layout).unwrap() + 3 <= 70); // largest frames proven clean in Safe mode
+                let ids = ids_of(layout);
+                for p in [7, 9, 10, 11, 12, 35, 43, 44] {
+                    assert!(ids.contains(&p));
+                }
+                covered.extend(ids);
             }
-            covered.extend(ids);
+            assert_eq!(covered, packet_ids(100).unwrap().into_iter().collect());
+            assert_ne!(stream_payload_length(primary), stream_payload_length(secondary));
         }
-        assert_eq!(covered, packet_ids(100).unwrap().into_iter().collect());
-        assert_ne!(stream_payload_length(&STREAM_PRIMARY), stream_payload_length(&STREAM_SECONDARY));
-        // The light-bumper stop (flags, front signals) is checked on every primary frame, not ~5 times a second.
+        // v2: the light-bumper stop (flags, front signals) is checked on every primary frame, not ~5 times a second.
         assert!([45, 47, 48, 49, 50].iter().all(|p| ids_of(&STREAM_PRIMARY).contains(p)));
+    }
+
+    #[test]
+    fn legacy_stream_layouts_are_the_proven_ones_byte_for_byte() {
+        let (primary, secondary) = stream_layouts("legacy").unwrap();
+        assert_eq!(stream(primary).unwrap(), [148, 6, 6, 43, 44, 45, 54, 55]);
+        assert_eq!(stream(secondary).unwrap(), [148, 14, 7, 9, 10, 11, 12, 35, 43, 44, 106, 52, 53, 56, 57, 58]);
+        assert_eq!(stream_layouts("v2").unwrap(), (&STREAM_PRIMARY[..], &STREAM_SECONDARY[..]));
+        assert_eq!(stream_layouts("v3").unwrap_err(), "stream_layout must be v2 or legacy, not 'v3'");
     }
 
     #[test]
