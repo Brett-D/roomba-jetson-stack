@@ -1,0 +1,23 @@
+[package]
+name = "roomba_rs"
+version = "0.1.0"
+edition = "2021"
+description = "Rust ports of the Roomba robot's hot-path ROS 2 nodes"
+license = "MIT"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "floor_obstacles"
+path = "src/bin/floor_obstacles.rs"
+
+[dependencies]
+anyhow = "1"
+libc = "0.2"
+rclrs = "0.8"
+ros-env = "0.3"
+
+[profile.release]
+opt-level = 3
+lto = "thin"

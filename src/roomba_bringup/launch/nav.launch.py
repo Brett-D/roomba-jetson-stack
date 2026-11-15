@@ -33,13 +33,19 @@ def generate_launch_description():
                               description='Rigid mount: camera height above the floor (0 = estimate)'),
         DeclareLaunchArgument('base_frame', default_value='camera_link',
                               description='Robot body frame (base_link on the robot)'),
+        DeclareLaunchArgument('rust_nodes', default_value='true',
+                              description='Use the Rust ports (package roomba_rs) of nodes that have one; '
+                                          'false = the original Python nodes'),
         DeclareLaunchArgument('robot_mode', default_value='false',
                               description='true: the robot drives itself (status wording instead of '
                                           'instructions for a person)'),
     ]
 
     nodes = [
-        Node(package='roomba_perception', executable='floor_obstacles', name='floor_obstacles',
+        # Rust port: same topics, parameters and output, ~1/7 of the CPU (A/B on a recorded drive).
+        Node(package=PythonExpression(["'roomba_rs' if '", LaunchConfiguration('rust_nodes'),
+                                       "' == 'true' else 'roomba_perception'"]),
+             executable='floor_obstacles', name='floor_obstacles',
              output='screen',
              parameters=[{
                  'fallback_camera_height_m': ParameterValue(LaunchConfiguration('fallback_camera_height_m'),
