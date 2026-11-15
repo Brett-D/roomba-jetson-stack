@@ -1,0 +1,304 @@
+//! explorer (Rust): frontier exploration - drives the robot to the edge of the known map until
+//! nothing is left, then back to where it started. Drop-in replacement for
+//! roomba_perception/explorer.py: same node name, parameters, topics and QoS, status JSON, keep-out
+//! commands, log lines, NavigateToPose goals and controller parameter requests (see that file's
+//! docstring). The logic is roomba_rs::explorer; this file only connects it to ROS.
+//!
+//! Subscribes: /global_costmap/costmap, /roomba/mode (latched), /battery_state, /roomba/sensors,
+//!             /vslam_filter/status, ~/command ("start" | "stop" | "home"), /tf, /tf_static
+//! Publishes:  ~/status (JSON, transient local), /perception/ignore_zones/command
+//! Uses:       navigate_to_pose action, /controller_server/get_parameters|set_parameters
+
+use std::collections::HashMap;
+use std::sync::{Arc, OnceLock};
+use std::time::Duration;
+
+use anyhow::Result;
+use rclrs::*;
+use ros_env::{nav2_msgs, nav_msgs, rcl_interfaces, roomba_msgs, sensor_msgs, std_msgs};
+
+use nav2_msgs::action::NavigateToPose;
+use rcl_interfaces::msg::{Parameter, ParameterValue};
+use rcl_interfaces::srv::{GetParameters, GetParameters_Request, GetParameters_Response, SetParameters, SetParameters_Request, SetParameters_Response};
+use roomba_rs::explorer::{Explorer, GoalRequest, Grid, Io, Params, Sensors, PARAMETER_DOUBLE, ROTATE_PARAM};
+use roomba_rs::node_params::{block_signals, mono, on_signal, NodeParams};
+use roomba_rs::tf_buffer::TfBuffer;
+use roomba_rs::tf_listener::{ros_time, HasTfBuffer, WorkerTfListener};
+use roomba_rs::watchdog::Level;
+
+struct RosIo {
+    node: Node,
+    /// The worker owning [`State`], to hand responses back to the explorer.
+    worker: Arc<OnceLock<Worker<State>>>,
+    tf: TfBuffer,
+    nav: ActionClient<NavigateToPose>,
+    /// Accepted goals that have no result yet, by sequence number.
+    goals: HashMap<u64, CancellationClient<NavigateToPose>>,
+    get_params: Client<GetParameters>,
+    set_params: Client<SetParameters>,
+    pub_status: Publisher<std_msgs::msg::String>,
+    pub_zone: Publisher<std_msgs::msg::String>,
+    cliff_timers: Vec<WorkerTimer<State>>,
+}
+
+impl RosIo {
+    fn on_worker(&self, f: impl FnOnce(&mut State) + Send + 'static) {
+        if let Some(w) = self.worker.get() {
+            let _ = w.run(f);
+        }
+    }
+}
+
+impl Io for RosIo {
+    fn mono(&mut self) -> f64 {
+        mono()
+    }
+
+    fn lookup(&mut self, target: &str, source: &str) -> Option<([f64; 3], [f64; 4])> {
+        let t = self.tf.lookup_transform(target, source, 0).ok()?;
+        Some((t.transform.translation, t.transform.rotation))
+    }
+
+    fn nav_ready(&mut self) -> bool {
+        self.nav.server_is_available().unwrap_or(false)
+    }
+
+    fn send_goal(&mut self, g: GoalRequest) {
+        let mut goal = nav2_msgs::action::NavigateToPose_Goal::default();
+        goal.pose.header.frame_id = g.frame;
+        goal.pose.header.stamp = ros_time(self.node.get_clock().now().nsec);
+        goal.pose.pose.position.x = g.x;
+        goal.pose.pose.position.y = g.y;
+        goal.pose.pose.orientation.z = g.qz;
+        goal.pose.pose.orientation.w = g.qw;
+        let seq = g.seq;
+        let requested = match self.nav.try_request_goal(goal) {
+            Ok(r) => r,
+            Err(e) => {
+                // rclpy would raise here; leave the goal to time out like an unanswered request.
+                log!(self.node.error(), "Could not send the navigation goal: {e}");
+                return;
+            }
+        };
+        let worker = self.worker.get().cloned();
+        let _ = self.node.commands().run(async move {
+            let Some(worker) = worker else { return };
+            match requested.await {
+                None => {
+                    let _ = worker.run(move |s: &mut State| s.core.on_goal_response(seq, false, &mut s.io));
+                }
+                Some(client) => {
+                    let GoalClient { result, cancellation, .. } = client;
+                    let _ = worker.run(move |s: &mut State| {
+                        s.io.goals.insert(seq, cancellation);
+                        s.core.on_goal_response(seq, true, &mut s.io);
+                    });
+                    let (status, _) = result.await;
+                    let _ = worker.run(move |s: &mut State| {
+                        s.io.goals.remove(&seq);
+                        s.core.on_result(seq, status as i8, &mut s.io);
+                    });
+                }
+            }
+        });
+    }
+
+    fn cancel_goal(&mut self, seq: u64) {
+        if let Some(c) = self.goals.get(&seq) {
+            if let Err(e) = c.try_cancel() {
+                log!(self.node.warn(), "Could not cancel the navigation goal: {e}");
+            }
+        }
+    }
+
+    fn get_params_ready(&mut self) -> bool {
+        self.get_params.service_is_ready().unwrap_or(false)
+    }
+
+    fn set_params_ready(&mut self) -> bool {
+        self.set_params.service_is_ready().unwrap_or(false)
+    }
+
+    fn get_rotate(&mut self) {
+        let worker = Arc::clone(&self.worker);
+        let request = GetParameters_Request { names: vec![ROTATE_PARAM.to_string()] };
+        let sent = self.get_params.call_then(request, move |r: GetParameters_Response| {
+            if let Some(w) = worker.get() {
+                let value = r.values.first().map(|v| (v.type_, v.double_value));
+                let _ = w.run(move |s: &mut State| s.core.on_saved_rotate(Ok(value), &mut s.io));
+            }
+        });
+        if let Err(e) = sent {
+            let msg = e.to_string();
+            self.on_worker(move |s: &mut State| s.core.on_saved_rotate(Err(msg), &mut s.io));
+        }
+    }
+
+    fn set_rotate(&mut self, value: f64) {
+        let param = Parameter {
+            name: ROTATE_PARAM.to_string(),
+            value: ParameterValue { type_: PARAMETER_DOUBLE, double_value: value, ..Default::default() },
+        };
+        let request = SetParameters_Request { parameters: vec![param] };
+        if let Err(e) = self.set_params.call_then(request, |_: SetParameters_Response| {}) {
+            log!(self.node.warn(), "Could not set {ROTATE_PARAM}: {e}");
+        }
+    }
+
+    fn status(&mut self, data: String) {
+        self.pub_status.publish(std_msgs::msg::String { data }).ok();
+    }
+
+    fn zone_command(&mut self, data: String) {
+        self.pub_zone.publish(std_msgs::msg::String { data }).ok();
+    }
+
+    fn log(&mut self, level: Level, msg: String) {
+        match level {
+            Level::Info => log!(self.node.info(), "{msg}"),
+            Level::Warn => log!(self.node.warn(), "{msg}"),
+            Level::Error => log!(self.node.error(), "{msg}"),
+        }
+    }
+
+    fn local_hms(&mut self) -> String {
+        // SAFETY: time() with a null pointer only returns the time; localtime_r writes `tm`.
+        let tm = unsafe {
+            let t = libc::time(std::ptr::null_mut());
+            let mut tm: libc::tm = std::mem::zeroed();
+            libc::localtime_r(&t, &mut tm);
+            tm
+        };
+        format!("{:02}{:02}{:02}", tm.tm_hour, tm.tm_min, tm.tm_sec)
+    }
+
+    fn start_cliff_timer(&mut self) {
+        let Some(worker) = self.worker.get() else { return };
+        // One-shot timers fire 0.6 s after the mode change: only the latest few can be pending.
+        if self.cliff_timers.len() >= 4 {
+            self.cliff_timers.remove(0);
+        }
+        match worker.create_timer_oneshot(Duration::from_millis(600).node_time(), |s: &mut State| s.core.cliff_check(&mut s.io)) {
+            Ok(t) => self.cliff_timers.push(t),
+            Err(e) => log!(self.node.error(), "Could not start the cliff check timer: {e}"),
+        }
+    }
+}
+
+struct State {
+    core: Explorer,
+    io: RosIo,
+}
+
+impl HasTfBuffer for State {
+    fn tf_buffer(&mut self) -> &mut TfBuffer {
+        &mut self.io.tf
+    }
+}
+
+fn sensors(m: &roomba_msgs::msg::SensorState) -> Sensors {
+    Sensors {
+        bump_left: m.bump_left,
+        bump_right: m.bump_right,
+        wheel_drop_left: m.wheel_drop_left,
+        wheel_drop_right: m.wheel_drop_right,
+        cliff: [m.cliff_left, m.cliff_front_left, m.cliff_front_right, m.cliff_right],
+        light: [
+            m.light_bump_left_signal,
+            m.light_bump_front_left_signal,
+            m.light_bump_center_left_signal,
+            m.light_bump_center_right_signal,
+            m.light_bump_front_right_signal,
+            m.light_bump_right_signal,
+        ],
+    }
+}
+
+/// SIGINT / SIGTERM: cancel the goal being driven to (as the Python node does on Ctrl-C), then exit.
+fn cancel_on_signal(set: libc::sigset_t, worker: Worker<State>) {
+    on_signal(set, move || {
+        let mut done = worker.run(|s: &mut State| s.core.shutdown(&mut s.io));
+        for _ in 0..50 {
+            if !matches!(done.try_recv(), Ok(None)) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        std::thread::sleep(Duration::from_millis(200)); // let a cancel request go out
+    });
+}
+
+fn main() -> Result<()> {
+    roomba_rs::default_signals();
+    let signals = block_signals();
+    let context = Context::default_from_env()?;
+    let mut executor = context.create_basic_executor();
+    let node = executor.create_node("explorer")?;
+    let mut declared = NodeParams::new(&node);
+    let params = Params::load(&mut declared)?;
+
+    let latched = || QoSProfile::topics_default().keep_last(1).reliable().transient_local();
+    let worker_cell = Arc::new(OnceLock::new());
+    let mut io = RosIo {
+        node: node.clone(),
+        worker: Arc::clone(&worker_cell),
+        tf: TfBuffer::new(),
+        nav: node.create_action_client::<NavigateToPose>("navigate_to_pose")?,
+        goals: HashMap::new(),
+        get_params: node.create_client::<GetParameters>("/controller_server/get_parameters")?,
+        set_params: node.create_client::<SetParameters>("/controller_server/set_parameters")?,
+        pub_status: node.create_publisher("~/status".qos(latched()))?,
+        pub_zone: node.create_publisher("/perception/ignore_zones/command".keep_last(10))?,
+        cliff_timers: Vec::new(),
+    };
+    let core = Explorer::new(params, &mut io);
+    let wants_sensors = core.wants_sensors();
+    let worker = node.create_worker::<State>(State { core, io });
+    let _ = worker_cell.set(Arc::clone(&worker));
+    cancel_on_signal(signals, Arc::clone(&worker));
+
+    let _tf = WorkerTfListener::new(&worker, &node)?;
+    let _grid = worker.create_subscription::<nav_msgs::msg::OccupancyGrid, _>(
+        "/global_costmap/costmap".qos(latched()),
+        |s: &mut State, m: nav_msgs::msg::OccupancyGrid| {
+            s.core.on_grid(Grid {
+                width: m.info.width,
+                height: m.info.height,
+                resolution: m.info.resolution,
+                origin_x: m.info.origin.position.x,
+                origin_y: m.info.origin.position.y,
+                data: m.data,
+            })
+        },
+    )?;
+    let _mode = worker.create_subscription::<std_msgs::msg::String, _>(
+        "/roomba/mode".qos(latched()),
+        |s: &mut State, m: std_msgs::msg::String| s.core.on_mode(&m.data, &mut s.io),
+    )?;
+    let _battery = worker.create_subscription::<sensor_msgs::msg::BatteryState, _>(
+        "/battery_state".keep_last(2),
+        |s: &mut State, m: sensor_msgs::msg::BatteryState| s.core.on_battery(m.percentage),
+    )?;
+    let _filter = worker.create_subscription::<std_msgs::msg::String, _>(
+        "/vslam_filter/status".keep_last(2),
+        |s: &mut State, m: std_msgs::msg::String| s.core.on_filter(&m.data),
+    )?;
+    let _command = worker.create_subscription::<std_msgs::msg::String, _>(
+        "~/command".keep_last(10),
+        |s: &mut State, m: std_msgs::msg::String| s.core.on_command(&m.data, &mut s.io),
+    )?;
+    let _sensors = if wants_sensors {
+        Some(worker.create_subscription::<roomba_msgs::msg::SensorState, _>(
+            "/roomba/sensors".keep_last(10),
+            |s: &mut State, m: roomba_msgs::msg::SensorState| s.core.on_sensors(&sensors(&m), &mut s.io),
+        )?)
+    } else {
+        None
+    };
+    // Node clock, like rclpy's create_timer (sim time when use_sim_time is set).
+    let _tick = worker.create_timer_repeating(Duration::from_secs(1).node_time(), |s: &mut State| s.core.tick(&mut s.io))?;
+
+    log!(node.info(), "explorer (Rust) running");
+    executor.spin(SpinOptions::default()).first_error()?;
+    Ok(())
+}

@@ -40,6 +40,10 @@ path = "src/bin/web_server.rs"
 name = "set_password"
 path = "src/bin/set_password.rs"
 
+[[bin]]
+name = "explorer"
+path = "src/bin/explorer.rs"
+
 [dependencies]
 anyhow = "1"
 # Async service callbacks hand requests to the driver's service thread (rclrs uses futures 0.3 too).

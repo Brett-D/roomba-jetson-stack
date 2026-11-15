@@ -103,7 +103,10 @@ def generate_launch_description():
                  'robot_mode': ParameterValue(LaunchConfiguration('robot_mode'), value_type=bool),
              }]),
         # Frontier exploration (robot only): started and stopped from the web app.
-        Node(package='roomba_perception', executable='explorer', name='explorer', output='screen',
+        # Rust port: the same goals, status and keep-out marks (tools/ab_explorer_offline.py), ~1/6 of the CPU.
+        Node(package=PythonExpression(["'roomba_rs' if '", LaunchConfiguration('rust_nodes'),
+                                       "' == 'true' else 'roomba_perception'"]),
+             executable='explorer', name='explorer', output='screen',
              # The driver estimates the Ridgid pack's charge from its voltage (battery_gauge: voltage).
              # Bump marks: wider (this robot's right bumper switch is masked, so hits on the right
              # read as left), and also on the front light bumpers, which see railing posts first.
