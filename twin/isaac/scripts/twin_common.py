@@ -9,6 +9,9 @@ TWIN = os.environ.get('TWIN', r'E:\twin')
 ASSETS = os.path.join(TWIN, 'assets')
 USD_DIR = os.path.join(ASSETS, 'usd')
 HOUSE_USD = os.path.join(USD_DIR, 'house.usd')
+REMODEL_USD = os.path.join(USD_DIR, 'house_remodel.usd')         # floor-plan based house (default look)
+FLOORPLAN_JSON = os.path.join(ASSETS, 'remodel', 'floorplan.json')
+TEXTURE_DIR = os.path.join(ASSETS, 'remodel', 'textures')
 ROBOT_USD = os.path.join(USD_DIR, 'roomba550_d1000.usd')
 REPO_ISAAC = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 URDF = os.path.join(REPO_ISAAC, 'robot', 'roomba550_d1000.urdf')
@@ -27,7 +30,7 @@ CAM = {
     'mount_xyz': (0.153, 0.0, 0.13),          # base_link -> camera_link
 }
 DRIVE = {'wheel_base_m': 0.235, 'wheel_radius_m': 0.036, 'max_wheel_speed_m_s': 0.4}
-SEM_CLASSES = ['floor', 'wall', 'furniture', 'ceiling', 'person', 'railing', 'robot']
+SEM_CLASSES = ['floor', 'wall', 'furniture', 'ceiling', 'person', 'railing', 'robot', 'stairs', 'door', 'window']
 
 
 def add_semantic_label(prim, label, taxonomy='class'):

@@ -44,7 +44,8 @@ def app_update(n=1):
 
 
 class TwinScene:
-    def __init__(self, look='scan', seed=0):
+    def __init__(self, look='remodel', seed=0):
+        """look: 'remodel' (floor-plan house, default), 'scan' or 'clean' (RTAB-Map mesh / grid blocks)."""
         self.stage = omni.usd.get_context().get_stage()
         self.rng = random.Random(seed)
         UsdGeom.SetStageUpAxis(self.stage, UsdGeom.Tokens.z)
@@ -53,17 +54,101 @@ class TwinScene:
         self.stage.SetDefaultPrim(self.stage.GetPrimAtPath('/World'))
         self.grid, self.meta = house_lib.load_grid(tc.GRID_YAML)
         self.path = np.array(tc.load_path_poses())
-        self.free_xy = house_lib.free_space_samples(self.grid, self.meta, self.path[:, :2], 0.20, 1.0)
         self.house = self.stage.DefinePrim('/World/House', 'Xform')
-        self.house.GetReferences().AddReference(tc.HOUSE_USD)
-        self.set_look(look)
+        self.look = look
+        if look == 'remodel':
+            self.house.GetReferences().AddReference(tc.REMODEL_USD)
+            self.plan = json.load(open(tc.FLOORPLAN_JSON))
+            self.obstacles = self._plan_obstacles()
+            self.free_xy = self._plan_free_xy()
+        else:
+            self.house.GetReferences().AddReference(tc.HOUSE_USD)
+            self.plan = None
+            self.obstacles = self.grid == house_lib.OCCUPIED
+            self.free_xy = house_lib.free_space_samples(self.grid, self.meta, self.path[:, :2], 0.20, 1.0)
+            self.set_look(look)
         self.robot_info = json.load(open(os.path.splitext(tc.ROBOT_USD)[0] + '_info.json'))
         self.people = []
 
     # ---------------- house ----------------
     def set_look(self, look):
+        if self.look == 'remodel':
+            return
         self.house.GetVariantSets().GetVariantSet('look').SetVariantSelection(look)
         self.look = look
+
+    def _raster(self, polys, filled=True, width=1):
+        import cv2
+        H, W = self.grid.shape
+        res, (ox, oy) = self.meta['resolution'], self.meta['origin'][:2]
+        m = np.zeros((H, W), np.uint8)
+        for p in polys:
+            q = np.round(((np.asarray(p) - [ox, oy]) / res) * 8).astype(np.int32)
+            if filled:
+                cv2.fillPoly(m, [q], 1, shift=3)
+            else:
+                cv2.polylines(m, [q], False, 1, width, shift=3)
+        return m.astype(bool)
+
+    def _plan_obstacles(self):
+        p = self.plan
+        return (self._raster(p['walls']) | self._raster([r['polyline'] for r in p['railings']], False, 2) |
+                self._raster([f['footprint'] for f in p['furniture']]) |
+                self._raster([f['footprint'] for f in p.get('fixtures', [])]) |
+                self._raster([p['stair_void']['polygon']]))
+
+    def _plan_free_xy(self, clearance=0.22):
+        from scipy import ndimage
+        indoor = self._raster([r['polygon'] for r in self.plan['rooms'] if not r['outdoor']])
+        d = ndimage.distance_transform_edt(~self.obstacles) * self.meta['resolution']
+        ok = indoor & (d >= clearance)
+        rows, cols = np.nonzero(ok)
+        res, (ox, oy) = self.meta['resolution'], self.meta['origin'][:2]
+        return np.stack([ox + (cols + 0.5) * res, oy + (rows + 0.5) * res], 1)
+
+    def randomize_remodel(self, rng):
+        """Domain-randomisation hook for the remodelled house: floor textures/tints per room, wall paint,
+        doors open/closed. Returns a dict for the frame metadata."""
+        from pxr import Sdf, UsdShade
+        if self.look != 'remodel':
+            return {}
+        tex = tc.TEXTURE_DIR.replace('\\', '/')
+        choices = {'bedroom': ['carpet_beige', 'carpet_gray', 'carpet_taupe', 'carpet_blue', 'wood_oak', 'wood_maple'],
+                   'hallway': ['carpet_taupe', 'carpet_beige', 'carpet_gray', 'wood_oak', 'wood_walnut', 'wood_maple'],
+                   'bathroom': ['tile_white', 'tile_gray', 'tile_beige'], 'closet': ['carpet_gray', 'carpet_beige'],
+                   'balcony': ['stone_gray']}
+        info = {}
+        for i, r in enumerate(self.plan['rooms']):
+            sh = UsdShade.Shader(self.stage.GetPrimAtPath(f'/World/House/Looks/floor_{i}/Tex'))
+            if not sh:
+                continue
+            kind = 'bedroom' if r['type'].startswith('bedroom') else r['type']
+            t = rng.choice(choices.get(kind, ['carpet_gray']))
+            sh.GetInput('file').Set(Sdf.AssetPath(f'{tex}/{t}.png'))
+            g = rng.uniform(0.75, 1.2)
+            sh.GetInput('scale').Set(Gf.Vec4f(g * rng.uniform(0.92, 1.08), g, g * rng.uniform(0.9, 1.08), 1.0))
+            info[f'floor_{i}'] = t
+        wall = UsdShade.Shader(self.stage.GetPrimAtPath('/World/House/Looks/wall/Tex'))
+        if wall:
+            base = rng.uniform(0.6, 1.0)
+            tint = (base * rng.uniform(0.9, 1.05), base * rng.uniform(0.9, 1.03), base * rng.uniform(0.8, 1.0))
+            wall.GetInput('scale').Set(Gf.Vec4f(*tint, 1.0))
+            info['wall_tint'] = [round(v, 3) for v in tint]
+        closed = 0
+        doors = self.stage.GetPrimAtPath('/World/House/Doors')
+        if doors:
+            for leaf in Usd.PrimRange(doors):
+                a_open = leaf.GetAttribute('twin:open_yaw_deg')
+                if not a_open:
+                    continue
+                shut = rng.random() < 0.15
+                closed += shut
+                yaw = leaf.GetAttribute('twin:closed_yaw_deg').Get() if shut else a_open.Get()
+                for op in UsdGeom.Xformable(leaf).GetOrderedXformOps():
+                    if op.GetOpType() == UsdGeom.XformOp.TypeRotateZ:
+                        op.Set(float(yaw))
+        info['door_leaves_closed'] = closed
+        return info
 
     # ---------------- lights ----------------
     def add_lights(self, spacing=3.0, intensity=60000.0, dome=300.0, temperature=3500.0):
@@ -71,6 +156,19 @@ class TwinScene:
         d = UsdLux.DomeLight.Define(self.stage, '/World/Lights/Dome')
         d.CreateIntensityAttr(dome)
         self.dome = d
+        if self.look == 'remodel':
+            # room lights come with the house; add daylight through the windows
+            sun = UsdLux.DistantLight.Define(self.stage, '/World/Lights/Sun')
+            sun.CreateIntensityAttr(2500.0)
+            sun.CreateAngleAttr(0.8)
+            sx = UsdGeom.Xformable(sun)
+            self.sun_rot = sx.AddRotateXYZOp()
+            self.sun_rot.Set(Gf.Vec3f(-50.0, 0.0, 30.0))
+            self.sun = sun
+            self.ceiling_lights = [UsdLux.SphereLight(p) for p in Usd.PrimRange(self.house)
+                                   if p.GetTypeName() == 'SphereLight']
+            self.light_base = {str(L.GetPath()): L.GetIntensityAttr().Get() for L in self.ceiling_lights}
+            return self.ceiling_lights
         # one ceiling light per spacing x spacing cell that contains drivable free space
         cells = {}
         for x, y in self.free_xy:
