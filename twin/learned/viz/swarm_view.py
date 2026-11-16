@@ -245,7 +245,17 @@ def main():
             self.ready = True
 
         def holding(self):
-            return self.hold_until > self.clock
+            """Freed robots waiting for their reset (wheels stopped until the reset happens)."""
+            return self.hold_until >= 0
+
+        def _get_dones(self):
+            terminated, truncated = super()._get_dones()
+            if self.ready and a.freed_hold_s > 0:
+                # an expired hold ends the episode even if the robot no longer passes the success test
+                expired = (self.hold_until >= 0) & (self.hold_until <= self.clock)
+                terminated = terminated | expired
+                truncated = truncated & ~terminated
+            return terminated, truncated
 
         def reset(self, *args, **kw):
             self.force_reset = True
@@ -601,12 +611,18 @@ def main():
         if a.ready_file and a.hold_s > 0:
             with open(a.ready_file, "w") as f:
                 f.write(f"{os.getpid()}\n")
-        t_hold = time.time()
-        while a.hold_s > 0 and time.time() - t_hold < a.hold_s and vis.is_running():
-            hud["lines"] = [("Isaac Lab - the unstuck skill's training environment, live", (1.0, 1.0, 1.0)),
-                            (f"{N} simulated Roombas at once (PhysX), each stuck in its own generated 4 x 4 m situation", None)]
-            env.sim.render()
-            time.sleep(1 / 60)
+        hud["lines"] = [("Isaac Lab - the unstuck skill's training environment" + ("" if a.record else ", live"), (1.0, 1.0, 1.0)),
+                        (f"{N} simulated Roombas at once (PhysX), each stuck in its own generated 4 x 4 m situation", None)]
+        if a.hold_s > 0 and rec["proc"] is not None:
+            # recording: a fixed number of held frames, so every recording starts the run on the same frame
+            n_hold = min(int(round(a.hold_s * rec["fps"])), max(rec["n"] - rec["frames"], 0))
+            for _ in range(n_hold):
+                env.sim.render()
+        else:
+            t_hold = time.time()
+            while a.hold_s > 0 and time.time() - t_hold < a.hold_s and vis.is_running():
+                env.sim.render()
+                time.sleep(1 / 60)
         ready = a.hold_s > 0 or not a.ready_file
         wall0 = time.time()
         seg = 0
@@ -669,7 +685,7 @@ def main():
                 if k_step % 3 and not rec["proc"]:
                     if a.max_s and time.time() - wall0 > a.max_s:
                         break
-                    if a.segment_s > 0 and ts >= a.segment_s and len(ckpts) > 1:
+                    if a.segment_s > 0 and ts >= a.segment_s and (len(ckpts) > 1 or not a.loop):
                         break
                     continue
                 f_free = int((first == 1).sum())
@@ -716,7 +732,7 @@ def main():
                     hud["lines"].append((f"sim speed {rate:.2f} x real time", (0.6, 0.6, 0.6)))
                 if a.max_s and time.time() - wall0 > a.max_s:
                     break
-                if a.segment_s > 0 and ts >= a.segment_s and len(ckpts) > 1:
+                if a.segment_s > 0 and ts >= a.segment_s and (len(ckpts) > 1 or not a.loop):
                     break
                 if rec["proc"] is not None and rec["frames"] >= rec["n"]:
                     break
