@@ -1,5 +1,5 @@
 """Evaluate exploration goal choice: the explorer's rule vs the learned ranker, on held-out
-procedural houses and on the real house's two floors.
+procedural houses and on the real house's two floor plans.
 
   python evaluate_explore.py --theta <cem>/theta_mu.npy [--ckpt <ppo>/ranker_final.pt] --out E:/twin/learned/runs/explore_eval
 

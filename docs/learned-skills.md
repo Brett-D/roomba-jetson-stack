@@ -11,7 +11,9 @@ started by a launch file; the explorer's default behaviour is unchanged):
    a goal, so every explorer rule still applies). Fast GPU 2D environment in PyTorch.
 
 Everything lives in `twin/learned/` (training, evaluation) and `src/roomba_rs/src/learned/` (Rust
-inference), plus the `roomba_skills_msgs` interface package and the `unstuck_skill` node.
+inference), plus the `roomba_skills_msgs` interface package and the `unstuck_skill` node. For an
+overview of everything trained in this project (including the Isaac Sim person / railing detector),
+with algorithms, budgets and status side by side, see [training.md](training.md).
 
 | | |
 |---|---|
@@ -35,7 +37,7 @@ uv pip install --python E:\twin\isaaclab-env\Scripts\python.exe mapbox-earcut   
 ### Environment (`twin/learned/unstuck/`)
 
 A direct-workflow Isaac Lab env (`unstuck_env.py`, `Roomba-Unstuck-v0`), 4096 Roombas in parallel at
-50 Hz physics / 10 Hz control (~30k env steps/s alone on the 5090, ~10 GB VRAM).
+50 Hz physics / 10 Hz control (median ~20k env steps/s on the 5090 while sharing it with other jobs).
 
 - **Robot** (`robot_usd.py`, written with pxr so it loads kit-less): the dimensions of
   `twin/isaac/robot/roomba550_d1000.urdf`. Body shell (r 0.17 m, the bumper), D1000 housing and lid
@@ -79,8 +81,11 @@ python ..\plot_curves.py --unstuck E:\twin\learned\runs\unstuck\main --out ..\..
 ```
 
 PPO (RSL-RL 5.5), actor / critic MLP 256-128-64 ELU with observation normalisation, 4096 envs x 24
-steps per iteration. Stopped at iteration 300 (~12 M steps, 33 min; it shared the GPU with the Isaac Sim
-twin and the exploration runs): the training success rate had been flat at ~0.83 since iteration ~150.
+steps per iteration (learning rate 5e-4 with the adaptive KL schedule, gamma 0.98, lambda 0.95, clip
+0.2, entropy 0.003, 5 epochs x 4 mini-batches, seed 7). Configured for 600 iterations, stopped by hand
+after 312 (30.7 M env steps, 39 min; it shared the GPU with the Isaac Sim twin and the exploration
+runs): the training success rate had been flat (mean 0.84) since iteration ~150. `model_300.pt` is the
+exported checkpoint.
 
 ![unstuck training](learned-skills/unstuck_training.png)
 
@@ -112,7 +117,7 @@ Held-out procedural tiles (440):
 | threshold (38) | 0.39 | 1.00 | | cliff_edge (18) | 0.72 | 1.00 |
 | clutter (39) | 0.15 | 0.31 | | | | |
 
-Stuck situations cut from **the real house's floor plans (remodelled twin)** (`house_tiles.py`: both floors' vector plans,
+Stuck situations cut from **the real house's floor plans** (remodelled twin) (`house_tiles.py`: both floors' vector plans,
 117 tiles: nose to walls, room corners, furniture and bathroom fixtures, door jambs, the stair / well
 railings with the stair void behind them):
 
@@ -182,7 +187,7 @@ python export_ranker.py --ckpt E:\twin\learned\runs\explore\ppo_from_cem\ranker_
 ```
 
 - **PPO from scratch on the full ranker** (CNN over the map + candidate MLP, rule prior, 256 houses in
-  parallel, 70 updates / 270k decisions): no measurable improvement - one decision changes the final
+  parallel, default lr 3e-4 / entropy 0.01, 81 updates / 304k decisions, 18 min): no measurable improvement - one decision changes the final
   coverage curve by little compared with the house-to-house noise.
 - **CEM** on a linear scorer over the candidate features (+ battery x home-distance terms), with common
   random numbers (every population member explores the same 12 houses from the same heading and
@@ -215,11 +220,11 @@ rule, 95 % CI):
 | **held-out dynamic** coverage | 0.672 | 0.685 | +0.013 +- 0.028 |
 | time / distance | 434 s / 53.1 m | 406 s / 48.0 m | -6.6 % / **-9.7 %** |
 | failed goals (doors, people) | 0.58 | 0.41 | **-29 % +- 21** |
-| **real upstairs plan static** coverage / time / distance | 0.805 / 501 s / 67.0 m | 0.797 / 464 s / 60.7 m | -0.008 / **-7.4 %** / **-9.4 %** (faster in 13 of 16) |
+| **real upstairs plan, static** coverage / time / distance | 0.805 / 501 s / 67.0 m | 0.797 / 464 s / 60.7 m | -0.008 / **-7.4 %** / **-9.4 %** (faster in 13 of 16) |
 | time to 90 % (median) | 504 s | 449 s | -11 % |
-| **real downstairs plan static** coverage / time / distance | 0.981 / 1059 s / 141 m | 0.980 / 986 s / 129 m | -0.001 / -6.9 % / -8.9 % |
+| **real downstairs plan, static** coverage / time / distance | 0.981 / 1059 s / 141 m | 0.980 / 986 s / 129 m | -0.001 / -6.9 % / -8.9 % |
 | time to 90 % (median) | 790 s | 709 s | -10 % |
-| real upstairs plan / downstairs dynamic | coverage 0.664 / 0.750 | 0.693 / 0.723 | +0.03 / -0.03 (noisy: 16 runs) |
+| real upstairs / downstairs plan, dynamic | coverage 0.664 / 0.750 | 0.693 / 0.723 | +0.03 / -0.03, time +3.0 % / -7.3 % (noisy: 16 runs; upstairs failed goals 0.31 -> 0.63) |
 
 The CEM linear scorer alone gives the same numbers within noise (e.g. held-out static -10.8 % time,
 -16.0 % distance). In short: **the same final coverage with ~7-11 % less time and ~9-16 % less
@@ -275,7 +280,7 @@ more than the network). Model files:
   depth camera not blind - nose to a wall the costmap looks empty), TIMED_OUT, FAILED (cliff / wheel
   drop / Roomba left Safe mode / stale costmap or sensors / no model) or CANCELED. Anything but
   SUCCEEDED means: fall back to the classical recovery exactly as today.
-- Parameters: `model` (path to `unstuck_policy.onnx`), `max_time_s`, frames, `sensor_timeout_s`, and
+- Parameters: `model` (path to `unstuck_policy.onnx`), `max_time_s`, frames, `sensor_timeout_s`, `watchdog_s`, and
   the light-bumper calibration: `light_gains` (default `0.5,1.0,0.55,0.55,0.55,0.5`) and
   `light_floor_driving` / `light_floor_still` (30 / 5). The policy was trained on proximity
   1 - d / 12 cm; the node gets it back from the raw signals by inverting the inverse-square model the
@@ -285,12 +290,15 @@ more than the network). Model files:
   the robot moved, so the skill could not end SUCCEEDED while driving and fed the policy phantom
   obstacles. Calibrate the gains and floor values on the robot (signals at 1, 5, 10 cm from a wall, and
   driving on each floor covering).
-- Known issue (seen in the live twin demo, not in the A/B runs): with several stacks running and the
-  PC busy, the node sometimes stops dispatching (goal accepted, then no feedback or result; the
-  executor's threads are idle in `rcl_wait`). Looks like a lost wake-up in rclrs 0.8's executor /
-  action server; not investigated further yet. Callers must time-limit the action call anyway (treat a
-  missing result as failure -> classical fallback) and a node watchdog / respawn is needed before the
-  robot. The live demo restarts the node when this happens.
+- The 10 Hz step runs on a **steady-clock** timer. The first version used a ROS-time timer and in
+  the live twin demo the node sometimes went silent (goal accepted, then no feedback or result, every
+  executor thread idle in `rcl_wait`). Root cause, the same rclrs 0.8 bug the other Rust nodes hit: when
+  the system clock is stepped back (WSL resyncs it every ~30 s, NTP does on the robot) just as a wait
+  for a ROS-time timer ends, `rcl_wait` reports a timeout and rclrs ends that worker's wait set for good;
+  the action server lives on the node's own wait set, so goals were still accepted but the worker
+  (timer, goal start) never ran again. A **watchdog thread** (`watchdog_s`, default 2 s) now stops the
+  robot and exits the node if the step stops running anyway, so the launch file can respawn it;
+  callers time-limit the call and treat a missing result as a failure.
 
 Intended caller (not wired yet, to keep the explorer untouched while `twinfix` reworks it): when Nav2
 aborts a frontier goal (or the explorer's goal timeout / bumps_per_goal fires), call `/unstuck_skill`

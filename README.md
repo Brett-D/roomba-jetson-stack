@@ -23,7 +23,7 @@ The serial driver lives in its own repository and is included here as a submodul
 | `twin/learned` | Learned navigation skills, phase 1 (simulation only, opt-in): Isaac Lab unstuck policy, learned frontier ranking for the explorer, their evaluation against the classical logic, and the Rust inference (`roomba_rs` feature `learned`, node `unstuck_skill`, explorer `goal_ranking: learned`); see [docs/learned-skills.md](docs/learned-skills.md) |
 | `scripts/` | `run_robot.sh`, `stop_slam.sh`, `graceful.py` (`ros2 launch` that SIGTERM / SIGINT stop cleanly), `record_run.sh` / `compare_pipelines.sh` (A vs B on a recorded drive), `run_twin2d.sh` (the 2D digital twin), mapping/replay helpers, setup scripts |
 | `tools/` | Probes and diagnostics (motion step test, costmap/obstacle probes, map render, TF/drift/CPU-GPU checks, comparison monitor/renderer, Python vs Rust A/B checks), `twin2d_world.py` / `twin2d_plan.py` / `twin2d_run.py` (digital twin floor plan from the map database or a vector plan, scenario runner); `tools/oi_tests/` holds early serial/OI bench scripts |
-| `docs/` | Wiring and power diagrams |
+| `docs/` | Wiring and power diagrams; [training.md](docs/training.md): everything that was trained in this project (Isaac Sim person / railing detector, unstuck skill, frontier ranking), with algorithms, code, results and status (simulation only, nothing learned is deployed); [learned-skills.md](docs/learned-skills.md): the two navigation skills in detail |
 | `hardware/platform` | 3D-printed platform: STLs, fit tests and the Python generator |
 
 ## Data flow
