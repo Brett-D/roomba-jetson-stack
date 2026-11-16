@@ -187,8 +187,11 @@ and the web app. The twin node replaces the hardware, the VIO/watchdog and RTAB-
   RTAB-Map's map -> odom corrects every N s), `/odom`, `/vslam_filter/status`, `/visual_slam/status`.
 - *Mapping*: `/rtabmap/map` (latched) and `/rtabmap/mapPath` built the way RTAB-Map builds them on the
   robot: a node per second when the robot moved, each from the decimated depth cloud (2.5 m range,
-  ground under 6 cm, obstacles to 1 m, noise filter, ray tracing, footprint), merged with RTAB-Map's
-  hit/miss log-odds. It starts unknown (or `initial_map: known`).
+  ground under 6 cm, obstacles to 1 m, noise filter, ray tracing), merged with RTAB-Map's hit/miss
+  log-odds and clamping, the square under the robot's footprint reset to free, as
+  `rtabmap/core/global_map/OccupancyGrid.cpp` does. As on the robot, a cell seen occupied in many
+  nodes (a door that was closed for a while) needs ~18 later nodes seeing through it before the map
+  shows it free again. It starts unknown (or `initial_map: known`).
 
 Real time only, by design. The whole stack in the twin uses about 1.2 of the Jetson's 6 cores
 (twin2d itself about 0.2: 200 Hz physics and IMU, the 15 ms OI stream, depth frames rendered in
@@ -207,9 +210,16 @@ scripts/run_twin2d.sh scenario:=src/roomba_bringup/config/twin2d/explore_from_do
                       out_dir:=/data/twin/twin2d/runs/try1          # foreground, ends by itself
 scripts/run_twin2d.sh exit_on_finish:=false foxglove:=true          # keep it running to watch / drive
 tools/twin2d_run.py explore_from_dock door_closes stairs --seeds 1,2   # batch, summary table
+tools/twin2d_run.py --jobs 3 --seeds 1,2 explore_from_dock stairs     # 3 at a time, ROS domains 71-73
 ```
 
-`ROS_DOMAIN_ID` defaults to 68 and discovery stays on the machine. Watch it in the web app at
+`ROS_DOMAIN_ID` defaults to 68 and discovery stays on the machine. Parallel runs (`--jobs N`) each get
+their own ROS domain (`--domains`, default 71...), pty, out_dir and web / Foxglove ports
+(18100 / 18800 + domain); `--watch` keeps the first slot on 18097 / 18765 with Foxglove and
+`--now-file` records which run it is on, `--web-auth` gives every run the same web password (an
+`auth.json` made by `set_password` under a scratch HOME), `--ws` runs another workspace's build (a
+before/after with the same scenarios). The twin also runs in WSL on the PC (`docs/pc-wsl.md`; 8
+stacks at a time comfortably). Watch it in the web app at
 `http://<jetson>:18097` (password in `<out_dir>/home/.config/roomba_web/initial_password`; the real
 `~/.config/roomba_web` is never touched) or Foxglove (`foxglove:=true`, `ws://<jetson>:18765`:
 `/twin/world`, `/twin/ground_truth`, `/twin/state`, `/twin/events`, `/rtabmap/map`, costmaps, ...).
@@ -218,8 +228,9 @@ leaves Safe mode (cliff) and the explorer stops, it carries the robot back from 
 driving and restarts the explorer (`operator.delay_s`, `max_interventions`).
 
 **Scenarios** (`src/roomba_bringup/config/twin2d/*.yaml`: explore_from_dock, door_closes,
-invisible_railing, sparse_railing, nose_to_wall, low_battery, person_walking, stairs, furniture; every
-key is optional, unknown keys are errors; see `src/roomba_rs/src/twin/scenario.rs` for all of them):
+door_reopens, invisible_railing, sparse_railing, nose_to_wall, low_battery, person_walking, stairs,
+furniture; every key is optional, unknown keys are errors; see `src/roomba_rs/src/twin/scenario.rs`
+for all of them):
 
 ```yaml
 name: door_closes

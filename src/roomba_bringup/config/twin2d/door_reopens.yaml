@@ -1,0 +1,16 @@
+# The east room's doorway closes just as the explorer is about to drive through it (it has seen the
+# room beyond, so that frontier is already on the map) and opens again at 110 s, long before the
+# explorer would finish. Does it come back for the room once the door is open?
+name: door_reopens
+description: The east room's doorway is closed from 62 s to 110 s, while the explorer heads there.
+seed: 1
+duration_s: 1800
+start: {x: 0.0, y: 0.0, yaw_deg: 0}
+dock: true
+doors:
+  - name: east_door
+    segment: [[6.1, -0.15], [6.1, 1.05]]
+    thickness: 0.06
+    events:
+      - {t: 62, state: closed}
+      - {t: 110, state: open}

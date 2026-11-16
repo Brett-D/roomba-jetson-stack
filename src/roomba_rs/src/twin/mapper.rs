@@ -3,9 +3,13 @@
 //! (RGBD/LinearUpdate, AngularUpdate), each node's local grid from the decimated depth cloud
 //! (Grid/DepthDecimation 4, Grid/RangeMax 2.5 m, ground below Grid/MaxGroundHeight 6 cm, obstacles
 //! up to Grid/MaxObstacleHeight 1 m, radius noise filter, ray tracing from the camera to every
-//! point, the robot's footprint free), merged with the global grid's hit/miss log-odds
-//! (GridGlobal/ProbHit 0.7, ProbMiss 0.45, clamping). Not modelled: graph optimisation (past nodes
-//! are never moved; with odometry drift the map smears as it would without loop closures).
+//! point), merged with the global grid's hit/miss log-odds (GridGlobal/ProbHit 0.7, ProbMiss 0.45,
+//! clamping), as rtabmap/core/global_map/OccupancyGrid.cpp (0.23) does: one update per node and
+//! cell, and the square under the robot's footprint (GridGlobal/FootprintRadius) reset to the
+//! clamping minimum. So a cell seen occupied in many nodes (a closed door) needs ~18 later nodes
+//! seeing through it before it is free again, as on the robot. Not modelled: graph optimisation
+//! (past nodes are never moved; with odometry drift the map smears as it would without loop
+//! closures).
 //!
 //! Also measures coverage against the true floor plan.
 
@@ -173,20 +177,19 @@ impl Mapper {
             }
             self.mark(to, if obstacle { 2 } else { 1 });
         }
+        // RTAB-Map's footprint (GridGlobal/FootprintRadius): the square under the robot is set to
+        // the clamping minimum (free, not just one miss) and no obstacle of this node lands in it.
         let r = c.footprint_radius_m;
-        let n = (r / self.res).ceil() as i64;
-        if let Some(b) = self.cell([base[0], base[1]]) {
-            let (bi, bj) = ((b % self.width) as i64, (b / self.width) as i64);
-            for dj in -n..=n {
-                for di in -n..=n {
-                    let (i, j) = (bi + di, bj + dj);
-                    if i < 0 || j < 0 || i as usize >= self.width || j as usize >= self.height {
-                        continue;
-                    }
-                    let cc = [self.origin[0] + (i as f64 + 0.5) * self.res, self.origin[1] + (j as f64 + 0.5) * self.res];
-                    if (cc[0] - base[0]).hypot(cc[1] - base[1]) <= r {
-                        self.mark(j as usize * self.width + i as usize, 1);
-                    }
+        let mut footprint = Vec::new();
+        if r >= self.res * 1.5 {
+            let to_cell = |v: f64, o: f64| ((v - o) / self.res) as i64; // C++ float -> int: truncation
+            let (i0, i1) = (to_cell(base[0] - r, self.origin[0]).max(0), to_cell(base[0] + r, self.origin[0]).min(self.width as i64 - 1));
+            let (j0, j1) = (to_cell(base[1] - r, self.origin[1]).max(0), to_cell(base[1] + r, self.origin[1]).min(self.height as i64 - 1));
+            for j in j0..j1 {
+                for i in i0..i1 {
+                    let k = j as usize * self.width + i as usize;
+                    self.mark(k, 1);
+                    footprint.push(k);
                 }
             }
         }
@@ -195,6 +198,9 @@ impl Mapper {
             self.logodds[k] = (self.logodds[k] + delta).clamp(self.l_min, self.l_max);
             self.observed[k] = true;
             self.scratch[k] = 0;
+        }
+        for k in footprint {
+            self.logodds[k] = self.l_min;
         }
         self.touched.clear();
         self.nodes.push(base);
@@ -407,6 +413,44 @@ mod tests {
             passes += 1;
         }
         assert_eq!(passes, 5);
+        // Seen in many nodes (a door closed for a while), it is saturated (ProbClampingMax 0.971):
+        // ~18 nodes seeing through it before the map shows it free again, as RTAB-Map's grid.
+        world.bodies.push(Body {
+            name: "door".into(),
+            kind: Kind::Door,
+            shape: Shape::Circle { c: [5.4, 2.0], r: 0.2 },
+            zmin: 0.0,
+            zmax: 1.7,
+            depth: DepthVis::Solid,
+            ir: true,
+            blocks: true,
+            active: true,
+        });
+        let closed = cam.render(&world, lens, &RenderOpts::default(), &mut Rng::new(1), None);
+        for _ in 0..10 {
+            m.add_node(&cam, &closed, lens, base);
+        }
+        assert_eq!(m.occupancy()[k], 100);
+        let mut passes = 0;
+        while m.occupancy()[k] == 100 {
+            m.add_node(&cam, &depth, lens, base);
+            passes += 1;
+        }
+        assert_eq!(passes, 18);
+    }
+
+    #[test]
+    fn footprint_is_reset_free_like_rtabmap() {
+        let g = room();
+        let world = World::new(g.clone());
+        let cam = Camera::new(D1000);
+        let mut m = Mapper::new(&MappingCfg::default(), &g, [1.0, 2.0], 0.17);
+        let base = [3.6, 2.0, 0.0];
+        let lens = lens_pose(base, [0.153, 0.0, 0.13]);
+        let depth = cam.render(&world, lens, &RenderOpts::default(), &mut Rng::new(1), None);
+        m.add_node(&cam, &depth, lens, base);
+        let k = m.cell([3.62, 2.02]).unwrap();
+        assert_eq!(m.logodds[k], m.l_min, "clamping minimum, not one miss");
     }
 
     #[test]

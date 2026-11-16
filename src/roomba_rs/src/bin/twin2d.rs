@@ -777,6 +777,11 @@ impl Sim {
                 self.start_attempts += 1;
                 self.explorer_command("start", t);
                 self.next_start_try = t + 5.0;
+            } else if t >= e.autostart_s + 120.0 {
+                // The driver's latched mode never reached the twin (seen once in ~100 parallel
+                // WSL runs): say so, so the runner can run it again, instead of idling 30 min.
+                let m = mode.as_deref().unwrap_or("none").to_string();
+                self.finish(t, "explorer_failed_to_start", &format!("the robot never reported safe mode (mode: {m})"));
             }
         }
         if !self.explorer_started && driving_state(&self.explorer_state) {

@@ -12,21 +12,34 @@ overruns, and kills anything left in its session. Then writes <out>/summary.json
 <out>/summary.md (one row per run) and prints the table. Bare scenario names are looked up in
 src/roomba_bringup/config/twin2d/. Extra launch arguments: --launch-args "web:=false foxglove:=true".
 ROS_DOMAIN_ID: the environment's, default 68.
+
+Parallel runs (the whole stack uses about 1.2 of the Jetson's 6 cores): --jobs 3 runs three at a
+time, each in its own ROS domain (--domains, default 71, 72, ...), with its own web and Foxglove
+ports (18100 / 18800 + domain), pty and out_dir:
+  tools/twin2d_run.py --jobs 3 --seeds 1,2 --out /data/twin/twin2d/runs/after1 explore_from_dock stairs
+--watch gives the first slot the usual ports (web 18097, Foxglove 18765, Foxglove started) so a run
+can be watched live, and --now-file says which run that slot is on; --web-auth gives every run's web
+app the same password (an auth.json made with set_password under a temporary HOME); --ws runs
+another workspace's build (e.g. one of the previous version, for a before/after with these scenarios).
 """
 import argparse
 import glob
 import json
 import os
+import queue
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 WS = os.path.dirname(HERE)
 SCENARIOS = os.path.join(WS, 'src', 'roomba_bringup', 'config', 'twin2d')
 CLK = os.sysconf('SC_CLK_TCK')
+ACTIVE = set()   # sessions (launch pids) of the runs in progress
 
 
 def session_pids(sid):
@@ -150,21 +163,43 @@ def duration_of(path):
     return float(data.get('duration_s', 1200.0))
 
 
-def run_one(scenario, seed, out_root, launch_args, sample_s):
+def run_one(scenario, seed, out_root, launch_args, sample_s, slot=None, opts=None):
+    """slot: None (the environment's ROS domain, default ports) or {'domain', 'watch'}; opts: the
+    runner's options (web_auth, now_file)."""
     stem = os.path.splitext(os.path.basename(scenario))[0]
     out = os.path.join(out_root, stem if seed < 0 else f'{stem}_s{seed}')
     os.makedirs(out, exist_ok=True)
     for stale in ('result.json', 'trajectory.png', 'timeline.csv', 'events.jsonl', 'zones.json'):
         if os.path.exists(os.path.join(out, stale)):
             os.remove(os.path.join(out, stale))
-    cmd = [os.path.join(WS, 'scripts', 'run_twin2d.sh'), f'scenario:={scenario}', f'out_dir:={out}',
+    ws = opts.ws if opts is not None and opts.ws else WS
+    cmd = [os.path.join(ws, 'scripts', 'run_twin2d.sh'), f'scenario:={scenario}', f'out_dir:={out}',
            f'seed:={seed}'] + launch_args
     env = dict(os.environ)
     env.setdefault('ROS_DOMAIN_ID', '68')
+    if slot is not None:
+        # Parallel runs: each in its own ROS domain, with its own web and Foxglove ports. The watch
+        # slot keeps the usual ones (18097, 18765) and runs Foxglove, for watching it live.
+        d = slot['domain']
+        env['ROS_DOMAIN_ID'] = str(d)
+        cmd += (['web_port:=18097', 'foxglove_port:=18765', 'foxglove:=true'] if slot.get('watch')
+                else [f'web_port:={18100 + d}', f'foxglove_port:={18800 + d}'])
+    if opts is not None and opts.web_auth:
+        # A fixed twin-only web password (auth.json from set_password) instead of a new one per run.
+        cfg = os.path.join(out, 'home', '.config', 'roomba_web')
+        os.makedirs(cfg, exist_ok=True)
+        shutil.copyfile(opts.web_auth, os.path.join(cfg, 'auth.json'))
+        os.chmod(os.path.join(cfg, 'auth.json'), 0o600)
+    if opts is not None and opts.now_file and slot is not None and slot.get('watch'):
+        with open(opts.now_file, 'w') as f:
+            f.write(f'Watch slot (http://localhost:18097, Foxglove ws://localhost:18765): {stem} seed {seed}\n'
+                    f'since {time.strftime("%Y-%m-%d %H:%M:%S")}, out_dir {out}, ROS_DOMAIN_ID {slot["domain"]}\n')
     log = open(os.path.join(out, 'launch.log'), 'w')
-    print(f'== {stem} seed {seed}: {out}', flush=True)
+    print(f'== {stem} seed {seed}: {out}' + ('' if slot is None else f' (ROS_DOMAIN_ID {slot["domain"]})'),
+          flush=True)
     proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
                             start_new_session=True, env=env)
+    ACTIVE.add(proc.pid)
     meter = CpuMeter(proc.pid)
     limit = duration_of(scenario) * 1.25 + 180.0
     started = time.monotonic()
@@ -184,13 +219,15 @@ def run_one(scenario, seed, out_root, launch_args, sample_s):
     finally:
         cpu = meter.report()
         left = kill_session(proc.pid)
+        ACTIVE.discard(proc.pid)
         log.close()
     with open(os.path.join(out, 'cpu.json'), 'w') as f:
         json.dump(cpu, f, indent=1)
     result_file = os.path.join(out, 'result.json')
     result = json.load(open(result_file)) if os.path.isfile(result_file) else {'outcome': 'no result.json'}
     result['run'] = {'out_dir': out, 'wall_s': round(time.monotonic() - started, 1), 'overran': overran,
-                     'left_running': left, 'launch_args': launch_args, 'cpu': cpu}
+                     'left_running': left, 'launch_args': launch_args, 'cpu': cpu,
+                     'ros_domain_id': int(env['ROS_DOMAIN_ID'])}
     with open(os.path.join(out, 'run.json'), 'w') as f:
         json.dump(result['run'], f, indent=1)
     return stem, seed, result
@@ -232,6 +269,26 @@ def markdown(rows):
     return '\n'.join(out) + '\n'
 
 
+def run_job(sc, seed, out_root, launch_args, sample_s, slot, opts=None):
+    for attempt in range(2):
+        stem, seed_used, result = run_one(sc, seed, out_root, launch_args, sample_s, slot, opts)
+        # Nav2's lifecycle bring-up occasionally hangs (a lost change_state response), or the
+        # driver's mode never reaches the twin: the explorer then never starts. That says nothing
+        # about the scenario: run it again.
+        detail = result.get('outcome_detail', '')
+        infra = (result.get('outcome') == 'explorer_failed_to_start'
+                 and ('Navigation is not running' in detail or 'never reported safe mode' in detail))
+        if not infra or attempt == 1:
+            break
+        print(f'   {stem} seed {seed}: the explorer never started ({detail}): running it again', flush=True)
+        result['run']['retried_after'] = detail
+        failed = os.path.join(out_root, 'nav2_bringup_failures')
+        os.makedirs(failed, exist_ok=True)
+        with open(os.path.join(failed, f'{stem}_{int(time.time())}.json'), 'w') as f:
+            json.dump(result, f, indent=1)
+    return stem, result.get('seed', seed_used), result
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('scenarios', nargs='+')
@@ -239,36 +296,79 @@ def main():
     ap.add_argument('--out', default='', help='default /data/twin/twin2d/runs/batch_<time>')
     ap.add_argument('--launch-args', default='', help='extra twin2d.launch.py arguments')
     ap.add_argument('--sample-s', type=float, default=5.0)
+    ap.add_argument('--jobs', type=int, default=1, help='runs at a time (each in its own ROS domain)')
+    ap.add_argument('--domains', default='', help='comma-separated ROS_DOMAIN_IDs for parallel runs '
+                                                  '(default 71, 72, ... when --jobs > 1)')
+    ap.add_argument('--watch', action='store_true',
+                    help='parallel runs: the first slot uses web port 18097 and Foxglove on 18765')
+    ap.add_argument('--web-auth', default='', help='auth.json (from set_password) to give every run\'s web app')
+    ap.add_argument('--now-file', default='', help='--watch: write what the watched slot runs (and since when) here')
+    ap.add_argument('--ws', default='', help='workspace whose scripts/run_twin2d.sh (and install) to run '
+                                             '(default: this one; e.g. a build of an older version for a before/after)')
     a = ap.parse_args()
+
+    def on_term(signum, frame):
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGTERM, on_term)
     out_root = a.out or time.strftime('/data/twin/twin2d/runs/batch_%Y%m%d_%H%M%S')
     os.makedirs(out_root, exist_ok=True)
     scenarios = [scenario_path(s) for s in a.scenarios]
     seeds = [int(s) for s in a.seeds.split(',') if s.strip()] or [-1]
-    rows, results = [], []
-    for sc in scenarios:
-        for seed in seeds:
-            for attempt in range(2):
-                stem, seed_used, result = run_one(sc, seed, out_root, shlex.split(a.launch_args), a.sample_s)
-                # Nav2's lifecycle bring-up occasionally hangs (a lost change_state response): the
-                # explorer then never starts. That says nothing about the scenario: run it again.
-                infra = (result.get('outcome') == 'explorer_failed_to_start'
-                         and 'Navigation is not running' in result.get('outcome_detail', ''))
-                if not infra or attempt == 1:
-                    break
-                print('   Nav2 never came up (lifecycle bring-up hung): running it again', flush=True)
-                result['run']['retried_after'] = 'Nav2 bring-up hung'
-                failed = os.path.join(out_root, 'nav2_bringup_failures')
-                os.makedirs(failed, exist_ok=True)
-                with open(os.path.join(failed, f'{stem}_{int(time.time())}.json'), 'w') as f:
-                    json.dump(result, f, indent=1)
-            seed_used = result.get('seed', seed_used)
-            rows.append(row(stem, seed_used, result))
-            results.append({'scenario': stem, 'seed': seed_used, 'result': result})
-            print('   ' + json.dumps(rows[-1]), flush=True)
-            with open(os.path.join(out_root, 'summary.json'), 'w') as f:
-                json.dump({'rows': rows, 'runs': results}, f, indent=1)
-            with open(os.path.join(out_root, 'summary.md'), 'w') as f:
-                f.write(markdown(rows))
+    domains = [int(d) for d in a.domains.split(',') if d.strip()]
+    if a.jobs > 1 and not domains:
+        domains = list(range(71, 71 + a.jobs))
+    if domains and len(domains) < a.jobs:
+        sys.exit(f'--jobs {a.jobs} needs {a.jobs} --domains')
+    slots = queue.Queue()
+    for k, d in enumerate(domains[:max(a.jobs, 1)]):
+        slots.put({'domain': d, 'watch': a.watch and k == 0})
+    if not domains:
+        slots.put(None)
+    jobs = [(sc, seed) for sc in scenarios for seed in seeds]
+    done = [None] * len(jobs)
+    lock = threading.Lock()
+    launch_args = shlex.split(a.launch_args)
+
+    def write_summary():
+        finished = [d for d in done if d is not None]
+        rows = [row(stem, seed, result) for stem, seed, result in finished]
+        with open(os.path.join(out_root, 'summary.json'), 'w') as f:
+            json.dump({'rows': rows, 'runs': [{'scenario': s, 'seed': sd, 'result': r} for s, sd, r in finished]},
+                      f, indent=1)
+        with open(os.path.join(out_root, 'summary.md'), 'w') as f:
+            f.write(markdown(rows))
+        return rows
+
+    def worker(i):
+        sc, seed = jobs[i]
+        slot = slots.get()
+        try:
+            stem, seed_used, result = run_job(sc, seed, out_root, launch_args, a.sample_s, slot, a)
+        finally:
+            slots.put(slot)
+        with lock:
+            done[i] = (stem, seed_used, result)
+            print('   ' + json.dumps(row(stem, seed_used, result)), flush=True)
+            write_summary()
+
+    threads = []
+    try:
+        for i in range(len(jobs)):
+            while sum(t.is_alive() for t in threads) >= max(a.jobs, 1):
+                time.sleep(0.5)
+            t = threading.Thread(target=worker, args=(i,), daemon=True)
+            t.start()
+            threads.append(t)
+            time.sleep(2.0)   # stagger the launches
+        for t in threads:
+            while t.is_alive():
+                t.join(0.5)
+    except KeyboardInterrupt:
+        print('   interrupted: stopping the runs', flush=True)
+        for sid in list(ACTIVE):
+            kill_session(sid)
+        raise
+    rows = write_summary()
     print()
     print(markdown(rows))
 
