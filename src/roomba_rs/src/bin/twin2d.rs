@@ -1390,21 +1390,22 @@ fn main() -> Result<()> {
             }
         });
     }
-    let (stop_tx, stop_rx) = futures::channel::oneshot::channel::<()>();
+    let finished = Arc::new(AtomicBool::new(false));
     let exit_on_finish = p.exit_on_finish;
     {
-        let (stop, done) = (Arc::clone(&stop), Arc::clone(&done));
+        let (stop, done, finished) = (Arc::clone(&stop), Arc::clone(&done), Arc::clone(&finished));
+        let commands = Arc::clone(executor.commands());
         std::thread::Builder::new().name("sim".into()).spawn(move || {
             sim_loop(&mut sim, &stop);
             done.store(true, Ordering::SeqCst);
             if exit_on_finish || stop.load(Ordering::SeqCst) {
-                let _ = stop_tx.send(());
-            } else {
-                std::mem::forget(stop_tx);
+                finished.store(true, Ordering::SeqCst);
+                commands.halt_spinning();
             }
         })?;
     }
-    let _ = executor.spin(SpinOptions::default().until_promise_resolved(stop_rx));
+    // Keeps spinning through the spurious timeouts a stepped-back clock causes (node_params::spin).
+    let _ = roomba_rs::node_params::spin_until(&mut executor, || finished.load(Ordering::SeqCst));
     // The results are written. Exit without tearing down the render thread's publishers one by one
     // (rmw complains about each once the context is gone).
     std::process::exit(0);
