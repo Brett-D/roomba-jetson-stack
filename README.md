@@ -19,6 +19,8 @@ The serial driver lives in its own repository and is included here as a submodul
 | `src/mynteye_d1000_driver` | ROS 2 node for the MYNT EYE D1000 stereo/depth/IMU camera |
 | `src/basalt_vio_ros` | ROS 2 wrapper for Basalt visual-inertial odometry |
 | `src/roomba-serial-ros2` | Roomba Open Interface driver (submodule): `roomba_driver_rs` (Rust, used with `rust_nodes:=true`), `roomba_driver` (Python), `roomba_msgs`, and in `tools/` the simulated Roomba (`fake_roomba.py`) and the driver A/B checks |
+| `src/roomba_skills_msgs` | Interfaces of the learned navigation skills (`action/Unstuck`) |
+| `twin/learned` | Learned navigation skills, phase 1 (simulation only, opt-in): Isaac Lab unstuck policy, learned frontier ranking for the explorer, their evaluation against the classical logic, and the Rust inference (`roomba_rs` feature `learned`, node `unstuck_skill`, explorer `goal_ranking: learned`); see [docs/learned-skills.md](docs/learned-skills.md) |
 | `scripts/` | `run_robot.sh`, `stop_slam.sh`, `graceful.py` (`ros2 launch` that SIGTERM / SIGINT stop cleanly), `record_run.sh` / `compare_pipelines.sh` (A vs B on a recorded drive), `run_twin2d.sh` (the 2D digital twin), mapping/replay helpers, setup scripts |
 | `tools/` | Probes and diagnostics (motion step test, costmap/obstacle probes, map render, TF/drift/CPU-GPU checks, comparison monitor/renderer, Python vs Rust A/B checks), `twin2d_world.py` / `twin2d_plan.py` / `twin2d_run.py` (digital twin floor plan from the map database or a vector plan, scenario runner); `tools/oi_tests/` holds early serial/OI bench scripts |
 | `docs/` | Wiring and power diagrams |

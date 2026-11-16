@@ -1,0 +1,9 @@
+# nose_to_wall for the unstuck skill A/B (twin/learned/twin2d_ab.py): the same start (bumper
+# 1.5 cm from the hallway's south wall, facing it), but the explorer starts only after 40 s so the
+# skill (called ~12 s in) acts alone first; 10 simulated minutes of exploration afterwards.
+name: nose_to_wall_skill
+description: nose_to_wall with a late explorer start, for the unstuck skill A/B.
+seed: 1
+duration_s: 600
+start: {x: 0.6, y: -0.717, yaw_deg: -90}
+explorer: {autostart_s: 40}

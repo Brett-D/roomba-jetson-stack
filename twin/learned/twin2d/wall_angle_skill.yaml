@@ -1,0 +1,8 @@
+# A corner wedge for the unstuck skill A/B: the robot starts in the hallway's corner region
+# at 45 deg to the wall (same spot as nose_to_wall, turned), explorer after 40 s.
+name: wall_angle_skill
+description: Robot at 45 deg nose against the hallway's south wall, late explorer start.
+seed: 1
+duration_s: 600
+start: {x: 0.6, y: -0.70, yaw_deg: -135}
+explorer: {autostart_s: 40}

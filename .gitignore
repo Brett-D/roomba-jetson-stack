@@ -6,3 +6,7 @@ __pycache__/
 *.db
 *.bag
 *.mcap
+# learned skills: generated tile sets, layouts and the robot USD (twin/learned/*/make_*.py, robot_usd.py)
+twin/learned/unstuck/data/
+twin/learned/unstuck/assets/
+twin/learned/explore/data/
