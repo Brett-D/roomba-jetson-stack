@@ -3,8 +3,8 @@
 //! status JSON and behaviour (see that file's docstring), at a fraction of the CPU.
 //!
 //! Subscribes: /camera/depth/image_rect_raw, /camera/depth/camera_info, /camera/imu/data, /tf_static
-//! Publishes:  /perception/obstacles, /perception/obstacles_mapping, /perception/floor_points
-//!             (PointCloud2, depth optical frame), /perception/floor_status (String JSON)
+//! Publishes:  /perception/obstacles, /perception/obstacles_mapping, /perception/floor_points,
+//!             /perception/drops (PointCloud2, depth optical frame), /perception/floor_status (String JSON)
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -62,6 +62,7 @@ struct Outputs {
     obs_map: Publisher<sensor_msgs::msg::PointCloud2>,
     floor: Publisher<sensor_msgs::msg::PointCloud2>,
     status: Publisher<std_msgs::msg::String>,
+    drops: Publisher<sensor_msgs::msg::PointCloud2>,
 }
 
 fn cloud(header: &std_msgs::msg::Header, pts: &[Vec3], every: usize) -> sensor_msgs::msg::PointCloud2 {
@@ -180,9 +181,10 @@ impl State {
             obstacles = obstacles.into_iter().zip(keep).filter_map(|(q, k)| k.then_some(q)).collect();
         }
         let mut drops = 0;
+        let mut drop_pts = Vec::new();
         if p.drop_depth.get() > 0.0 {
             let (fwd, side) = floor_axes(up);
-            let d = drop_points(
+            drop_pts = drop_points(
                 &pts,
                 &h,
                 floor_h,
@@ -195,8 +197,8 @@ impl State {
                 p.cell_size.get(),
                 p.drop_min_points.get().max(1) as usize,
             );
-            drops = d.len();
-            obstacles.extend(d);
+            drops = drop_pts.len();
+            obstacles.extend(drop_pts.iter().copied());
         }
 
         let obs_cloud = cloud(&msg.header, &obstacles, 1);
@@ -208,6 +210,10 @@ impl State {
             out.obs.publish(obs_cloud.clone()).ok();
             out.obs_map.publish(obs_cloud).ok();
             out.floor.publish(cloud(&msg.header, &floor, 2)).ok();
+            if drops > 0 {
+                // Kept for good (explorer, the global costmap's drop layer): never while turning fast.
+                out.drops.publish(cloud(&msg.header, &drop_pts, 1)).ok();
+            }
         }
 
         let tilt = (-up[1]).clamp(-1.0, 1.0).acos().to_degrees();
@@ -272,6 +278,7 @@ fn main() -> Result<()> {
         obs_map: node.create_publisher("/perception/obstacles_mapping".keep_last(2))?,
         floor: node.create_publisher("/perception/floor_points".keep_last(2))?,
         status: node.create_publisher("/perception/floor_status".keep_last(2))?,
+        drops: node.create_publisher("/perception/drops".keep_last(2))?,
     };
 
     let worker = node.create_worker::<State>(State::default());

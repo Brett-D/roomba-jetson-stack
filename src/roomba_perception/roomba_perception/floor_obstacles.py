@@ -18,11 +18,12 @@ that, because the pose lags and points would smear across the costmap; /percepti
 Drop-offs (drop_min_depth_m > 0): points well below the floor plane were seen past an edge (a
 stairwell through the railing's balusters, a landing); the obstacle band above the floor never
 reported them, so the drop was mapped as floor. Obstacle points go where their line of sight
-crosses the floor plane (see drop_points).
+crosses the floor plane (see drop_points); they also go to /perception/drops (not while turning
+fast), which the explorer remembers and the global costmap keeps in a layer that never clears.
 
 Subscribes: /camera/depth/image_rect_raw, /camera/depth/camera_info, /camera/imu/data
 Publishes:  /perception/obstacles, /perception/obstacles_mapping (same points, paused during
-            fast turns), /perception/floor_points (PointCloud2, optical frame)
+            fast turns), /perception/floor_points, /perception/drops (PointCloud2, optical frame)
             /perception/floor_status (std_msgs/String JSON: camera height above floor)
 """
 import json
@@ -143,6 +144,7 @@ class FloorObstacles(Node):
         self.pub_obs_map = self.create_publisher(PointCloud2, '/perception/obstacles_mapping', 2)
         self.pub_floor = self.create_publisher(PointCloud2, '/perception/floor_points', 2)
         self.pub_status = self.create_publisher(String, '/perception/floor_status', 2)
+        self.pub_drops = self.create_publisher(PointCloud2, '/perception/drops', 2)
 
     def _on_info(self, msg):
         self.info = msg
@@ -260,6 +262,7 @@ class FloorObstacles(Node):
             self.speckles = int((~keep).sum())
             obstacles = obstacles[keep]
         drops = 0
+        d = None
         if self.drop_depth > 0.0:
             fwd, side = floor_axes(up)
             d = drop_points(pts, h, self.floor_h, up, self.drop_depth, self.drop_max_range, self.drop_lift,
@@ -276,6 +279,9 @@ class FloorObstacles(Node):
         else:
             self.pub_obs_map.publish(obs_cloud)
             self.pub_floor.publish(_cloud(msg.header, floor[::2]))
+            if drops:
+                # Kept for good (explorer, the global costmap's drop layer): never while turning fast.
+                self.pub_drops.publish(_cloud(msg.header, d))
         tilt = math.degrees(math.acos(max(-1.0, min(1.0, -float(up[1])))))
         status = {
             'camera_height_m': round(-self.floor_h, 2),

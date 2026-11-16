@@ -6,6 +6,7 @@
 //!   ["M", t, ros, mode] / ["B", t, ros, percentage|null] / ["F", t, ros, filter_status] / ["C", t, ros, command]
 //!   ["S", t, ros, bump_left, bump_right, wheel_drop_left, wheel_drop_right, [cliff x4], [light x6]]
 //!   ["K", t, ros] 1 s tick / ["CT", t, ros] cliff check timer
+//!   ["DR", t, ros, frame, [[x, y, z], ...]] drop points (float32) / ["PD", t, ros, frame, [[x, y, z], ...]] people seen
 //!   ["NR", t, ros, nav_ready, get_params_ready, set_params_ready(, spin_ready)]   server availability
 //!   ["GR", t, ros, seq, accepted] / ["RS", t, ros, seq, status]       NavigateToPose responses
 //!   ["SR", t, ros, seq, accepted] / ["SS", t, ros, seq, status]       Spin (look-around) responses
@@ -163,6 +164,11 @@ fn b(v: &Value) -> bool {
     v.as_bool().unwrap_or(false)
 }
 
+/// The [[x, y, z], ...] of a DR / PD event.
+fn points(e: &Value) -> Vec<[f64; 3]> {
+    e[4].as_array().unwrap().iter().map(|p| [f(&p[0]), f(&p[1]), f(&p[2])]).collect()
+}
+
 fn frontier_query(io: &mut Replay<impl Write>, p: &Params, grid: Option<&Grid>, at: Option<(f64, f64)>) -> Value {
     let Some(grid) = grid else { return json!(["FQ", null]) };
     let pose = match at {
@@ -263,6 +269,10 @@ fn main() -> anyhow::Result<()> {
             }
             "K" => core.tick(&mut io),
             "CT" => core.cliff_check(&mut io),
+            "DR" => {
+                let pts: Vec<[f32; 3]> = points(&e).iter().map(|p| [p[0] as f32, p[1] as f32, p[2] as f32]).collect();
+                core.on_drops(e[3].as_str().unwrap(), &pts, &mut io);
+            }
             "NR" => io.ready = [b(&e[3]), b(&e[4]), b(&e[5]), e.get(6).map_or(io.ready[3], b)],
             "GR" => core.on_goal_response(e[3].as_u64().unwrap(), b(&e[4]), &mut io),
             "RS" => core.on_result(e[3].as_u64().unwrap(), e[4].as_i64().unwrap() as i8, &mut io),

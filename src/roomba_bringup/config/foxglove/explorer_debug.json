@@ -55,6 +55,14 @@
           "flatColor": "#ff4040ff",
           "decayTime": 0
         },
+        "/perception/drops": {
+          "visible": true,
+          "pointSize": 4,
+          "pointShape": "square",
+          "colorMode": "flat",
+          "flatColor": "#ff40ffff",
+          "decayTime": 0
+        },
         "/perception/floor_points": { "visible": false, "pointSize": 2, "colorMode": "flat", "flatColor": "#40ff4080" },
         "/twin/world": { "visible": true },
         "/twin/ground_truth": { "visible": true }

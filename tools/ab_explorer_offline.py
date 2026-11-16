@@ -39,7 +39,7 @@ from nav_msgs.msg import OccupancyGrid
 from rcl_interfaces.msg import ParameterValue
 from rclpy.time import Time
 from roomba_msgs.msg import SensorState
-from sensor_msgs.msg import BatteryState
+from sensor_msgs.msg import BatteryState, PointCloud2, PointField
 from std_msgs.msg import String
 
 import roomba_perception.explorer as E
@@ -60,6 +60,14 @@ def f32(v):
     return float(np.float32(v))
 
 
+def cloud_msg(frame, pts):
+    """PointCloud2 of float32 x, y, z (as floor_obstacles publishes it)."""
+    msg = PointCloud2(height=1, width=len(pts), is_dense=True, is_bigendian=False, point_step=12,
+                      row_step=12 * len(pts))
+    msg.header.frame_id = frame
+    msg.fields = [PointField(name=n, offset=4 * i, datatype=PointField.FLOAT32, count=1) for i, n in enumerate('xyz')]
+    msg.data = np.ascontiguousarray(pts, dtype=np.float32).tobytes()
+    return msg
 class Outputs(list):
     """The Python node's outputs, with the (script) time of each in .t for scenario checks."""
 
@@ -385,6 +393,11 @@ class Harness:
         elif kind == 'CT':
             self.ev('CT')
             p()
+        elif kind == 'DR':
+            frame, pts = p
+            arr = np.asarray(pts, dtype=np.float32).reshape(-1, 3)
+            self.ev('DR', frame, [[float(v) for v in row] for row in arr])
+            self.subs['/perception/drops'](cloud_msg(frame, arr))
         elif kind == 'Q':
             self.ev('Q', *(p or ()))
             self.py.append(self.frontier_query(p))
@@ -1235,6 +1248,34 @@ def sc_long_frontier_unsplit(h):
     return sc_long_frontier(h, split=0.0)
 
 
+# ---- Isaac run 9 findings: people's legs, rings of marks, drop-offs, gentle look-around ----
+
+def sc_drop_void(h):
+    """floor_obstacles reports drop points along a line across the start room (a stairwell's edge;
+    the map shows floor beyond it): no frontier or goal past it - the north of the room and the
+    room behind door B stay out of bounds - and the drop cells show in the markers."""
+    truth = house()
+    start_world(h, truth)
+    edge = 70
+
+    def drops():
+        x0, y0, yaw = h.world.pose
+        c, s = math.cos(yaw), math.sin(yaw)
+        pts = []
+        for col in range(4, 116, 2):
+            mx, my = h.world.xy(edge, col)
+            dx, dy = mx - x0, my - y0
+            pts.append((dx * c + dy * s, -dx * s + dy * c, 0.1))
+        h.dispatch('DR', ('base_link', pts))
+    h.inp(0.0, 'CALL', lambda: [h.inp(t, 'CALL', drops) for t in np.arange(1.5, 1500.0, 3.0)])
+    h.policy = moving_policy(h)
+
+    def stayed_out(h):
+        y_edge = -1.475 + edge * RES
+        bad = [o for o in h.py if o[0] == 'GL' and o[4] > y_edge - 0.2 and o[3] < -2.025 + 118 * RES]
+        return [f'goals past the drop: {[(round(o[3], 2), round(o[4], 2)) for o in bad]}'] if bad else []
+    h.checks = [stayed_out, check_final]
+    return 1500
 SCENARIOS = {name[3:]: fn for name, fn in globals().items() if name.startswith('sc_')}
 
 

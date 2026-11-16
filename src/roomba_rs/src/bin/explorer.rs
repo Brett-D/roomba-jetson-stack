@@ -6,6 +6,7 @@
 //!
 //! Subscribes: /global_costmap/costmap, /roomba/mode (latched), /battery_state, /roomba/sensors,
 //!             /vslam_filter/status, ~/command ("start" | "stop" | "home"), /tf, /tf_static
+//!             /perception/drops (drop-offs floor_obstacles saw)
 //! Publishes:  ~/status (JSON, transient local), /perception/ignore_zones/command, ~/markers (how it
 //!             decides where to go; transient local, only while someone listens)
 //! Uses:       navigate_to_pose action, /controller_server/get_parameters|set_parameters,
@@ -352,6 +353,27 @@ impl HasTfBuffer for State {
     }
 }
 
+/// x, y, z (float32 fields) of every point of a cloud; empty without them.
+fn cloud_xyz(m: &sensor_msgs::msg::PointCloud2) -> Vec<[f32; 3]> {
+    let offset = |name: &str| m.fields.iter().find(|f| f.name == name && f.datatype == 7).map(|f| f.offset as usize);
+    let (Some(ox), Some(oy), Some(oz)) = (offset("x"), offset("y"), offset("z")) else { return Vec::new() };
+    let (step, row) = (m.point_step as usize, m.row_step as usize);
+    let read = |k: usize| -> Option<f32> {
+        let b: [u8; 4] = m.data.get(k..k + 4)?.try_into().ok()?;
+        Some(if m.is_bigendian { f32::from_be_bytes(b) } else { f32::from_le_bytes(b) })
+    };
+    let mut out = Vec::with_capacity((m.width * m.height) as usize);
+    for r in 0..m.height as usize {
+        for c in 0..m.width as usize {
+            let k = r * row + c * step;
+            if let (Some(x), Some(y), Some(z)) = (read(k + ox), read(k + oy), read(k + oz)) {
+                out.push([x, y, z]);
+            }
+        }
+    }
+    out
+}
+
 fn sensors(m: &roomba_msgs::msg::SensorState) -> Sensors {
     Sensors {
         bump_left: m.bump_left,
@@ -484,6 +506,13 @@ fn main() -> Result<()> {
     } else {
         None
     };
+    let _drops = worker.create_subscription::<sensor_msgs::msg::PointCloud2, _>(
+        "/perception/drops".keep_last(2),
+        |s: &mut State, m: sensor_msgs::msg::PointCloud2| {
+            let points = cloud_xyz(&m);
+            s.core.on_drops(&m.header.frame_id, &points, &mut s.io)
+        },
+    )?;
     // Steady-clock timers: with a ROS-time (system clock) timer, a wait that ends for it just as the
     // clock is stepped back (WSL's time sync every ~30 s, an NTP step) makes rcl_wait report a
     // timeout; rclrs 0.8 then stops this worker's wait set for good while the node's other wait set

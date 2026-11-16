@@ -31,9 +31,12 @@ a cliff-sensor stop (stairs, or deep carpet that reads like a drop; not a wheel 
 a keep-out zone just ahead of the robot, in exploring, navigation or manual driving. Bump and
 cliff marks never cover the robot itself (mark_clear_radius_m around it stays free), so it can
 still turn and back away.
+Drop-offs floor_obstacles reports (a stair opening the map shows as floor) are remembered: no
+frontier or goal within drop_clear_m of one, and no way through.
 
 Subscribes: /global_costmap/costmap (OccupancyGrid), /roomba/mode (String), /battery_state,
             /roomba/sensors, /vslam_filter/status (String JSON),
+            /perception/drops (PointCloud2),
             ~/command (String: "start" | "stop" | "home")
 Publishes:  ~/status (String JSON, transient local), /perception/ignore_zones/command,
             ~/markers (MarkerArray, map frame, transient local; only while someone listens): how it
@@ -61,7 +64,7 @@ from rclpy.action import ActionClient
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile
 from rclpy.time import Time
-from sensor_msgs.msg import BatteryState
+from sensor_msgs.msg import BatteryState, PointCloud2
 from std_msgs.msg import String
 from tf2_ros import Buffer, TransformException, TransformListener
 from visualization_msgs.msg import Marker, MarkerArray
@@ -77,10 +80,12 @@ LIGHT_ANGLES = {'light_bump_left_signal': 1.2, 'light_bump_front_left_signal': 0
 GREEN, BLUE, GREY, PURPLE = (0.0, 1.0, 0.0, 1.0), (0.0, 0.5, 1.0, 1.0), (0.5, 0.5, 0.5, 0.75), (0.75, 0.0, 1.0, 1.0)
 ORANGE, RED_AREA, CYAN = (1.0, 0.5, 0.0, 0.75), (1.0, 0.0, 0.0, 0.25), (0.0, 1.0, 1.0, 0.75)
 YELLOW, RED, WHITE = (1.0, 1.0, 0.0, 1.0), (1.0, 0.0, 0.0, 1.0), (1.0, 1.0, 1.0, 1.0)
+MAGENTA = (1.0, 0.0, 1.0, 0.75)
 OPTION_COLORS = {'chosen': GREEN, 'option': BLUE, 'skipped': GREY}
 PAUSED = 'Paused: visual tracking is recovering'
 LOOK_REJECTS = 30   # look-around turns Nav2 may reject in a row (its behaviours still inactive) before it gives up
 GOAL_LABELS = {'frontier': 'goal: unmapped area', 'peek': 'goal: closer look', 'home': 'goal: start point'}
+DROP_CELL_M = 0.05  # lattice (m) of the drop-off cells it remembers, in the map frame
 
 try:
     from roomba_msgs.msg import SensorState
@@ -274,6 +279,48 @@ def frontier_goals(grid, robot_rc, free_max, pass_max, clear_max, min_cells, sta
     return goals, seed, peeks, int(np.count_nonzero(reach))
 
 
+def drop_blocked(grid, res, ox, oy, drops, clear_cells):
+    """grid with the known cells within clear_cells of a drop-off cell (map-frame lattice
+    DROP_CELL_M) made lethal: no frontier, goal or way through there. drops: sorted (i, j)."""
+    grid = grid.copy()
+    h, w = grid.shape
+    k = int(clear_cells)
+    k2 = clear_cells * clear_cells
+    offsets = np.array([(dr, dc) for dr in range(-k, k + 1) for dc in range(-k, k + 1) if dr * dr + dc * dc <= k2],
+                       dtype=np.int64).reshape(-1, 2)
+    for i, j in drops:
+        c = math.floor(((i + 0.5) * DROP_CELL_M - ox) / res)
+        r = math.floor(((j + 0.5) * DROP_CELL_M - oy) / res)
+        rr, cc = r + offsets[:, 0], c + offsets[:, 1]
+        ok = (rr >= 0) & (cc >= 0) & (rr < h) & (cc < w)
+        rr, cc = rr[ok], cc[ok]
+        known = grid[rr, cc] >= 0
+        grid[rr[known], cc[known]] = 100
+    return grid
+
+
+def _rotation(q):
+    """Rotation matrix rows (x, y) of a quaternion (x, y, z, w)."""
+    x, y, z, w = q
+    return ((1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - z * w), 2.0 * (x * z + y * w)),
+            (2.0 * (x * y + z * w), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z - x * w)))
+
+
+def _cloud_xyz(msg):
+    """x, y, z (float32 fields) of every point of a PointCloud2, as an N x 3 float32 array."""
+    off = {f.name: f.offset for f in msg.fields if f.datatype == 7}
+    if not all(k in off for k in ('x', 'y', 'z')):
+        return np.zeros((0, 3), np.float32)
+    fmt = '>f4' if msg.is_bigendian else '<f4'
+    dt = np.dtype({'names': ['x', 'y', 'z'], 'formats': [fmt] * 3, 'offsets': [off['x'], off['y'], off['z']],
+                   'itemsize': msg.point_step})
+    data = bytes(msg.data)
+    rows = [np.frombuffer(data[r * msg.row_step:r * msg.row_step + msg.width * msg.point_step], dtype=dt)
+            for r in range(msg.height)]
+    a = np.concatenate(rows) if rows else np.zeros(0, dt)
+    return np.stack([a['x'], a['y'], a['z']], axis=1)
+
+
 class Explorer(Node):
 
     def __init__(self):
@@ -295,6 +342,12 @@ class Explorer(Node):
         # Frontier groups longer than this get a goal spot per piece of about this length (a
         # room's far side seen from the doorway); 0 = one spot per group.
         self.frontier_split = float(p('frontier_split_m', 2.0).value)
+        # Drop-offs floor_obstacles reported (/perception/drops, e.g. a stair opening the camera
+        # looks down into while the map shows floor) are remembered; frontier and goal cells within
+        # this of one are left out, so it neither aims into the void nor reaches through it
+        # (0 = ignore drops). A cell counts after drop points in this many clouds.
+        self.drop_clear = float(p('drop_clear_m', 0.3).value)
+        self.drop_min_hits = int(p('drop_min_hits', 2).value)
         self.min_goal_dist = float(p('min_goal_distance_m', 0.4).value)
         self.blacklist_radius = float(p('blacklist_radius_m', 0.75).value)
         self.visited_radius = float(p('visited_radius_m', 0.6).value)
@@ -372,6 +425,7 @@ class Explorer(Node):
         self.goal_bumps = 0
         self.bumped = False
         self.bump_points = []        # (x, y, monotonic) of recent marks
+        self.drop_hits = {}          # drop-off cell (DROP_CELL_M lattice, map frame) -> clouds with drop points there
 
         self.grid = None
         self.robot_mode = None
@@ -431,6 +485,7 @@ class Explorer(Node):
         self.pub_zone_cmd = self.create_publisher(String, '/perception/ignore_zones/command', 10)
         if self.auto_keepout or self.bump_marks:
             self.create_subscription(SensorState, '/roomba/sensors', self._on_sensors, 10)
+        self.create_subscription(PointCloud2, '/perception/drops', self._on_drops, 2)
         self.pub_status = self.create_publisher(String, '~/status', latched)
         # How it decides where to go (only built while someone listens): see _marker_specs.
         self.pub_markers = self.create_publisher(MarkerArray, '~/markers', latched)
@@ -469,6 +524,42 @@ class Explorer(Node):
             self._mark_bump(bump_bearing(msg, self.bump_light_min or 200), now)
             self._bumped_on_goal()
         self.bumped = bumped
+
+
+    def _on_drops(self, msg):
+        self._drops(msg.header.frame_id, _cloud_xyz(msg))
+
+    def _drops(self, frame, points):
+        """Drop points floor_obstacles reports (float32 N x 3), in `frame`: remembered as drop-off
+        cells (a cell counts once per cloud)."""
+        if self.drop_clear <= 0 or not len(points):
+            return
+        tf = self._lookup(frame)
+        if tf is None:
+            return
+        (tx, ty, _), q = tf
+        r = _rotation(q)
+        p = np.asarray(points, dtype=np.float32).astype(np.float64)
+        x = r[0][0] * p[:, 0] + r[0][1] * p[:, 1] + r[0][2] * p[:, 2] + tx
+        y = r[1][0] * p[:, 0] + r[1][1] * p[:, 1] + r[1][2] * p[:, 2] + ty
+        ok = np.isfinite(x) & np.isfinite(y)
+        cells = set(zip(np.floor(x[ok] / DROP_CELL_M).astype(np.int64).tolist(),
+                        np.floor(y[ok] / DROP_CELL_M).astype(np.int64).tolist()))
+        for c in cells:
+            self.drop_hits[c] = self.drop_hits.get(c, 0) + 1
+
+    def _drop_cells(self):
+        """The drop-off cells (DROP_CELL_M lattice), sorted."""
+        return sorted(c for c, n in self.drop_hits.items() if n >= self.drop_min_hits)
+
+    def _lookup(self, frame):
+        """Latest transform frame -> map: ((x, y, z), (qx, qy, qz, qw)) or None."""
+        try:
+            t = self.tf_buffer.lookup_transform(self.map_frame, frame, Time())
+        except TransformException:
+            return None
+        tr, q = t.transform.translation, t.transform.rotation
+        return (tr.x, tr.y, tr.z), (q.x, q.y, q.z, q.w)
 
     def _bumped_on_goal(self):
         if self.state != 'exploring' or self.goal is None or self.bumps_per_goal <= 0:
@@ -668,6 +759,10 @@ class Explorer(Node):
         grid = np.asarray(self.grid.data, dtype=np.int16).reshape(info.height, info.width)
         res, ox, oy = info.resolution, info.origin.position.x, info.origin.position.y
         robot_rc = (int((pose[1] - oy) / res), int((pose[0] - ox) / res))
+        # Drop-offs it was told about stay out of bounds even where the map shows floor.
+        drops = self._drop_cells() if self.drop_clear > 0 else []
+        if drops:
+            grid = drop_blocked(grid, res, ox, oy, drops, self.drop_clear / res)
         viz = self.pub_markers.get_subscription_count() > 0
         groups = find_frontiers(grid, self.free_max, self.min_cells) if viz else None
         goals, seed, peeks, reach_cells = frontier_goals(grid, robot_rc, self.free_max, self.pass_max, self.clear_max,
@@ -1126,6 +1221,10 @@ class Explorer(Node):
         if self.visited:
             specs.append(('visited', 0, Marker.SPHERE_LIST, (0.0, 0.0, 0.0), (0.08, 0.08, 0.08), GREY,
                           [(x, y, 0.05) for x, y in self.visited], ''))
+        drops = self._drop_cells()
+        if drops:
+            specs.append(('drops', 0, Marker.CUBE_LIST, (0.0, 0.0, 0.0), (DROP_CELL_M, DROP_CELL_M, 0.01), MAGENTA,
+                          [((i + 0.5) * DROP_CELL_M, (j + 0.5) * DROP_CELL_M, 0.01) for i, j in drops], ''))
         now = self._now()
         marks = [m for m in self.marks_sent if m[4] <= 0 or now - m[3] < m[4]]
         for k, (kind, name, points, _, _) in enumerate(marks):

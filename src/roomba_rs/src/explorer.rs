@@ -9,7 +9,7 @@
 //! ROS-free: [`Explorer`] reacts to inputs and talks to the outside through [`Io`] (the node in
 //! src/bin/explorer.rs, or the replay in examples/explorer_replay.rs).
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 
 use serde_json::{Map, Value};
 
@@ -24,6 +24,8 @@ pub const STATUS_SUCCEEDED: i8 = 4;
 const PAUSED: &str = "Paused: visual tracking is recovering";
 /// Look-around turns Nav2 may reject in a row (its behaviours still inactive) before it gives up.
 const LOOK_REJECTS: i64 = 30;
+/// Lattice (m) of the drop-off cells it remembers, in the map frame.
+const DROP_CELL_M: f64 = 0.05;
 /// Cliff sensors (SensorState fields) and their direction on the Roomba (rad, left positive).
 pub const CLIFF_ANGLES: [(&str, f64); 4] =
     [("cliff_left", 1.05), ("cliff_front_left", 0.35), ("cliff_front_right", -0.35), ("cliff_right", -1.05)];
@@ -456,6 +458,28 @@ fn best_spot(cells: &[(usize, usize)], penalty: &[f64], cy: f64, cx: f64, limit:
     best.map(|b| b.1)
 }
 
+/// `grid` with the known cells within `clear_cells` of a drop-off cell (map-frame lattice
+/// DROP_CELL_M) made lethal (explorer.py drop_blocked): no frontier, goal or way through there.
+pub fn block_drops(grid: &mut [i8], w: usize, h: usize, res: f64, ox: f64, oy: f64, drops: &[(i64, i64)], clear_cells: f64) {
+    let k = clear_cells as i64;
+    let k2 = clear_cells * clear_cells;
+    for &(i, j) in drops {
+        let c = (((i as f64 + 0.5) * DROP_CELL_M - ox) / res).floor() as i64;
+        let r = (((j as f64 + 0.5) * DROP_CELL_M - oy) / res).floor() as i64;
+        for dr in -k..=k {
+            for dc in -k..=k {
+                let (rr, cc) = (r + dr, c + dc);
+                if rr < 0 || cc < 0 || rr >= h as i64 || cc >= w as i64 || ((dr * dr + dc * dc) as f64) > k2 {
+                    continue;
+                }
+                let g = &mut grid[rr as usize * w + cc as usize];
+                if *g >= 0 {
+                    *g = 100;
+                }
+            }
+        }
+    }
+}
 
 /// The `passable` cells connected to `seed` (explorer.py reachable). 8-connected, except that a
 /// diagonal step between two lethal cells (keep-out marks, walls) is no way through: Nav2's planner
@@ -627,6 +651,8 @@ pub struct Params {
     pub cost_weight: f64,
     pub peek_search: f64,
     pub frontier_split: f64,
+    pub drop_clear: f64,
+    pub drop_min_hits: i64,
     pub min_goal_dist: f64,
     pub blacklist_radius: f64,
     pub visited_radius: f64,
@@ -689,6 +715,12 @@ impl Params {
             peek_search: p.float("peek_search_m", 3.0)?,
             // Frontier groups longer than this get a goal spot per piece of about this length.
             frontier_split: p.float("frontier_split_m", 2.0)?,
+            // Drop-offs floor_obstacles reported (/perception/drops, e.g. a stair opening the camera
+            // looks down into while the map shows floor) are remembered; frontier and goal cells
+            // within this of one are left out, so it neither aims into the void nor reaches
+            // through it (0 = ignore drops). A cell counts after drop points in this many clouds.
+            drop_clear: p.float("drop_clear_m", 0.3)?,
+            drop_min_hits: p.int("drop_min_hits", 2)?,
             min_goal_dist: p.float("min_goal_distance_m", 0.4)?,
             blacklist_radius: p.float("blacklist_radius_m", 0.75)?,
             visited_radius: p.float("visited_radius_m", 0.6)?,
@@ -892,6 +924,7 @@ const CYAN: [f32; 4] = [0.0, 1.0, 1.0, 0.75];
 const YELLOW: [f32; 4] = [1.0, 1.0, 0.0, 1.0];
 const RED: [f32; 4] = [1.0, 0.0, 0.0, 1.0];
 const WHITE: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
+const MAGENTA: [f32; 4] = [1.0, 0.0, 1.0, 0.75];
 // visualization_msgs/Marker types.
 const ARROW: i32 = 0;
 const SPHERE: i32 = 2;
@@ -1005,6 +1038,8 @@ pub struct Explorer {
     unstuck_goal: Option<(f64, f64)>,
     progress: Option<(f64, f64, f64)>,
     unstuck_missing_logged: bool,
+    /// Drop-off cells (DROP_CELL_M lattice in the map frame) -> clouds that had drop points there.
+    drop_hits: HashMap<(i64, i64), i64>,
 }
 
 const WHEEL_DROP: usize = 4;
@@ -1060,6 +1095,7 @@ impl Explorer {
             unstuck_goal: None,
             progress: None,
             unstuck_missing_logged: false,
+            drop_hits: HashMap::new(),
         };
         e.publish_status(io);
         e
@@ -1120,6 +1156,34 @@ impl Explorer {
             self.bumped_on_goal(io);
         }
         self.bumped = bumped;
+    }
+
+
+    /// Drop points floor_obstacles reports (/perception/drops), in `frame`: remembered as drop-off
+    /// cells (a cell counts once per cloud).
+    pub fn on_drops(&mut self, frame: &str, points: &[[f32; 3]], io: &mut impl Io) {
+        if self.p.drop_clear <= 0.0 || points.is_empty() {
+            return;
+        }
+        let Some((t, q)) = io.lookup(&self.p.map_frame, frame) else { return };
+        let r = rotation(q);
+        let mut cells = std::collections::BTreeSet::new();
+        for p in points {
+            let (x, y) = to_frame(&r, t, p[0] as f64, p[1] as f64, p[2] as f64);
+            if x.is_finite() && y.is_finite() {
+                cells.insert(((x / DROP_CELL_M).floor() as i64, (y / DROP_CELL_M).floor() as i64));
+            }
+        }
+        for c in cells {
+            *self.drop_hits.entry(c).or_insert(0) += 1;
+        }
+    }
+
+    /// The drop-off cells (DROP_CELL_M lattice), sorted.
+    fn drop_cells(&self) -> Vec<(i64, i64)> {
+        let mut out: Vec<(i64, i64)> = self.drop_hits.iter().filter(|&(_, &n)| n >= self.p.drop_min_hits).map(|(&c, _)| c).collect();
+        out.sort_unstable();
+        out
     }
 
     fn mode_drives(&self) -> bool {
@@ -1432,7 +1496,12 @@ impl Explorer {
             peek_cells: self.p.peek_search / res,
             split_cells: self.p.frontier_split / res,
         };
+        // Drop-offs it was told about stay out of bounds even where the map shows floor.
+        let drops = if self.p.drop_clear > 0.0 { self.drop_cells() } else { Vec::new() };
         let mut data = grid.data.clone();
+        if !drops.is_empty() {
+            block_drops(&mut data, w, h, res, ox, oy, &drops, self.p.drop_clear / res);
+        }
         let (goals, seed, peeks, reach_cells) = frontier_goals(&data, w, h, robot, &fp);
         if seed.is_none() {
             self.message = "Robot is not in free space on the costmap; waiting…".into();
@@ -1448,7 +1517,7 @@ impl Explorer {
             self.look_step(io);
             return;
         }
-        let groups = if io.markers_wanted() { Some(frontier_cells(&grid.data, w, h, self.p.free_max, self.p.min_cells)) } else { None };
+        let groups = if io.markers_wanted() { Some(frontier_cells(&data, w, h, self.p.free_max, self.p.min_cells)) } else { None };
         self.reopen(io);
         let mut best: Option<(f64, f64, f64, f64)> = None;
         let mut candidates = 0;
@@ -2186,6 +2255,11 @@ impl Explorer {
             let points = self.visited.iter().map(|&(x, y)| [x, y, 0.05]).collect();
             specs.push(spec("visited", 0, SPHERE_LIST, [0.0; 3], [0.08; 3], GREY, points, String::new()));
         }
+        let drops = self.drop_cells();
+        if !drops.is_empty() {
+            let points = drops.iter().map(|&(i, j)| [(i as f64 + 0.5) * DROP_CELL_M, (j as f64 + 0.5) * DROP_CELL_M, 0.01]).collect();
+            specs.push(spec("drops", 0, CUBE_LIST, [0.0; 3], [DROP_CELL_M, DROP_CELL_M, 0.01], MAGENTA, points, String::new()));
+        }
         let marks = self.marks_sent.iter().filter(|m| m.ttl <= 0.0 || now - m.sent < m.ttl);
         for (k, m) in marks.enumerate() {
             let points = m.points.iter().chain(m.points.first()).map(|p| [p[0], p[1], 0.03]).collect();
@@ -2259,6 +2333,20 @@ fn zone_add(name: &str, points: &[[f64; 2]]) -> Map<String, Value> {
     m
 }
 
+
+/// Rotation matrix rows of a quaternion (x, y, z, w), as explorer.py _rotation computes them.
+fn rotation(q: [f64; 4]) -> [[f64; 3]; 2] {
+    let [x, y, z, w] = q;
+    [
+        [1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - z * w), 2.0 * (x * z + y * w)],
+        [2.0 * (x * y + z * w), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z - x * w)],
+    ]
+}
+
+/// (x, y) of point (px, py, pz) in the target frame of a transform (rows of `rotation`, `t`).
+fn to_frame(r: &[[f64; 3]; 2], t: [f64; 3], px: f64, py: f64, pz: f64) -> (f64, f64) {
+    (r[0][0] * px + r[0][1] * py + r[0][2] * pz + t[0], r[1][0] * px + r[1][1] * py + r[1][2] * pz + t[1])
+}
 /// json.loads for status messages: like serde_json, but also accepting Python's NaN / Infinity
 /// / -Infinity tokens (json.dumps writes them for non-finite floats).
 pub fn py_json_loads(text: &str) -> Option<Value> {
@@ -2999,6 +3087,36 @@ mod tests {
         assert_eq!(e.state(), State::Done);
     }
 
+
+    #[test]
+    fn drop_offs_keep_frontiers_and_goals_out() {
+        let mut io = TestIo::default();
+        let mut p = Params::load(&mut crate::watchdog::Defaults).unwrap();
+        p.look_steps = 0;
+        let mut e = open_room(&mut io, p);
+        // Drop points seen along x = 0.85 m (the map shows floor beyond, up to the frontier at 1.2 m),
+        // relative to the robot at (0.35, 1.05).
+        let pts: Vec<[f32; 3]> = (1..19).map(|r| [0.5, (r as f64 * 0.1 + 0.05 - 1.05) as f32, 0.1]).collect();
+        e.on_drops("camera", &pts, &mut io);
+        e.on_drops("camera", &pts, &mut io);
+        assert_eq!(e.drop_cells().len(), 18);
+        io.t = 1.0;
+        e.on_command("start", &mut io);
+        e.tick(&mut io);
+        // Beyond the drop the frontier can't be reached (the spot to look at it from is where it
+        // stands): no goal into the void.
+        assert!(io.goals.is_empty(), "{:?}", io.goals);
+        assert!(io.status.contains("No reachable unmapped areas"), "{}", io.status);
+        // Without the drops it heads for the frontier past x = 0.85.
+        let mut io2 = TestIo::default();
+        let mut p2 = Params::load(&mut crate::watchdog::Defaults).unwrap();
+        p2.look_steps = 0;
+        let mut e2 = open_room(&mut io2, p2);
+        io2.t = 1.0;
+        e2.on_command("start", &mut io2);
+        e2.tick(&mut io2);
+        assert!(io2.goals[0].x > 0.85, "{:?}", io2.goals[0]);
+    }
 
     #[test]
     fn no_way_through_diagonal_gaps_between_lethal_cells() {

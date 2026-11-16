@@ -142,6 +142,9 @@ def generate_launch_description():
              parameters=[{'base_frame': LaunchConfiguration('base_frame'), 'low_battery_fraction': 0.2,
                           'bump_mark_width_m': 0.5, 'bump_light_signal': 200, 'mark_clear_radius_m': 0.28,
                           'mark_soft_band_m': 0.22, 'look_around_steps': 4, 'look_around_step_deg': 90.0,
+                          # Drop-offs floor_obstacles reports (a stair opening the map shows as
+                          # floor) keep frontiers and goal spots 0.3 m away.
+                          'drop_clear_m': 0.3,
                           'frontier_split_m': 2.0,
                           'unstuck_skill': ParameterValue(LaunchConfiguration('unstuck_skill'), value_type=bool),
                           'goal_ranking': LaunchConfiguration('goal_ranking'),
