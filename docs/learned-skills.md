@@ -266,7 +266,7 @@ more than the network). Model files:
   and a time limit, capped by `max_time_s` (15 s). One goal at a time; feedback at 10 Hz (elapsed,
   costmap clearance, command).
 - 10 Hz: local costmap (`/local_costmap/costmap`, odom frame) -> patch; `/roomba/sensors` (light
-  bumpers via per-sensor reference signals `light_reference_signals`, bumpers, cliffs, wheel drops);
+  bumpers, bumpers, cliffs, wheel drops);
   `/roomba/mode`; `/wheel/odom` (encoder v / w); `/odom` (fused yaw rate); TF map -> base_link (motion,
   goal). Publishes `cmd_vel_nav` - the input of the velocity smoother, like Nav2's controller and
   behaviours - so **the smoother, the collision monitor and the driver's bump reflex and cliff stop
@@ -275,8 +275,22 @@ more than the network). Model files:
   depth camera not blind - nose to a wall the costmap looks empty), TIMED_OUT, FAILED (cliff / wheel
   drop / Roomba left Safe mode / stale costmap or sensors / no model) or CANCELED. Anything but
   SUCCEEDED means: fall back to the classical recovery exactly as today.
-- Parameters: `model` (path to `unstuck_policy.onnx`), `max_time_s`, frames, `light_reference_signals`
-  (default `60,235,140,140,140,60`: calibrate per unit), `sensor_timeout_s`.
+- Parameters: `model` (path to `unstuck_policy.onnx`), `max_time_s`, frames, `sensor_timeout_s`, and
+  the light-bumper calibration: `light_gains` (default `0.5,1.0,0.55,0.55,0.55,0.5`) and
+  `light_floor_driving` / `light_floor_still` (30 / 5). The policy was trained on proximity
+  1 - d / 12 cm; the node gets it back from the raw signals by inverting the inverse-square model the
+  2D twin uses for this unit (gain x 0.285 / (d + 0.019)^2) after subtracting the floor's share (the
+  carpet pile adds ~30 x gain while driving). The first version divided the raw signal by a reference;
+  in the twin the carpet share alone then read as "something 6 cm away" on the side sensors whenever
+  the robot moved, so the skill could not end SUCCEEDED while driving and fed the policy phantom
+  obstacles. Calibrate the gains and floor values on the robot (signals at 1, 5, 10 cm from a wall, and
+  driving on each floor covering).
+- Known issue (seen in the live twin demo, not in the A/B runs): with several stacks running and the
+  PC busy, the node sometimes stops dispatching (goal accepted, then no feedback or result; the
+  executor's threads are idle in `rcl_wait`). Looks like a lost wake-up in rclrs 0.8's executor /
+  action server; not investigated further yet. Callers must time-limit the action call anyway (treat a
+  missing result as failure -> classical fallback) and a node watchdog / respawn is needed before the
+  robot. The live demo restarts the node when this happens.
 
 Intended caller (not wired yet, to keep the explorer untouched while `twinfix` reworks it): when Nav2
 aborts a frontier goal (or the explorer's goal timeout / bumps_per_goal fires), call `/unstuck_skill`
@@ -330,7 +344,7 @@ PPO-fine-tuned model; they behave the same in the 2D env.)
 - **Before trying on the robot**: (1) more closed-loop runs in the 2D twin on top of `twinfix`
   (explore_from_dock, nose_to_wall, invisible_railing, furniture) with `goal_ranking: learned` and the
   unstuck caller wired, rule vs learned, several seeds; (2) a run in the Isaac Sim twin with the full
-  perception stack (real costmaps); (3) calibrate the light-bumper references on the robot; (4) robot
+  perception stack (real costmaps); (3) calibrate the light-bumper gains / floor values on the robot; (4) robot
   test with a person at the e-stop: first the unstuck skill alone, called by hand
   (`ros2 action send_goal /unstuck_skill roomba_skills_msgs/action/Unstuck "{time_limit_s: 10.0}"`)
   from known stuck poses (nose to the hallway wall, in a corner), then inside exploration.

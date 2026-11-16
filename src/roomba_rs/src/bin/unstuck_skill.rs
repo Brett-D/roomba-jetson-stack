@@ -48,7 +48,9 @@ struct Params {
     map_frame: String,
     odom_frame: String,
     base_frame: String,
-    light_ref: [f32; 6],
+    light_gain: [f32; 6],
+    /// Floor share of the light-bumper signals (x gain) while driving / standing still.
+    light_floor: (f32, f32),
     stale_s: f64,
 }
 
@@ -165,8 +167,10 @@ impl State {
             s.light_bump_right_signal,
         ];
         let mut light = [0f32; 6];
+        let moving = self.wheel.0.abs() > 0.01 || self.wheel.1.abs() > 0.05;
+        let floor = if moving { self.p.light_floor.0 } else { self.p.light_floor.1 };
         for k in 0..6 {
-            light[k] = light_proximity(signals[k], self.p.light_ref[k]);
+            light[k] = light_proximity(signals[k], self.p.light_gain[k], floor);
         }
         let cliff = s.cliff_left || s.cliff_front_left || s.cliff_front_right || s.cliff_right || s.wheel_drop_left || s.wheel_drop_right;
         let passive = !matches!(self.mode.as_str(), "safe" | "full");
@@ -209,14 +213,15 @@ impl State {
 
 fn load_params(node: &Node) -> Result<Params> {
     let mut p = NodeParams::new(node);
+    // Light-bumper gains (L, FL, CL, CR, FR, R) as the 2D twin models this unit; calibrate per robot.
     let light: Vec<f32> = p
-        .string("light_reference_signals", "60,235,140,140,140,60")?
+        .string("light_gains", "0.5,1.0,0.55,0.55,0.55,0.5")?
         .split(',')
         .map(|v| v.trim().parse::<f32>().unwrap_or(0.0))
         .collect();
-    let mut light_ref = [0f32; 6];
+    let mut light_gain = [0f32; 6];
     for (k, v) in light.iter().take(6).enumerate() {
-        light_ref[k] = *v;
+        light_gain[k] = *v;
     }
     Ok(Params {
         model: p.string("model", "")?,
@@ -224,7 +229,8 @@ fn load_params(node: &Node) -> Result<Params> {
         map_frame: p.string("map_frame", "map")?,
         odom_frame: p.string("odom_frame", "odom")?,
         base_frame: p.string("base_frame", "base_link")?,
-        light_ref,
+        light_gain,
+        light_floor: (p.float("light_floor_driving", 30.0)? as f32, p.float("light_floor_still", 5.0)? as f32),
         stale_s: p.float("sensor_timeout_s", 1.0)?,
     })
 }

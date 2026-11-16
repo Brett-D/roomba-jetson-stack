@@ -52,14 +52,21 @@ pub struct UnstuckInputs {
     pub elapsed_s: f64,
 }
 
-/// Light-bumper signal -> proximity 0..1 as in training (1 - d / 0.12 m). `reference` is the
-/// signal this sensor reads with an obstacle about 1 cm away (calibrate per sensor; this robot's
-/// front-left reads ~235, the others under 140).
-pub fn light_proximity(signal: u16, reference: f32) -> f32 {
-    if reference <= 0.0 {
+/// Light-bumper signal -> proximity 0..1 as in training (1 - d / 0.12 m, 0 beyond 12 cm). Inverts the
+/// inverse-square model the 2D twin uses for this unit (`twin::physics::ir_signal`: gain * 0.285 /
+/// (d + 0.019)^2, ~250 at 1.5 cm for gain 1) after removing the floor's share (`floor` x gain: the
+/// carpet pile adds ~30 while driving, ~5 standing still). Calibrate the gains per sensor (this unit's
+/// front-left is ~1.0, the others ~0.5) and the floor per floor covering.
+pub fn light_proximity(signal: u16, gain: f32, floor: f32) -> f32 {
+    if gain <= 0.0 {
         return 0.0;
     }
-    (signal as f32 / reference).clamp(0.0, 1.0)
+    let s = signal as f32 - floor * gain;
+    if s <= 0.0 {
+        return 0.0;
+    }
+    let d = (gain * 0.285 / s).sqrt() - 0.019;
+    (1.0 - d / 0.12).clamp(0.0, 1.0)
 }
 
 pub fn observation(patch: &[f32], i: &UnstuckInputs) -> Vec<f32> {
@@ -275,7 +282,21 @@ mod tests {
         assert_eq!(action_to_cmd([1.0, -1.0]), (0.25, -0.8));
         let (v, _) = action_to_cmd([-1.0, 0.0]);
         assert!((v + 0.15).abs() < 1e-12);
-        assert_eq!(light_proximity(470, 235.0), 1.0);
+    }
+
+    /// Twin / robot light-bumper signals map back to the training proximity, with the floor removed.
+    #[test]
+    fn light_proximity_inverts_the_signal_model() {
+        for (gain, floor) in [(1.0f32, 30.0f32), (0.5, 30.0), (0.55, 5.0)] {
+            assert_eq!(light_proximity((floor * gain + 3.0) as u16, gain, floor), 0.0); // floor only
+            for d in [0.0f32, 0.03, 0.06, 0.09] {
+                let sig = (gain * 0.285 / (d + 0.019).powi(2) + floor * gain).round() as u16;
+                let p = light_proximity(sig, gain, floor);
+                assert!((p - (1.0 - d / 0.12)).abs() < 0.03, "gain {gain} d {d}: {p}");
+            }
+            let far = (gain * 0.285 / (0.15f32 + 0.019).powi(2) + floor * gain).round() as u16;
+            assert_eq!(light_proximity(far, gain, floor), 0.0);
+        }
     }
 
     /// The exported ONNX policy reproduces the PyTorch actor on recorded observations.
