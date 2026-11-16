@@ -390,7 +390,8 @@ class Explorer(Node):
         self.look_steps = int(p('look_around_steps', 4).value)          # 0 = never
         self.look_step = math.radians(float(p('look_around_step_deg', 90.0).value))
         self.look_timeout = float(p('look_around_timeout_s', 20.0).value)   # time allowance per 90 deg of turn
-        # Pause after each look-around turn (s): visual tracking catches up while it stands.
+        # Pause after each look-around turn (the last one too) before anything else moves it (s):
+        # visual tracking catches up while it stands.
         self.look_pause = float(p('look_around_pause_s', 0.0).value)
         # Nav2's goal checker ignores the final heading here (yaw_goal_tolerance 6.28), so at a spot it
         # reached it turns to face the unknown it came to see when it is off by more than this
@@ -466,7 +467,7 @@ class Explorer(Node):
         self.pending_drops = []      # (stamp ns, frame, points) of drop clouds waiting for their transform
         self.drops_skipped = 0
         self.trap_next = -math.inf   # no trap-breaking mark removal before this time
-        self.look_until = -math.inf  # next look-around turn not before this time (look_around_pause_s)
+        self.look_until = -math.inf  # no motion before this time: standing still after a look-around turn
 
         self.grid = None
         self.robot_mode = None
@@ -904,6 +905,8 @@ class Explorer(Node):
         self.pub_drops.publish(msg)
 
     def _next_frontier(self):
+        if self._now() < self.look_until:
+            return   # standing still after a look-around turn (look_around_pause_s): no motion yet
         if self.grid is None:
             self.message = 'Waiting for the costmap…'
             return
@@ -1124,8 +1127,6 @@ class Explorer(Node):
 
     def _look_step(self):
         """The next turn of the look-around, or its end."""
-        if self.look[0] > 0 and self._now() < self.look_until:
-            return   # standing still between turns (look_around_pause_s)
         if self.look[0] <= 0 or not self.spinner.server_is_ready():
             self._look_done()
             return

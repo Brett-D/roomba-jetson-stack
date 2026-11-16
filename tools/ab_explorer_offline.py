@@ -1422,10 +1422,28 @@ def sc_ring_trap(h):
     return 600
 
 
-def sc_look_pause(h):
-    """explore_house with look_around_pause_s 1.5: it stands still after each look-around turn."""
-    h.params['look_around_pause_s'] = 1.5
-    return sc_explore_house(h)
+def sc_look_pause(h, pause=1.5):
+    """explore_house with look_around_pause_s 1.5: it stands still after each look-around turn (the
+    last one too) - no goal or turn sent meanwhile."""
+    h.params['look_around_pause_s'] = pause
+    until = sc_explore_house(h)
+    h.checks.append(lambda h: check_still_after_looks(h, pause))
+    return until
+
+
+def check_still_after_looks(h, pause):
+    looks = {o[1] for o in h.py if o[0] == 'SG' and abs(o[2] - math.pi / 2) < 1e-3}
+    ends = [e[1] for e in h.trace if e[0] == 'SS' and e[3] in looks and e[4] == 4]
+    bad = [(round(t0 - T0, 2), o[0], round(t - t0, 2)) for t0 in ends for o, t in zip(h.py, h.py.t)
+           if o[0] in ('GL', 'SG') and t0 <= t < t0 + pause]
+    return [f'moved within {pause} s after a look-around turn (turn end, output, delay): {bad[:5]}'] if bad else []
+
+
+def sc_look_pause_long(h):
+    """look_pause with look_around_pause_s 2.5 (longer than the 2 s between a turn's end and the tick
+    after next): the look-around isn't over, and no goal goes out, before it has stood still that long
+    after the last turn."""
+    return sc_look_pause(h, 2.5)
 
 
 def sc_reopen_drop_band(h):

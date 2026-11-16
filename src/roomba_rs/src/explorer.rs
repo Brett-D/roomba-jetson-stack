@@ -673,6 +673,7 @@ pub struct Params {
     /// Radians.
     pub look_step: f64,
     pub look_timeout: f64,
+    /// Standing still after each look-around turn (the last one too) before anything else moves it (s).
     pub look_pause: f64,
     pub face_turn_min: f64,
     pub reopen_cells: i64,
@@ -1093,7 +1094,7 @@ pub struct Explorer {
     drops_skipped: u64,
     /// No trap-breaking mark removal before this time.
     trap_next: f64,
-    /// Next look-around turn not before this time (look_around_pause_s).
+    /// No motion before this time: standing still after a look-around turn (look_around_pause_s).
     look_until: f64,
 }
 
@@ -1653,6 +1654,9 @@ impl Explorer {
     }
 
     fn next_frontier(&mut self, io: &mut impl Io) {
+        if io.now() < self.look_until {
+            return; // standing still after a look-around turn (look_around_pause_s): no motion yet
+        }
         if self.grid.is_none() {
             self.message = "Waiting for the costmap…".into();
             return;
@@ -1986,9 +1990,6 @@ impl Explorer {
     /// The next turn of the look-around, or its end.
     fn look_step(&mut self, io: &mut impl Io) {
         let Some((left, early)) = self.look else { return };
-        if left > 0 && io.now() < self.look_until {
-            return; // standing still between turns (look_around_pause_s)
-        }
         if left <= 0 || !io.spin_ready() {
             self.look_done();
             return;
@@ -3591,6 +3592,41 @@ mod tests {
         assert_eq!(io.spins.len(), 1, "standing still for 1.5 s after the turn");
         io.ticks(&mut e, 4, 4);
         assert_eq!(io.spins.len(), 2);
+        for k in [6, 8] {
+            turn(&mut io, &mut e, STATUS_SUCCEEDED);
+            io.ticks(&mut e, k - 1, k);
+        }
+        assert_eq!(io.spins.len(), 4);
+        // After the last turn too: the look-around isn't over before it stood still for 1.5 s.
+        io.t = 8.9;
+        turn(&mut io, &mut e, STATUS_SUCCEEDED);
+        io.ticks(&mut e, 9, 10);
+        assert!(e.look.is_some());
+        io.ticks(&mut e, 11, 11);
+        assert!(e.look.is_none());
+    }
+
+    #[test]
+    fn no_goal_while_it_stands_after_a_look_around_turn() {
+        let mut io = TestIo { spin_server: true, ..Default::default() };
+        let mut p = Params::load(&mut crate::watchdog::Defaults).unwrap();
+        p.look_pause = 1.5;
+        let mut e = open_room(&mut io, p);
+        let open = e.grid.clone().unwrap();
+        let mut closed = open.clone();
+        closed.data.iter_mut().filter(|v| **v < 0).for_each(|v| *v = 100);
+        e.on_grid(closed);
+        io.t = 1.0;
+        e.on_command("start", &mut io);
+        io.ticks(&mut e, 1, 1);
+        assert_eq!((io.goals.len(), io.spins.len()), (0, 1), "nothing in view: looks around");
+        // The turn shows an unmapped area, but it stands still for 1.5 s before heading there.
+        turn(&mut io, &mut e, STATUS_SUCCEEDED);
+        e.on_grid(open);
+        io.ticks(&mut e, 2, 2);
+        assert!(io.goals.is_empty());
+        io.ticks(&mut e, 3, 3);
+        assert_eq!(io.goals.len(), 1);
     }
 
     #[test]
