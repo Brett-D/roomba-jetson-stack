@@ -1456,6 +1456,59 @@ def sc_ring_trap(h):
     return 600
 
 
+def sc_ring_trap_slow(h):
+    """ring_trap with trap_wait_s 6 and the ring open only once all its marks are gone: it keeps
+    removing them (no look-around, no finishing while boxed in, even after finish_confirm_s), then
+    explores."""
+    h.params['trap_wait_s'] = 6.0
+    truth = house()
+    start_world(h, truth, cmd_at=20.0)
+    r0, c0 = h.world.cell(0.5, 0.5)
+    ring = [(r, c) for r in range(r0 - 8, r0 + 9) for c in range(c0 - 8, c0 + 9)
+            if max(abs(r - r0), abs(c - c0)) == 8]
+    under = [int(truth[rc]) for rc in ring]
+    for k in range(6):
+        t = 3.0 + 2.0 * k
+        h.inp(t - 0.5, 'CALL', lambda yaw=k * math.pi / 3.0: (setattr(h.world, 'pose', (0.5, 0.5, yaw)),
+                                                              h.world.publish()))
+        h.inp(t, 'S', {'bump_left': True})
+        h.inp(t + 0.2, 'S', {})
+
+    def marks_left():
+        ops = [json.loads(o[1]) for o in h.py if o[0] == 'ZN']
+        added = {z['name'] for z in ops if z.get('op') == 'add'}
+        return added - {z['name'] for z in ops if z.get('op') == 'delete'}
+
+    def close():
+        for r, c in ring:
+            truth[r, c] = 100
+        h.world.publish()
+    h.inp(16.0, 'CALL', close)
+
+    def opened():
+        if state['opened'] is None and not marks_left():
+            state['opened'] = h.t
+            for rc, v in zip(ring, under):
+                truth[rc] = v
+            h.world.publish()
+    state = {'opened': None}
+    h.inp(0.0, 'CALL', lambda: [h.inp(t, 'CALL', opened) for t in np.arange(20.5, 600.0, 1.0)])
+    h.policy = moving_policy(h)
+
+    def stayed_until_out(h):
+        opened = state['opened'] if state['opened'] is not None else math.inf
+        early = [o for o, t in zip(h.py, h.py.t) if t < opened and (
+            (o[0] == 'ST' and json.loads(o[1])['state'] in ('returning', 'done')) or
+            (o[0] == 'LG' and 'Exploration finished' in o[2]))]
+        return [f'gave up while boxed in: {early[0]}'] if early else []
+
+    def got_out(h):
+        goals = [t for o, t in zip(h.py, h.py.t) if o[0] == 'GL' and t > (state['opened'] or math.inf)]
+        return [] if len(goals) >= 3 else [f'{len(goals)} goals after the ring opened']
+    h.checks = [stayed_until_out, got_out]
+    return 600
+
+
 def sc_look_pause(h, pause=1.5):
     """explore_house with look_around_pause_s 1.5: it stands still after each look-around turn (the
     last one too) - no goal or turn sent meanwhile."""

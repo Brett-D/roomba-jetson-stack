@@ -1083,11 +1083,12 @@ class Explorer(Node):
                                'them too): checking again')
 
     def _break_trap(self, reach_cells, free_cells, res, pose):
-        """Boxed in by its own bump marks (see trap_area_m2): removes the one that matters least
-        (unconfirmed before confirmed, rows along a railing last, oldest first), at most one every
-        trap_wait_s. True when it removed one."""
+        """Boxed in by its own bump marks (see trap_area_m2) with some of them within trap_radius_m:
+        removes the one that matters least (unconfirmed before confirmed, rows along a railing last,
+        oldest first), at most one every trap_wait_s. True while boxed in like that (it removed one
+        or waits to remove the next): no look-around, closer look or finishing meanwhile."""
         now = self._now()
-        if self.trap_area <= 0 or now < self.trap_next:
+        if self.trap_area <= 0:
             return False
         reach = reach_cells * res * res
         free = free_cells * res * res
@@ -1098,6 +1099,11 @@ class Explorer(Node):
                 if math.hypot(_mark_centre(m[2])[0] - pose[0], _mark_centre(m[2])[1] - pose[1]) <= self.trap_radius]
         if not near:
             return False
+        # Still boxed in: no finishing on an old no_frontier_since while the next one waits.
+        self.no_frontier_since = None
+        self.message = 'Boxed in by its own bump marks: clearing a way out…'
+        if now < self.trap_next:
+            return True
         pick = near[0]
         for m in near[1:]:
             a = (self._in_row(m, active) * 2 + m[6], m[3])
@@ -1106,7 +1112,6 @@ class Explorer(Node):
                 pick = m
         self._delete_marks([pick])
         self.get_logger().info(f'Boxed in by its own bump marks ({reach:.1f} m2 to move in): removed {pick[1]}')
-        self.message = 'Boxed in by its own bump marks: clearing a way out…'
         self.trap_next = now + self.trap_wait
         return True
 

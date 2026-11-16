@@ -1926,12 +1926,13 @@ impl Explorer {
         );
     }
 
-    /// Boxed in by its own bump marks (see trap_area_m2): removes the one that matters least
-    /// (unconfirmed before confirmed, rows along a railing last, oldest first), at most one every
-    /// trap_wait_s. True when it removed one.
+    /// Boxed in by its own bump marks (see trap_area_m2) with some of them within trap_radius_m:
+    /// removes the one that matters least (unconfirmed before confirmed, rows along a railing last,
+    /// oldest first), at most one every trap_wait_s. True while boxed in like that (it removed one
+    /// or waits to remove the next): no look-around, closer look or finishing meanwhile.
     fn break_trap(&mut self, reach_cells: usize, free_cells: usize, res: f64, pose: (f64, f64, f64), io: &mut impl Io) -> bool {
         let now = io.now();
-        if self.p.trap_area <= 0.0 || now < self.trap_next {
+        if self.p.trap_area <= 0.0 {
             return false;
         }
         let reach = reach_cells as f64 * res * res;
@@ -1949,6 +1950,12 @@ impl Explorer {
             })
             .collect();
         let Some(&first) = near.first() else { return false };
+        // Still boxed in: no finishing on an old no_frontier_since while the next one waits.
+        self.no_frontier_since = None;
+        self.message = "Boxed in by its own bump marks: clearing a way out…".into();
+        if now < self.trap_next {
+            return true;
+        }
         let rank = |i: usize| self.in_row(i, &active) as u8 * 2 + self.marks_sent[i].confirmed as u8;
         let mut pick = first;
         for &i in &near[1..] {
@@ -1960,7 +1967,6 @@ impl Explorer {
         let name = self.marks_sent[pick].name.clone();
         self.delete_marks(&[pick], io);
         io.log(Level::Info, format!("Boxed in by its own bump marks ({reach:.1} m2 to move in): removed {name}"));
-        self.message = "Boxed in by its own bump marks: clearing a way out…".into();
         self.trap_next = now + self.p.trap_wait;
         true
     }
@@ -3572,6 +3578,40 @@ mod tests {
         assert_eq!(io.zones.len(), 4, "one every trap_wait_s");
         io.ticks(&mut e, 13, 13);
         assert_eq!(io.zones[4], r#"{"op": "delete", "name": "bump_000000_2"}"#);
+    }
+
+    #[test]
+    fn no_finishing_while_it_waits_to_remove_the_next_mark() {
+        // finish_confirm_s 0: any tick that finds no frontier could finish.
+        let mut io = TestIo::default();
+        let mut e = exploring_with(&mut io, |p| p.finish_confirm = 0.0);
+        let g = io.goals[0].clone();
+        e.on_goal_response(g.seq, true, &mut io);
+        e.on_result(g.seq, 6, &mut io);
+        for (k, yaw) in [0.0, 2.0, 4.0].into_iter().enumerate() {
+            io.yaw = yaw;
+            io.t = 2.0 + k as f64;
+            e.on_sensors(&Sensors { bump_left: true, ..Default::default() }, &mut io);
+            e.on_sensors(&Sensors::default(), &mut io);
+        }
+        let mut boxed = e.grid.clone().unwrap();
+        for r in 0..20i64 {
+            for c in 0..13i64 {
+                if (r - 10).abs().max((c - 3).abs()) == 2 {
+                    boxed.data[(r * 20 + c) as usize] = 100;
+                }
+            }
+        }
+        e.on_grid(boxed);
+        io.ticks(&mut e, 10, 10);
+        assert_eq!(io.zones.len(), 4, "the first one removed");
+        // Still boxed in (the costmap hasn't caught up, two marks left) while the next one waits.
+        io.ticks(&mut e, 11, 12);
+        assert_eq!(e.state(), State::Exploring);
+        assert!(io.status.contains("Boxed in by its own bump marks"), "{}", io.status);
+        assert_eq!(io.goals.len(), 1, "no trip home");
+        io.ticks(&mut e, 13, 13);
+        assert_eq!(io.zones.len(), 5);
     }
 
     #[test]
