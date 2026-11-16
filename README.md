@@ -156,7 +156,7 @@ params file in the run directory), the camera mount TF, `imu_filter_madgwick`, `
 `nav.launch.py` (floor_obstacles, map_gap_filler, Nav2 with `nav2_robot.yaml`, nav_coach, explorer)
 and the web app. The twin node replaces the hardware, the VIO/watchdog and RTAB-Map:
 
-- *World*: the floor plan is the 2D grid of Brett's saved RTAB-Map database (map frame, 5 cm cells),
+- *World*: the floor plan is the 2D grid of the saved RTAB-Map database (map frame, 5 cm cells),
   extracted with `tools/twin2d_world.py` (`rtabmap-export --map --opt 2` on a copy, then cleaned
   conservatively: 1-2 cell free "spikes" traced through gaps removed, small enclosed unknown holes
   filled). Every cell that isn't free is a full-height wall. Scenario files add doors (open/close

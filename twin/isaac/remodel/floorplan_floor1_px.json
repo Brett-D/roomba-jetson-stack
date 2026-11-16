@@ -1,6 +1,6 @@
 {
  "name": "downstairs (FLOOR 1)",
- "source": "floorplan_downstairs.png (listing plan, 601x913 px, same drawing scale as the upstairs plan)",
+ "source": "floorplan_downstairs.png (floor plan, 601x913 px, same drawing scale as the upstairs plan)",
  "units": "image pixels (x right, y down); scale from the room dimensions (checked against the upstairs scale)",
  "notes": [
   "Walls: thick black wall pixels extruded as-is (title text masked). Exterior gaps that are not listed doors are",
@@ -17,23 +17,23 @@
  },
  "mask_out": [[0, 880, 601, 913]],
  "rooms": [
-  {"name": "Kitchen", "type": "kitchen", "dims_ft": [[20, 11], [17, 6]], "inner": [22, 212, 258, 408], "poly": [[19, 209], [263, 209], [263, 333], [205, 385], [205, 408], [152, 408], [152, 363], [93, 363], [93, 383], [19, 383]]},
-  {"name": "Pantry", "type": "closet", "poly": [[93, 363], [152, 363], [152, 410], [93, 410]]},
-  {"name": "Dining Room", "type": "dining", "dims_ft": [[16, 8], [14, 2]], "inner": [17, 387, 205, 547], "poly": [[14, 383], [93, 383], [93, 410], [206, 410], [206, 550], [14, 550]]},
-  {"name": "Living Room", "type": "living", "dims_ft": [[15, 3], [20, 0]], "inner": [268, 104, 438, 328], "poly": [[263, 130], [280, 118], [300, 108], [322, 102], [347, 100], [372, 102], [395, 108], [418, 118], [442, 130], [442, 337], [263, 337]]},
-  {"name": "Storage", "type": "closet", "poly": [[283, 390], [322, 420], [305, 462], [257, 452], [253, 420]]},
-  {"name": "Entry", "type": "entry", "dims_ft": [[25, 4], [27, 9]], "inner": [213, 338, 497, 652], "poly": [[206, 385], [262, 337], [417, 337], [417, 390], [447, 388], [497, 430], [500, 430], [500, 500], [453, 500], [453, 525], [418, 552], [418, 652], [312, 652], [267, 600], [206, 600]]},
-  {"name": "Office", "type": "office", "dims_ft": [[12, 3], [13, 2]], "inner": [447, 280, 580, 428], "poly": [[445, 278], [583, 278], [583, 428], [497, 428], [447, 385]]},
-  {"name": "Storage", "type": "closet", "poly": [[497, 428], [560, 428], [560, 458], [497, 458]]},
-  {"name": "Bathroom", "type": "bathroom", "dims_ft": [[7, 3], [8, 4]], "inner": [503, 430, 580, 523], "poly": [[560, 428], [583, 428], [583, 525], [500, 525], [500, 458], [560, 458]]},
-  {"name": "Storage", "type": "closet", "poly": [[453, 500], [500, 500], [500, 525], [453, 525]]},
-  {"name": "Family Room", "type": "family", "dims_ft": [[14, 3], [15, 5]], "inner": [422, 532, 580, 705], "poly": [[418, 527], [585, 527], [585, 707], [565, 707], [545, 728], [525, 738], [497, 740], [470, 732], [452, 720], [437, 707], [418, 707]]},
-  {"name": "Laundry", "type": "laundry", "dims_ft": [[11, 6], [6, 2]], "inner": [22, 553, 152, 618], "poly": [[17, 550], [155, 550], [155, 620], [17, 620]]},
-  {"name": "Hallway", "type": "hallway", "dims_ft": [[4, 2], [4, 4]], "inner": [157, 553, 200, 600], "poly": [[155, 550], [206, 550], [206, 600], [155, 600]]},
-  {"name": "Garage", "type": "garage", "dims_ft": [[25, 5], [22, 4]], "inner": [23, 600, 307, 852], "poly": [[17, 620], [155, 620], [155, 600], [267, 600], [312, 642], [312, 855], [17, 855]]},
-  {"name": "Balcony", "type": "balcony", "outdoor": true, "poly": [[92, 2], [268, 2], [268, 209], [92, 209]]},
-  {"name": "Balcony", "type": "balcony", "outdoor": true, "poly": [[445, 197], [587, 197], [587, 278], [445, 278]]},
-  {"name": "Veranda", "type": "balcony", "outdoor": true, "poly": [[312, 652], [415, 652], [415, 782], [312, 782]]}
+  {"name": "kitchen_1", "type": "kitchen", "dims_ft": [[20, 11], [17, 6]], "inner": [22, 212, 258, 408], "poly": [[19, 209], [263, 209], [263, 333], [205, 385], [205, 408], [152, 408], [152, 363], [93, 363], [93, 383], [19, 383]]},
+  {"name": "closet_1", "type": "closet", "poly": [[93, 363], [152, 363], [152, 410], [93, 410]]},
+  {"name": "dining_1", "type": "dining", "dims_ft": [[16, 8], [14, 2]], "inner": [17, 387, 205, 547], "poly": [[14, 383], [93, 383], [93, 410], [206, 410], [206, 550], [14, 550]]},
+  {"name": "living_1", "type": "living", "dims_ft": [[15, 3], [20, 0]], "inner": [268, 104, 438, 328], "poly": [[263, 130], [280, 118], [300, 108], [322, 102], [347, 100], [372, 102], [395, 108], [418, 118], [442, 130], [442, 337], [263, 337]]},
+  {"name": "closet_2", "type": "closet", "poly": [[283, 390], [322, 420], [305, 462], [257, 452], [253, 420]]},
+  {"name": "entry_1", "type": "entry", "dims_ft": [[25, 4], [27, 9]], "inner": [213, 338, 497, 652], "poly": [[206, 385], [262, 337], [417, 337], [417, 390], [447, 388], [497, 430], [500, 430], [500, 500], [453, 500], [453, 525], [418, 552], [418, 652], [312, 652], [267, 600], [206, 600]]},
+  {"name": "office_1", "type": "office", "dims_ft": [[12, 3], [13, 2]], "inner": [447, 280, 580, 428], "poly": [[445, 278], [583, 278], [583, 428], [497, 428], [447, 385]]},
+  {"name": "closet_3", "type": "closet", "poly": [[497, 428], [560, 428], [560, 458], [497, 458]]},
+  {"name": "bathroom_1", "type": "bathroom", "dims_ft": [[7, 3], [8, 4]], "inner": [503, 430, 580, 523], "poly": [[560, 428], [583, 428], [583, 525], [500, 525], [500, 458], [560, 458]]},
+  {"name": "closet_4", "type": "closet", "poly": [[453, 500], [500, 500], [500, 525], [453, 525]]},
+  {"name": "family_1", "type": "family", "dims_ft": [[14, 3], [15, 5]], "inner": [422, 532, 580, 705], "poly": [[418, 527], [585, 527], [585, 707], [565, 707], [545, 728], [525, 738], [497, 740], [470, 732], [452, 720], [437, 707], [418, 707]]},
+  {"name": "laundry_1", "type": "laundry", "dims_ft": [[11, 6], [6, 2]], "inner": [22, 553, 152, 618], "poly": [[17, 550], [155, 550], [155, 620], [17, 620]]},
+  {"name": "hallway_1", "type": "hallway", "dims_ft": [[4, 2], [4, 4]], "inner": [157, 553, 200, 600], "poly": [[155, 550], [206, 550], [206, 600], [155, 600]]},
+  {"name": "garage_1", "type": "garage", "dims_ft": [[25, 5], [22, 4]], "inner": [23, 600, 307, 852], "poly": [[17, 620], [155, 620], [155, 600], [267, 600], [312, 642], [312, 855], [17, 855]]},
+  {"name": "balcony_1", "type": "balcony", "outdoor": true, "poly": [[92, 2], [268, 2], [268, 209], [92, 209]]},
+  {"name": "balcony_2", "type": "balcony", "outdoor": true, "poly": [[445, 197], [587, 197], [587, 278], [445, 278]]},
+  {"name": "balcony_3", "type": "balcony", "outdoor": true, "poly": [[312, 652], [415, 652], [415, 782], [312, 782]]}
  ],
  "doors": [
   {"id": "pantry", "type": "double", "a": [97, 363], "b": [148, 363], "swing": "up", "wall_t": 5},
@@ -70,13 +70,13 @@
   {"name": "balcony_ne_e", "pts": [[585, 199], [585, 276]], "outdoor": true}
  ],
  "fixtures": [
-  {"type": "counter", "room": "Kitchen", "rect": [20, 210, 155, 233]},
-  {"type": "counter", "room": "Kitchen", "rect": [20, 233, 45, 312]},
-  {"type": "fridge", "room": "Kitchen", "rect": [20, 313, 47, 350]},
-  {"type": "island", "room": "Kitchen", "rect": [87, 273, 155, 307]},
-  {"type": "toilet", "room": "Bathroom", "center": [567, 508], "yaw_deg": 0},
-  {"type": "vanity", "room": "Bathroom", "rect": [513, 505, 550, 523]},
-  {"type": "appliance", "room": "Laundry", "rect": [50, 592, 76, 618]},
-  {"type": "appliance", "room": "Laundry", "rect": [77, 592, 103, 618]}
+  {"type": "counter", "room": "kitchen_1", "rect": [20, 210, 155, 233]},
+  {"type": "counter", "room": "kitchen_1", "rect": [20, 233, 45, 312]},
+  {"type": "fridge", "room": "kitchen_1", "rect": [20, 313, 47, 350]},
+  {"type": "island", "room": "kitchen_1", "rect": [87, 273, 155, 307]},
+  {"type": "toilet", "room": "bathroom_1", "center": [567, 508], "yaw_deg": 0},
+  {"type": "vanity", "room": "bathroom_1", "rect": [513, 505, 550, 523]},
+  {"type": "appliance", "room": "laundry_1", "rect": [50, 592, 76, 618]},
+  {"type": "appliance", "room": "laundry_1", "rect": [77, 592, 103, 618]}
  ]
 }

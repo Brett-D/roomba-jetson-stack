@@ -11,7 +11,7 @@ twin/isaac/
   pdownload.py                resumable parallel download (the 5.5 GB extscache wheel kept dropping)
   jetson/                     run on the Jetson: bag extraction, house mesh/grid export, IMU axis check
   robot/roomba550_d1000.urdf  Roomba 550 + D1000 (frames copied from the real /tf_static)
-  remodel/                    floor-plan house: digitised listing plans, registration, USD build, validation
+  remodel/                    floor-plan house: digitised floor plans, registration, USD build, validation
   scripts/                    Isaac Sim scripts (asset build, scene, ROS bridge, data generation)
   eval/                       detector baseline, sim-vs-real image statistics, fine-tune proof
 ```
@@ -107,8 +107,8 @@ behaviour runtime on a NavMesh baked from the house (`twin_scene.py`). A bare Us
 not work: the characters use a Reallusion rig and the clips the Biped rig; IRA's motion library
 retargets them.
 
-### Remodelled house from the listing floor plans (default look, `remodel/`)
-The scan mesh was too poor, so the house is rebuilt from Brett's listing plans
+### Remodelled house from the floor plans (default look, `remodel/`)
+The scan mesh was too poor, so the house is rebuilt from the floor plans
 (`E:\twin\assets\floorplan_upstairs.png`, `floorplan_downstairs.png`), registered into the RTAB-Map
 `map` frame. Scenes, the ROS twin and the data generator use it by default (`--look scan|clean` still work).
 
@@ -281,7 +281,7 @@ fresh_map8, which has no people in it):
 - The scan mesh is noisy (IR depth from 0.13 m, Poisson surfaces with holes and shards); it is kept as
   `--look scan|clean`. The default is the floor-plan house; a dedicated capture (video walk-through,
   NuRec / 3D Gaussian splat) could add real textures and clutter later.
-- Floor-plan house: listing plans are approximate (doorways 0.1-0.3 m off the map, see the drive
+- Floor-plan house: the floor plans are approximate (doorways 0.1-0.3 m off the map, see the drive
   survey); furniture outside the mapped blobs is generic; door positions and wall thickness come from
   the drawing; heights are assumptions (2.44 m / 2.65 m / 2.90 m floor to floor).
 - Dataset v2 was rendered before the stairwell correction (placeholder below the well); render v3 with

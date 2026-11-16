@@ -1,4 +1,4 @@
-# Full exploration from the dock: the robot starts where Brett's saved map began (the map origin,
+# Full exploration from the dock: the robot starts where the saved map began (the map origin,
 # facing +x along the hallway), with the dock right behind it and an unknown map, and explores until
 # the explorer reports it is done (or 30 min of simulated time).
 name: explore_from_dock

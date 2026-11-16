@@ -9,7 +9,7 @@ import math
 import cv2
 import numpy as np
 
-WALL_H = 2.44            # 8 ft ceilings (listing plans show standard heights; assumption)
+WALL_H = 2.44            # 8 ft ceilings (floor plans show standard heights; assumption)
 DOOR_H = 2.03            # 6'8" doors
 FLOOR_TO_FLOOR = 2.90    # upstairs floor to the foyer floor below (assumption, see README)
 RAIL_H = 0.92

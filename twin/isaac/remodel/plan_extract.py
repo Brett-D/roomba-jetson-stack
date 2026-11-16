@@ -1,6 +1,6 @@
 """Floor-plan raster -> axis-aligned wall rectangles (pixel units) + residual (diagonal/curved) wall pixels.
 
-Used to digitise the listing floor plans; the result is reviewed and completed by hand in
+Used to digitise the floor plans; the result is reviewed and completed by hand in
 floorplan_*.json (doors, windows, rooms, curved/diagonal walls, stair void, balconies).
 
   python plan_extract.py floorplan.png overlay.png rects.json
