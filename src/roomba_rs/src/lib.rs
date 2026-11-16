@@ -6,6 +6,8 @@ pub mod explorer;
 pub mod floor;
 pub mod gap_filler;
 pub mod geometry;
+#[cfg(feature = "learned")]
+pub mod learned;
 pub mod nav2_guard;
 pub mod nav_coach;
 pub mod node_params;

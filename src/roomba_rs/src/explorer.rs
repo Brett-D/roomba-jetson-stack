@@ -641,6 +641,10 @@ pub struct Params {
     pub bump_light_min: i64,
     pub bumps_per_goal: i64,
     pub retry_failed: bool,
+    /// "rule" (default: the score below) or "learned" (a [`GoalRanker`] re-orders the same
+    /// candidates; needs the `learned` build feature and `goal_ranking_model`).
+    pub goal_ranking: String,
+    pub goal_ranking_model: String,
 }
 
 impl Params {
@@ -705,8 +709,39 @@ impl Params {
             bump_light_min: p.int("bump_light_signal", 0)?,
             bumps_per_goal: p.int("bumps_per_goal", 2)?,
             retry_failed: p.boolean("retry_failed_before_finish", true)?,
+            goal_ranking: p.string("goal_ranking", "rule")?,
+            goal_ranking_model: p.string("goal_ranking_model", "")?,
         })
     }
+}
+
+/// A frontier goal that passed every explorer rule, offered to a [`GoalRanker`] (map frame).
+#[derive(Clone, Debug)]
+pub struct RankCandidate {
+    pub x: f64,
+    pub y: f64,
+    pub yaw: f64,
+    pub frontier: (f64, f64),
+    pub size_cells: usize,
+    pub score: f64,
+}
+
+/// What a ranker sees besides the candidates.
+pub struct RankInput<'a> {
+    pub grid: &'a Grid,
+    pub pose: (f64, f64, f64),
+    pub home: Option<(f64, f64)>,
+    pub battery: Option<f64>,
+    pub elapsed_s: f64,
+    pub failed: i64,
+    pub blacklist: &'a [(f64, f64)],
+    pub visited: &'a [(f64, f64)],
+}
+
+/// Optional learned goal ranking (`goal_ranking: learned`): picks one of the candidates the rules
+/// produced (in rule order, best first). None, or an error, keeps the rule's choice.
+pub trait GoalRanker: Send + Sync {
+    fn choose(&mut self, input: &RankInput, candidates: &[RankCandidate]) -> anyhow::Result<Option<usize>>;
 }
 
 /// nav_msgs/OccupancyGrid content the explorer uses.
@@ -908,6 +943,8 @@ pub struct Explorer {
     goal_from: Option<(f64, f64)>,
     marks_sent: Vec<SentMark>,
     markers_last: Option<Vec<MarkerSpec>>,
+    ranker: Option<Box<dyn GoalRanker>>,
+    started: f64,
 }
 
 const WHEEL_DROP: usize = 4;
@@ -956,9 +993,16 @@ impl Explorer {
             goal_from: None,
             marks_sent: Vec::new(),
             markers_last: None,
+            ranker: None,
+            started: 0.0,
         };
         e.publish_status(io);
         e
+    }
+
+    /// Learned goal ranking (only used with `goal_ranking: learned`).
+    pub fn set_ranker(&mut self, ranker: Box<dyn GoalRanker>) {
+        self.ranker = Some(ranker);
     }
 
     pub fn params(&self) -> &Params {
@@ -1167,6 +1211,7 @@ impl Explorer {
         }
         if self.home.is_none() || matches!(self.state, State::Done | State::Idle) {
             self.home = Some((pose.0, pose.1));
+            self.started = io.now();
             self.blacklist.clear();
             self.visited.clear();
             self.peeked.clear();
@@ -1326,6 +1371,7 @@ impl Explorer {
         let mut candidates = 0;
         let mut options = Vec::new(); // for ~/markers
         let mut chosen = 0;
+        let mut ranked = Vec::new(); // goal_ranking: learned
         for g in &goals {
             let (gy, gx) = (g.goal.0 as f64, g.goal.1 as f64);
             let (cy, cx) = g.centroid;
@@ -1350,6 +1396,33 @@ impl Explorer {
             if best.is_none_or(|b| score < b.0) {
                 best = Some((score, x, y, (fy - y).atan2(fx - x))); // look at the unknown
                 chosen = options.len() - 1;
+            }
+            if self.ranker.is_some() {
+                ranked.push((RankCandidate { x, y, yaw: (fy - y).atan2(fx - x), frontier: (fx, fy), size_cells: g.size, score }, options.len() - 1));
+            }
+        }
+        if let (Some(ranker), true) = (self.ranker.as_mut(), self.p.goal_ranking == "learned" && ranked.len() > 1) {
+            // goal_ranking: learned - the ranker re-orders the candidates the rules above let through.
+            ranked.sort_by(|a: &(RankCandidate, usize), b| a.0.score.total_cmp(&b.0.score));
+            let blacklist: Vec<(f64, f64)> = self.blacklist.iter().map(|f| (f.x, f.y)).collect();
+            let cands: Vec<RankCandidate> = ranked.iter().map(|r| r.0.clone()).collect();
+            let input = RankInput {
+                grid: self.grid.as_ref().unwrap(),
+                pose,
+                home: self.home,
+                battery: self.battery,
+                elapsed_s: io.now() - self.started,
+                failed: self.failed,
+                blacklist: &blacklist,
+                visited: &self.visited,
+            };
+            match ranker.choose(&input, &cands) {
+                Ok(Some(i)) if i < cands.len() => {
+                    best = Some((cands[i].score, cands[i].x, cands[i].y, cands[i].yaw));
+                    chosen = ranked[i].1;
+                }
+                Ok(_) => {}
+                Err(e) => io.log(Level::Warn, format!("Learned goal ranking failed ({e}); using the rule's choice")),
             }
         }
         if let Some(groups) = groups {

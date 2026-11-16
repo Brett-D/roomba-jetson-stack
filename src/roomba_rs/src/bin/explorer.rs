@@ -317,6 +317,25 @@ fn cancel_on_signal(set: libc::sigset_t, worker: Worker<State>) {
     });
 }
 
+/// `goal_ranking: learned`: load the frontier ranker (docs/learned-skills.md); on any problem the
+/// explorer keeps its rule.
+#[cfg(feature = "learned")]
+fn attach_ranker(core: &mut Explorer, node: &Node) {
+    let path = core.params().goal_ranking_model.clone();
+    match roomba_rs::learned::explore::FrontierRanker::load(&path) {
+        Ok(r) => {
+            core.set_ranker(Box::new(r));
+            log!(node.info(), "Learned goal ranking from {path}");
+        }
+        Err(e) => log!(node.error(), "goal_ranking: learned, but {path} could not be loaded ({e:#}); using the rule"),
+    }
+}
+
+#[cfg(not(feature = "learned"))]
+fn attach_ranker(_core: &mut Explorer, node: &Node) {
+    log!(node.warn(), "goal_ranking: learned needs roomba_rs built with --features learned; using the rule");
+}
+
 fn main() -> Result<()> {
     roomba_rs::default_signals();
     let signals = block_signals();
@@ -343,7 +362,10 @@ fn main() -> Result<()> {
         pub_markers: node.create_publisher("~/markers".qos(latched()))?,
         cliff_timers: Vec::new(),
     };
-    let core = Explorer::new(params, &mut io);
+    let mut core = Explorer::new(params, &mut io);
+    if core.params().goal_ranking == "learned" {
+        attach_ranker(&mut core, &node);
+    }
     let wants_sensors = core.wants_sensors();
     let worker = node.create_worker::<State>(State { core, io });
     let _ = worker_cell.set(Arc::clone(&worker));

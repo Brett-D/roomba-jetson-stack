@@ -1,0 +1,25 @@
+# Drive the robot out of a stuck situation (learned unstuck skill, docs/learned-skills.md).
+# Called by the explorer / nav_coach when Nav2 gives up (aborted goal, failed recoveries). The
+# skill publishes velocity commands through the velocity smoother and the collision monitor, never
+# around them; the driver's bump reflex and cliff stops stay in charge.
+
+# Where the robot was trying to go (map frame); frame_id empty = no goal (then "away from obstacles").
+geometry_msgs/PoseStamped goal
+# Give up after this long (s); the server caps it at its max_time_s parameter (15 s).
+float32 time_limit_s
+---
+uint8 SUCCEEDED=0
+uint8 TIMED_OUT=1
+uint8 FAILED=2
+uint8 CANCELED=3
+uint8 outcome
+string message
+float32 elapsed_s
+# free space around the robot at the end (from the local costmap, m)
+float32 clearance_m
+uint32 bumps
+---
+float32 elapsed_s
+float32 clearance_m
+float32 linear_x
+float32 angular_z

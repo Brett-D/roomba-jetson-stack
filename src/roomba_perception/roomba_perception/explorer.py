@@ -329,6 +329,10 @@ class Explorer(Node):
         # Areas that failed (blocked, bumped, timed out) are skipped, but a door shut or a chair
         # moved since: before giving up, retry them - again only after some goal has been reached.
         self.retry_failed = bool(p('retry_failed_before_finish', True).value)
+        # Learned goal ranking (docs/learned-skills.md) exists only in the Rust explorer.
+        if p('goal_ranking', 'rule').value != 'rule':
+            self.get_logger().warn('goal_ranking is only supported by the Rust explorer; using the rule')
+        p('goal_ranking_model', '')
         self.reached_at_retry = -1
         self.goal_bumps = 0
         self.bumped = False

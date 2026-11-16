@@ -11,8 +11,18 @@ find_program(CARGO cargo HINTS "$ENV{HOME}/.cargo/bin" REQUIRED)
 set(CARGO_TARGET_DIR "${CMAKE_CURRENT_BINARY_DIR}/cargo")
 set(NODES floor_obstacles ekf_inputs vslam_watchdog map_gap_filler ignore_zones web_server set_password explorer nav_coach person_detector twin2d nav2_guard)
 
+# Learned navigation skills (docs/learned-skills.md): off by default. ON adds the cargo feature
+# "learned" (tract ONNX inference, the explorer's goal_ranking: learned) and the unstuck_skill node.
+option(LEARNED_SKILLS "Build the learned navigation skills" OFF)
+set(CARGO_FEATURES "")
+if(LEARNED_SKILLS)
+  list(APPEND NODES unstuck_skill)
+  set(CARGO_FEATURES --features learned)
+  install(DIRECTORY models/ DESTINATION share/${PROJECT_NAME}/models)
+endif()
+
 add_custom_target(cargo_build ALL
-  COMMAND ${CMAKE_COMMAND} -E env --unset=MAKEFLAGS --unset=MFLAGS CARGO_TARGET_DIR=${CARGO_TARGET_DIR} ${CARGO} build --release --locked
+  COMMAND ${CMAKE_COMMAND} -E env --unset=MAKEFLAGS --unset=MFLAGS CARGO_TARGET_DIR=${CARGO_TARGET_DIR} ${CARGO} build --release --locked ${CARGO_FEATURES}
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
   USES_TERMINAL)
 
@@ -22,7 +32,7 @@ endforeach()
 
 if(BUILD_TESTING)
   add_test(NAME cargo_test
-    COMMAND ${CMAKE_COMMAND} -E env CARGO_TARGET_DIR=${CARGO_TARGET_DIR} ${CARGO} test --release --locked --lib
+    COMMAND ${CMAKE_COMMAND} -E env CARGO_TARGET_DIR=${CARGO_TARGET_DIR} ${CARGO} test --release --locked --lib ${CARGO_FEATURES}
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 endif()
 

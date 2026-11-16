@@ -56,6 +56,16 @@ path = "src/bin/twin2d.rs"
 name = "nav2_guard"
 path = "src/bin/nav2_guard.rs"
 
+# Learned navigation skills (docs/learned-skills.md): opt-in, build with --features learned.
+[[bin]]
+name = "unstuck_skill"
+path = "src/bin/unstuck_skill.rs"
+required-features = ["learned"]
+
+[features]
+# ONNX policies (tract, pure Rust) for the unstuck skill and the explorer's learned goal ranking.
+learned = ["dep:tract-onnx", "dep:futures"]
+
 [dependencies]
 anyhow = "1"
 # Generated bindings for NVIDIA's message package (its debs ship none), see vendor/.../regenerate.sh
@@ -71,6 +81,9 @@ serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
 serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9"
 zip = { version = "2", default-features = false, features = ["deflate"] }
+# learned skills: ONNX inference and the action server's result channel (optional, feature "learned")
+tract-onnx = { version = "0.23", optional = true }
+futures = { version = "0.3", optional = true }
 # web_server: HTTP/websocket server, login (scrypt), multipart login forms
 base64 = "0.23"
 bytes = "1"
