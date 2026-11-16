@@ -64,7 +64,8 @@ colcon build --symlink-install
 ```
 
 Python vs Rust checks on a recorded drive: `tools/ab_floor_obstacles.sh` (side by side, frame by
-frame, plus CPU), `tools/ab_ekf_offline.py` (same message sequence into both, every output compared)
+frame, plus CPU; `tools/ab_floor_drops_offline.py` compares the drop-off detection bit for bit),
+`tools/ab_ekf_offline.py` (same message sequence into both, every output compared)
 and `tools/ab_ekf_inputs.sh` (CPU). For the watchdog, `tools/record_vio_replay.sh` first replays a
 raw recording through the VIO and records its output; `tools/ab_watchdog_offline.py` then feeds that
 to both watchdogs (TF, odometry, status, service calls and logs compared, optionally with injected

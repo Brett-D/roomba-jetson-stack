@@ -15,6 +15,11 @@ height instead. pause_turn_rate_rps > 0 holds back the costmap copies
 that, because the pose lags and points would smear across the costmap; /perception/obstacles
 (collision monitor) is always published. Logs a status line every 5 s.
 
+Drop-offs (drop_min_depth_m > 0): points well below the floor plane were seen past an edge (a
+stairwell through the railing's balusters, a landing); the obstacle band above the floor never
+reported them, so the drop was mapped as floor. Obstacle points go where their line of sight
+crosses the floor plane (see drop_points).
+
 Subscribes: /camera/depth/image_rect_raw, /camera/depth/camera_info, /camera/imu/data
 Publishes:  /perception/obstacles, /perception/obstacles_mapping (same points, paused during
             fast turns), /perception/floor_points (PointCloud2, optical frame)
@@ -36,6 +41,37 @@ from std_msgs.msg import String
 from tf2_ros import Buffer, TransformException, TransformListener
 
 from roomba_perception.scene_filter import quat_rotate
+
+
+def drop_points(pts, h, floor_h, up, below, max_range, lift, fwd, side, cell, min_points):
+    """Negative obstacles. Points more than elow m under the floor plane and closer than
+    max_range m (depth noise grows with range) were seen past a drop, which the obstacle band
+    above the floor never reports. The floor ends where each such point's line of sight crosses the
+    floor plane: a point is reported there, lift m above the floor. Only where at least
+    min_points of them fall in their 3x3 block of cell m floor cells (fwd, side: the levelled
+    forward and sideways axes) - stray deep pixels are noise. h: the points' heights relative to
+    the camera, floor_h: the floor's (negative). Elementwise arithmetic only (Rust's
+    roomba_rs::floor::drop_points matches it exactly: tools/ab_floor_drops_offline.py)."""
+    deep = (h < floor_h - below) & (pts[:, 2] < max_range)
+    if not np.any(deep):
+        return np.zeros((0, 3))
+    t = floor_h / h[deep]
+    q = pts[deep] * t[:, None] + lift * up
+    i = np.floor((q[:, 0] * fwd[0] + q[:, 1] * fwd[1] + q[:, 2] * fwd[2]) / cell).astype(np.int64).tolist()
+    j = np.floor((q[:, 0] * side[0] + q[:, 1] * side[1] + q[:, 2] * side[2]) / cell).astype(np.int64).tolist()
+    counts = {}
+    for k in zip(i, j):
+        counts[k] = counts.get(k, 0) + 1
+    keep = [sum(counts.get((a + da, b + db), 0) for da in (-1, 0, 1) for db in (-1, 0, 1)) >= min_points
+            for a, b in zip(i, j)]
+    return q[np.array(keep, dtype=bool)]
+
+
+def floor_axes(up):
+    """Levelled forward (optical z with the vertical part removed) and sideways directions."""
+    fwd = np.array([0.0, 0.0, 1.0]) - up * up[2]
+    fwd /= np.linalg.norm(fwd) or 1.0
+    return fwd, np.cross(up, fwd)
 
 
 def _cloud(header, pts):
@@ -74,6 +110,13 @@ class FloorObstacles(Node):
         # When something closer than min_range fills the view, report a short wall this far in
         # front of the camera (inside the collision monitor's forward stop zone).
         self.blind_distance = float(p('blind_obstacle_distance_m', 0.15).value)
+        # Drop-offs (negative obstacles): points this far below the floor plane (0 = off), within
+        # drop_max_range_m, put obstacle points drop_point_height_m above the floor where their line
+        # of sight crosses the floor plane, where at least drop_min_points of them gather.
+        self.drop_depth = float(p('drop_min_depth_m', 0.0).value)
+        self.drop_max_range = float(p('drop_max_range_m', 2.0).value)
+        self.drop_lift = float(p('drop_point_height_m', 0.1).value)
+        self.drop_min_points = max(1, int(p('drop_min_points', 6).value))
         self.blind_frames = 0
         self.speckles = 0
         self.last_fast_turn = 0.0
@@ -216,6 +259,14 @@ class FloorObstacles(Node):
             keep = self._dense(obstacles, up)
             self.speckles = int((~keep).sum())
             obstacles = obstacles[keep]
+        drops = 0
+        if self.drop_depth > 0.0:
+            fwd, side = floor_axes(up)
+            d = drop_points(pts, h, self.floor_h, up, self.drop_depth, self.drop_max_range, self.drop_lift,
+                            fwd, side, self.cell_size, self.drop_min_points)
+            drops = int(d.shape[0])
+            if drops:
+                obstacles = np.concatenate([obstacles, d])
         floor = pts[np.abs(rel) < self.floor_band]
         obs_cloud = _cloud(msg.header, obstacles)
         self.pub_obs.publish(obs_cloud)
@@ -237,6 +288,7 @@ class FloorObstacles(Node):
             'floor_points': int(floor.shape[0]),
             'paused_frames': self.paused_frames,
             'blind_frames': self.blind_frames,
+            'drop_points': drops,
         }
         self.pub_status.publish(String(data=json.dumps(status)))
         if now - self.last_log > 5.0:

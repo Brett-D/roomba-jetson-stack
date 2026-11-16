@@ -69,6 +69,15 @@ def generate_launch_description():
                  'max_range_m': ParameterValue(
                      PythonExpression(["2.5 if '", LaunchConfiguration('robot_mode'), "' == 'true' else 4.0"]),
                      value_type=float),
+                 # On the robot, report drop-offs: depth points more than 12 cm below the floor within
+                 # 2 m (a stairwell seen through the railing's balusters) put obstacle points at the
+                 # edge, where their line of sight crosses the floor plane; before, the drop was
+                 # mapped as floor and Nav2 planned through the railing.
+                 'drop_min_depth_m': ParameterValue(
+                     PythonExpression(["0.12 if '", LaunchConfiguration('robot_mode'), "' == 'true' else 0.0"]),
+                     value_type=float),
+                 'drop_max_range_m': 2.0,
+                 'drop_min_points': 6,
              }]),
         # Joins dotted obstacles in RTAB-Map's grid (railing posts) into solid walls for the costmaps.
         # Rust port: the same grid cell for cell (tools/ab_map_gap_filler_offline.py), ~20x faster.

@@ -115,6 +115,56 @@ pub fn dense_mask(pts: &[Vec3], up: Vec3, cell: f64, min_points: usize) -> Vec<b
     keys.iter().map(|k| total[k] >= min_points).collect()
 }
 
+/// floor_obstacles.py drop_points: negative obstacles. Points more than `below` m under the floor
+/// plane and closer than max_range m (depth noise grows with range) were seen past a drop (through a stair railing's balusters, over a landing's edge, to the
+/// floor below), which the obstacle band above the floor never reports, so the drop was mapped as
+/// floor. The floor ends where each such point's line of sight crosses the floor plane: a point is
+/// reported there, `lift` m above the floor. Only where at least `min_points` of them fall in their
+/// 3x3 block of `cell` m floor cells (`fwd`, `side`: floor_axes) - stray deep pixels are noise.
+/// `h`: the points' heights relative to the camera, `floor_h`: the floor's (negative). Exactly the
+/// numpy arithmetic (elementwise, no fused multiply-add), as tools/ab_floor_drops_offline.py checks.
+#[allow(clippy::too_many_arguments)]
+pub fn drop_points(
+    pts: &[Vec3],
+    h: &[f64],
+    floor_h: f64,
+    up: Vec3,
+    below: f64,
+    max_range: f64,
+    lift: f64,
+    fwd: Vec3,
+    side: Vec3,
+    cell: f64,
+    min_points: usize,
+) -> Vec<Vec3> {
+    let limit = floor_h - below;
+    let lifted = [lift * up[0], lift * up[1], lift * up[2]];
+    let q: Vec<Vec3> = pts
+        .iter()
+        .zip(h)
+        .filter(|&(p, &hp)| hp < limit && p[2] < max_range)
+        .map(|(p, &hp)| {
+            let t = floor_h / hp;
+            [p[0] * t + lifted[0], p[1] * t + lifted[1], p[2] * t + lifted[2]]
+        })
+        .collect();
+    let key = |p: &Vec3| {
+        (
+            ((p[0] * fwd[0] + p[1] * fwd[1] + p[2] * fwd[2]) / cell).floor() as i64,
+            ((p[0] * side[0] + p[1] * side[1] + p[2] * side[2]) / cell).floor() as i64,
+        )
+    };
+    let keys: Vec<(i64, i64)> = q.iter().map(key).collect();
+    let mut counts: HashMap<(i64, i64), usize> = HashMap::with_capacity(keys.len());
+    for &k in &keys {
+        *counts.entry(k).or_insert(0) += 1;
+    }
+    let near = |(i, j): (i64, i64)| -> usize {
+        (-1..=1).flat_map(|di| (-1..=1).map(move |dj| (i + di, j + dj))).map(|c| counts.get(&c).copied().unwrap_or(0)).sum()
+    };
+    q.into_iter().zip(keys).filter(|&(_, k)| near(k) >= min_points).map(|(p, _)| p).collect()
+}
+
 /// Short wall `distance` m ahead of the camera, 0.2 m wide, used when depth sees nothing.
 pub fn blind_points(up: Vec3, distance: f64) -> Vec<Vec3> {
     let (fwd, side) = floor_axes(up);
@@ -172,6 +222,29 @@ mod tests {
         let keep = dense_mask(&pts, UP, 0.05, 4);
         assert!(keep[..10].iter().all(|&k| k));
         assert!(!keep[10]);
+    }
+
+    #[test]
+    fn drop_points_mark_where_the_floor_ends() {
+        // Level camera 0.11 m above the floor; past 1 m the floor drops away (a stairwell): its far
+        // wall is seen 0.5 m below the floor at 1.6 m, a 10 x 6 patch of points.
+        let mut pts: Vec<Vec3> = Vec::new();
+        for i in 0..10 {
+            for k in 0..6 {
+                pts.push([-0.1 + 0.02 * i as f64, 0.61, 1.6 + 0.01 * k as f64]);
+            }
+        }
+        pts.push([2.0, 0.61, 1.6]); // a stray one elsewhere
+        pts.push([0.0, 0.11, 1.0]); // floor
+        pts.push([0.0, 0.61, 2.5]); // too far
+        let h: Vec<f64> = pts.iter().map(|&p| dot(p, UP)).collect();
+        let (fwd, side) = floor_axes(UP);
+        let d = drop_points(&pts, &h, -0.11, UP, 0.12, 2.0, 0.1, fwd, side, 0.05, 6);
+        assert_eq!(d.len(), 60);
+        // On the line of sight, where it crosses the floor plane (1.6 * 0.11 / 0.61 = 0.29 m ahead),
+        // lifted 0.1 m above the floor.
+        assert!((d[0][2] - 1.6 * 0.11 / 0.61).abs() < 1e-9 && (dot(d[0], UP) - (-0.11 + 0.1)).abs() < 1e-9, "{:?}", d[0]);
+        assert!(drop_points(&pts, &h, -0.11, UP, 0.12, 2.0, 0.1, fwd, side, 0.05, 61).is_empty());
     }
 
     #[test]

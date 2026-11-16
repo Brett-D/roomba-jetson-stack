@@ -13,7 +13,9 @@ use anyhow::Result;
 use rclrs::*;
 use ros_env::{geometry_msgs, sensor_msgs, std_msgs, tf2_msgs};
 
-use roomba_rs::floor::{blind_points, cloud_bytes, dense_mask, depth_points, estimate_floor, DepthImage, Intrinsics};
+use roomba_rs::floor::{
+    blind_points, cloud_bytes, dense_mask, depth_points, drop_points, estimate_floor, floor_axes, DepthImage, Intrinsics,
+};
 use roomba_rs::geometry::{dot, normalized, quat_conj, quat_rotate, Quat, Vec3};
 use roomba_rs::static_tf::StaticTree;
 
@@ -33,6 +35,10 @@ struct Params {
     min_cell_points: MandatoryParameter<i64>,
     cell_size: MandatoryParameter<f64>,
     blind_distance: MandatoryParameter<f64>,
+    drop_depth: MandatoryParameter<f64>,
+    drop_max_range: MandatoryParameter<f64>,
+    drop_lift: MandatoryParameter<f64>,
+    drop_min_points: MandatoryParameter<i64>,
 }
 
 #[derive(Default)]
@@ -173,6 +179,25 @@ impl State {
             self.speckles = keep.iter().filter(|&&k| !k).count();
             obstacles = obstacles.into_iter().zip(keep).filter_map(|(q, k)| k.then_some(q)).collect();
         }
+        let mut drops = 0;
+        if p.drop_depth.get() > 0.0 {
+            let (fwd, side) = floor_axes(up);
+            let d = drop_points(
+                &pts,
+                &h,
+                floor_h,
+                up,
+                p.drop_depth.get(),
+                p.drop_max_range.get(),
+                p.drop_lift.get(),
+                fwd,
+                side,
+                p.cell_size.get(),
+                p.drop_min_points.get().max(1) as usize,
+            );
+            drops = d.len();
+            obstacles.extend(d);
+        }
 
         let obs_cloud = cloud(&msg.header, &obstacles, 1);
         // Depth frames arrive ~80 ms late, so the costmap copies also pause just after a turn.
@@ -189,7 +214,7 @@ impl State {
         let status = format!(
             "{{\"camera_height_m\": {}, \"measured_height_m\": {}, \"fixed_height\": {}, \"floor_visible\": {}, \
              \"tilt_deg\": {}, \"obstacle_points\": {}, \"speckles_removed\": {}, \"floor_points\": {}, \
-             \"paused_frames\": {}, \"blind_frames\": {}}}",
+             \"paused_frames\": {}, \"blind_frames\": {}, \"drop_points\": {}}}",
             jf(round_to(-floor_h, 2)),
             est.map_or("null".to_string(), |e| jf(round_to(-e, 3))),
             fixed > 0.0,
@@ -200,6 +225,7 @@ impl State {
             floor.len(),
             self.paused_frames,
             self.blind_frames,
+            drops,
         );
         if self.last_log.map_or(true, |t| now.duration_since(t).as_secs_f64() > 5.0) {
             self.last_log = Some(now);
@@ -233,6 +259,13 @@ fn main() -> Result<()> {
         min_cell_points: i("min_cell_points", 1)?,
         cell_size: f("cell_size_m", 0.05)?,
         blind_distance: f("blind_obstacle_distance_m", 0.15)?,
+        // Drop-offs (negative obstacles): points this far below the floor plane (0 = off), within
+        // drop_max_range_m, put obstacle points drop_point_height_m above the floor where their line
+        // of sight crosses the floor plane, where at least drop_min_points of them gather.
+        drop_depth: f("drop_min_depth_m", 0.0)?,
+        drop_max_range: f("drop_max_range_m", 2.0)?,
+        drop_lift: f("drop_point_height_m", 0.1)?,
+        drop_min_points: i("drop_min_points", 6)?,
     });
     let out = Outputs {
         obs: node.create_publisher("/perception/obstacles".keep_last(2))?,
