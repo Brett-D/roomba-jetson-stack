@@ -1,0 +1,8 @@
+# Live demo of the unstuck skill (twin/learned/twin2d_live.py): 45 deg nose against the hallway's
+# south wall, the skill is called ~20 s in, the explorer starts at 45 s, the run ends after 150 s.
+name: wall_angle_live
+description: wall_angle for the live unstuck skill demo (skill first, then the explorer).
+seed: 1
+duration_s: 150
+start: {x: 0.6, y: -0.70, yaw_deg: -135}
+explorer: {autostart_s: 45}

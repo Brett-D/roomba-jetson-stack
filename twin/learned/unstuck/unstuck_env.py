@@ -535,6 +535,7 @@ class UnstuckEnv(DirectRLEnv):
         hz = hit[..., 2] - p[:, 2:3]
         obst = valid & (hz > OBST_ZMIN) & (hz < OBST_ZMAX)
         blind = valid.sum(-1) < 2
+        self.fan_dbg = (dist, valid, obst, blind)  # for viz/record_unstuck.py
         # robot-frame obstacle points for the collision monitor
         rel = hit[..., :2] - p[:, None, :2]
         rx = c[:, None] * rel[..., 0] + s[:, None] * rel[..., 1]

@@ -1,0 +1,8 @@
+# Live demo of the unstuck skill (twin/learned/twin2d_live.py): the nose_to_wall start, the skill
+# is called ~20 s in, the explorer starts at 45 s, the run ends after 150 s and the demo restarts.
+name: nose_to_wall_live
+description: nose_to_wall for the live unstuck skill demo (skill first, then the explorer).
+seed: 1
+duration_s: 150
+start: {x: 0.6, y: -0.717, yaw_deg: -90}
+explorer: {autostart_s: 45}

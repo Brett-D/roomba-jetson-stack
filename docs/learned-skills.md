@@ -352,6 +352,58 @@ PPO-fine-tuned model; they behave the same in the 2D env.)
   marks, real light-bumper curves), add wheel suspension, and fine-tune on stuck episodes recorded by
   the twin and the robot.
 
+## 6. Watch it
+
+Videos (1920 x 1080, H.264; not in git, rendered into `E:\twin\videos\learned\`):
+
+- `unstuck_classical_vs_learned.mp4` (~48 s): two 3 x 3 grids, today's recovery (left) vs the learned
+  skill (right) on the same held-out stuck situations: round 1 nine spots cut from the real floor plans
+  (nose to a wall, nose to furniture, railing + stair drop, corner, door jambs), round 2 nine generated
+  ones (bump-mark rings, wedged under furniture, chair legs, narrow gap, thresholds, door leaf,
+  clutter, nose to a wall). Top view of the real Isaac Lab (PhysX) rollouts, replayed in real time:
+  obstacles by type, robot footprint / heading / camera, the depth fan (hits and floor returns), the
+  six light-bumper rays, bumper and camera-top hits, the costmap's lethal cells, the classical
+  controller's current recovery or the policy's command, outcome labels and a clock; then the
+  held-out tables. The 18 situations were chosen to show the requested cases with an outcome mix close
+  to the full evaluation (classical 6/18 freed, learned 14/18; the learned policy fails at chair legs,
+  in clutter, at one door jamb and against one piece of furniture).
+  Isaac Lab's RTX renderer is not part of the kit-less OVPhysX install, and a top view would hide the
+  robot under furniture anyway, so the states are drawn with matplotlib.
+- `explore_rule_vs_learned.mp4` (~54 s): the explorer's rule vs the learned ranker side by side on
+  the real upstairs floor plan and on a held-out generated house (same start, static doors): the map
+  revealing along the drive, frontiers, the candidates with their rule score or learned probability,
+  the chosen goal and its path, the drive home, coverage-vs-time inset, then the evaluation table.
+  These two runs: upstairs 532 s / 74 m (rule) vs 502 s / 66 m (learned), both 91 % coverage;
+  generated house 797 s / 98 m vs 700 s / 85 m, both 99 %. (The recorder applies sensing pose by pose,
+  so its numbers differ slightly from the batched evaluation.)
+
+```powershell
+. twin\learned\env.ps1; cd twin\learned\viz
+python record_unstuck.py --controller classical --out E:/twin/learned/runs/video/classical.npz
+python record_unstuck.py --controller policy --out E:/twin/learned/runs/video/policy.npz
+python render_unstuck.py --out E:/twin/videos/learned/unstuck_classical_vs_learned.mp4
+python record_explore.py --layout plan_upstairs --yaw 0.607 --out E:/twin/learned/runs/video/explore_up1.pkl
+python record_explore.py --layout heldout:2 --yaw -1.327 --out E:/twin/learned/runs/video/explore_h2.pkl
+python render_explore.py --runs E:/twin/learned/runs/video/explore_up1.pkl E:/twin/learned/runs/video/explore_h2.pkl --seconds 21 16
+```
+
+Live, in the 2D twin with the real stack (`twin/learned/twin2d_live.py`): loops
+`twin/learned/twin2d/nose_to_wall_live.yaml` and `wall_angle_live.yaml` (robot nose to the hallway
+wall; `unstuck_skill` is called 20 s after the start, the explorer starts at 45 s, the run ends at
+150 s and the next one starts), with the web app and Foxglove on fixed ports and a status file. If the
+skill node stops answering (the executor stall above) the loop restarts it and calls again, and says
+so in the status file. With the light-bumper calibration the first live runs ended SUCCEEDED in
+2.2-2.5 s with 0 bumps (4 of 4); before it, the same calls ran into the 15 s limit while the robot kept
+backing away, because the carpet share of the side light bumpers read as an obstacle 6 cm away.
+
+```bash
+source /root/learned_ws/learned_env.sh
+python3 twin/learned/twin2d_live.py --ws /root/learned_ws --out /root/twin2d_data/runs/learned_live \
+    --domain 40 --web_port 18099 --foxglove_port 18767 \
+    --status /mnt/e/twin/learned_NOW.txt --password_file /mnt/e/twin/learned_watch_password.txt
+bash twin/learned/twin2d_live_stop.sh            # stops it and everything it started
+```
+
 ## Files
 
 | | |
@@ -359,6 +411,8 @@ PPO-fine-tuned model; they behave the same in the 2D env.)
 | `twin/learned/unstuck/` | robot USD, tile generator, house tiles, Isaac Lab env, classical baseline, PPO training, evaluation, ONNX export |
 | `twin/learned/explore/` | layouts (procedural + the real floor plans), GPU env, model, PPO and CEM training, evaluation, ONNX export |
 | `twin/learned/plot_curves.py` | the plots in `docs/learned-skills/` |
-| `twin/learned/twin2d_ab.py`, `twin/learned/twin2d/` | closed-loop A/B runs in the 2D twin and the two late-explorer scenarios |
+| `twin/learned/twin2d_ab.py`, `twin/learned/twin2d/` | closed-loop A/B runs in the 2D twin, the late-explorer and live-demo scenarios |
+| `twin/learned/twin2d_live.py`, `twin2d_live_stop.sh` | the looping live demo (web app + Foxglove) and its stop script |
+| `twin/learned/viz/` | rollout recorders and the video renderers (section 6) |
 | `src/roomba_skills_msgs/` | `action/Unstuck.action` |
 | `src/roomba_rs/src/learned/`, `src/bin/unstuck_skill.rs`, `models/` | Rust inference, node, models + test vectors |
