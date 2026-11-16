@@ -8,7 +8,8 @@
 //!             /vslam_filter/status, ~/command ("start" | "stop" | "home"), /tf, /tf_static
 //! Publishes:  ~/status (JSON, transient local), /perception/ignore_zones/command, ~/markers (how it
 //!             decides where to go; transient local, only while someone listens)
-//! Uses:       navigate_to_pose action, /controller_server/get_parameters|set_parameters
+//! Uses:       navigate_to_pose action, /controller_server/get_parameters|set_parameters,
+//!             /unstuck_skill action (only with `unstuck_skill: true` and the `learned` build feature)
 
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
@@ -27,6 +28,8 @@ use roomba_rs::tf_buffer::TfBuffer;
 use roomba_rs::tf_listener::{ros_time, HasTfBuffer, WorkerTfListener};
 use roomba_rs::watchdog::Level;
 use roomba_rs::zones::{MarkerSpec, DELETEALL};
+#[cfg(feature = "learned")]
+use ros_env::roomba_skills_msgs::action::Unstuck;
 
 struct RosIo {
     node: Node,
@@ -45,6 +48,11 @@ struct RosIo {
     pub_zone: Publisher<std_msgs::msg::String>,
     pub_markers: Publisher<visualization_msgs::msg::MarkerArray>,
     cliff_timers: Vec<WorkerTimer<State>>,
+    /// The learned unstuck skill (`unstuck_skill: true`) and its accepted calls by sequence number.
+    #[cfg(feature = "learned")]
+    unstuck: Option<ActionClient<Unstuck>>,
+    #[cfg(feature = "learned")]
+    unstuck_calls: HashMap<u64, CancellationClient<Unstuck>>,
 }
 
 impl RosIo {
@@ -243,6 +251,65 @@ impl Io for RosIo {
         self.pub_markers.get_subscription_count().unwrap_or(0) > 0
     }
 
+    #[cfg(feature = "learned")]
+    fn unstuck_ready(&mut self) -> bool {
+        self.unstuck.as_ref().is_some_and(|c| c.server_is_available().unwrap_or(false))
+    }
+
+    #[cfg(feature = "learned")]
+    fn send_unstuck(&mut self, seq: u64, target: Option<(f64, f64)>, time_limit: f64) {
+        let Some(client) = self.unstuck.as_ref() else { return };
+        let mut goal = ros_env::roomba_skills_msgs::action::Unstuck_Goal::default();
+        if let Some((x, y)) = target {
+            goal.goal.header.frame_id = "map".into();
+            goal.goal.header.stamp = ros_time(self.node.get_clock().now().nsec);
+            goal.goal.pose.position.x = x;
+            goal.goal.pose.position.y = y;
+            goal.goal.pose.orientation.w = 1.0;
+        }
+        goal.time_limit_s = time_limit as f32;
+        let requested = match client.try_request_goal(goal) {
+            Ok(r) => r,
+            Err(e) => {
+                // Given up on by the explorer's call timeout, like a call that is never answered.
+                log!(self.node.error(), "Could not call the unstuck skill: {e}");
+                return;
+            }
+        };
+        let worker = self.worker.get().cloned();
+        let _ = self.node.commands().run(async move {
+            let Some(worker) = worker else { return };
+            match requested.await {
+                None => {
+                    let _ = worker.run(move |s: &mut State| s.core.on_unstuck_response(seq, false, &mut s.io));
+                }
+                Some(client) => {
+                    let GoalClient { result, cancellation, .. } = client;
+                    let _ = worker.run(move |s: &mut State| {
+                        s.io.unstuck_calls.insert(seq, cancellation);
+                        s.core.on_unstuck_response(seq, true, &mut s.io);
+                    });
+                    let (status, r) = result.await;
+                    let free = status as i8 == roomba_rs::explorer::STATUS_SUCCEEDED && r.outcome == 0;
+                    let detail = format!("{}, {:.1} s, {} bumps", r.message, r.elapsed_s, r.bumps);
+                    let _ = worker.run(move |s: &mut State| {
+                        s.io.unstuck_calls.remove(&seq);
+                        s.core.on_unstuck_result(seq, free, &detail, &mut s.io);
+                    });
+                }
+            }
+        });
+    }
+
+    #[cfg(feature = "learned")]
+    fn cancel_unstuck(&mut self, seq: u64) {
+        if let Some(c) = self.unstuck_calls.get(&seq) {
+            if let Err(e) = c.try_cancel() {
+                log!(self.node.warn(), "Could not cancel the unstuck skill: {e}");
+            }
+        }
+    }
+
     fn markers(&mut self, frame: &str, specs: &[MarkerSpec]) {
         let ns = self.node.get_clock().now().nsec;
         let header = std_msgs::msg::Header {
@@ -361,10 +428,18 @@ fn main() -> Result<()> {
         pub_zone: node.create_publisher("/perception/ignore_zones/command".keep_last(10))?,
         pub_markers: node.create_publisher("~/markers".qos(latched()))?,
         cliff_timers: Vec::new(),
+        #[cfg(feature = "learned")]
+        unstuck: if params.unstuck_skill { Some(node.create_action_client::<Unstuck>("/unstuck_skill")?) } else { None },
+        #[cfg(feature = "learned")]
+        unstuck_calls: HashMap::new(),
     };
     let mut core = Explorer::new(params, &mut io);
     if core.params().goal_ranking == "learned" {
         attach_ranker(&mut core, &node);
+    }
+    #[cfg(not(feature = "learned"))]
+    if core.params().unstuck_skill {
+        log!(node.warn(), "unstuck_skill needs roomba_rs built with --features learned; exploring without it");
     }
     let wants_sensors = core.wants_sensors();
     let worker = node.create_worker::<State>(State { core, io });

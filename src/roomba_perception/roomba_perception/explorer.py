@@ -333,6 +333,12 @@ class Explorer(Node):
         if p('goal_ranking', 'rule').value != 'rule':
             self.get_logger().warn('goal_ranking is only supported by the Rust explorer; using the rule')
         p('goal_ranking_model', '')
+        # So is the learned unstuck skill (unstuck_skill: true).
+        if p('unstuck_skill', False).value:
+            self.get_logger().warn('unstuck_skill is only supported by the Rust explorer; exploring without it')
+        for name, default in (('unstuck_time_limit_s', 15.0), ('unstuck_call_timeout_s', 25.0),
+                              ('unstuck_no_progress_s', 30.0), ('unstuck_clearance_m', 0.30)):
+            p(name, default)
         self.reached_at_retry = -1
         self.goal_bumps = 0
         self.bumped = False

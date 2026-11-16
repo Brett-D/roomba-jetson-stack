@@ -645,6 +645,14 @@ pub struct Params {
     /// candidates; needs the `learned` build feature and `goal_ranking_model`).
     pub goal_ranking: String,
     pub goal_ranking_model: String,
+    /// Learned unstuck skill (docs/learned-skills.md; off by default): when the robot is stuck on a
+    /// frontier goal, call the `unstuck_skill` action, then try that goal once more; when the skill
+    /// is off, busy, missing or fails, the explorer does what it does without it.
+    pub unstuck_skill: bool,
+    pub unstuck_time_limit: f64,
+    pub unstuck_call_timeout: f64,
+    pub unstuck_no_progress: f64,
+    pub unstuck_clearance: f64,
 }
 
 impl Params {
@@ -711,6 +719,14 @@ impl Params {
             retry_failed: p.boolean("retry_failed_before_finish", true)?,
             goal_ranking: p.string("goal_ranking", "rule")?,
             goal_ranking_model: p.string("goal_ranking_model", "")?,
+            unstuck_skill: p.boolean("unstuck_skill", false)?,
+            unstuck_time_limit: p.float("unstuck_time_limit_s", 15.0)?,
+            // the caller's own limit: a lost answer counts as a failure
+            unstuck_call_timeout: p.float("unstuck_call_timeout_s", 25.0)?,
+            // stuck = an accepted goal and the robot moved < 0.2 m in this long (0 = off)
+            unstuck_no_progress: p.float("unstuck_no_progress_s", 30.0)?,
+            // a goal Nav2 gave up on counts as stuck when a lethal cell is this close to the robot centre
+            unstuck_clearance: p.float("unstuck_clearance_m", 0.30)?,
         })
     }
 }
@@ -817,6 +833,16 @@ pub trait Io {
     fn markers_wanted(&mut self) -> bool;
     /// ~/markers: a DELETEALL then `markers`, in `frame`, stamped by the node.
     fn markers(&mut self, frame: &str, markers: &[MarkerSpec]);
+    /// Whether the learned unstuck skill's action server is up (`unstuck_skill: true`; only the Rust
+    /// node built with the `learned` feature has a client).
+    fn unstuck_ready(&mut self) -> bool {
+        false
+    }
+    /// Call the unstuck skill (the goal it was driving to, map frame; time limit); answer with
+    /// [`Explorer::on_unstuck_response`] and, if accepted, [`Explorer::on_unstuck_result`].
+    fn send_unstuck(&mut self, _seq: u64, _goal: Option<(f64, f64)>, _time_limit: f64) {}
+    /// Cancel the accepted unstuck call `seq`.
+    fn cancel_unstuck(&mut self, _seq: u64) {}
 }
 
 /// What the last frontier search saw, for ~/markers.
@@ -867,6 +893,18 @@ enum GoalKind {
     /// A closer look at a frontier it can't reach.
     Peek,
     Home,
+}
+
+/// A call of the learned unstuck skill in progress.
+#[derive(Clone, Copy, Debug)]
+struct UnstuckCall {
+    seq: u64,
+    sent: f64,
+    accepted: bool,
+    /// The goal to try again afterwards.
+    retry: Option<Goal>,
+    /// On failure send that goal again too (Nav2 was still working on it), else skip it.
+    give_back: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -945,6 +983,13 @@ pub struct Explorer {
     markers_last: Option<Vec<MarkerSpec>>,
     ranker: Option<Box<dyn GoalRanker>>,
     started: f64,
+    // unstuck_skill: the call in progress, the goal it was called for (once per goal), the
+    // no-progress watch (x, y, since) of the goal being driven to.
+    unstuck: Option<UnstuckCall>,
+    unstuck_seq: u64,
+    unstuck_goal: Option<(f64, f64)>,
+    progress: Option<(f64, f64, f64)>,
+    unstuck_missing_logged: bool,
 }
 
 const WHEEL_DROP: usize = 4;
@@ -995,6 +1040,11 @@ impl Explorer {
             markers_last: None,
             ranker: None,
             started: 0.0,
+            unstuck: None,
+            unstuck_seq: 0,
+            unstuck_goal: None,
+            progress: None,
+            unstuck_missing_logged: false,
         };
         e.publish_status(io);
         e
@@ -1076,6 +1126,7 @@ impl Explorer {
             self.failed += 1;
             self.cancel_goal(io);
             self.message = "Kept bumping into something the camera can't see: trying another area".into();
+            self.try_unstuck(None, false, "kept bumping", io);
         }
     }
 
@@ -1234,6 +1285,7 @@ impl Explorer {
 
     fn stop(&mut self, why: String, io: &mut impl Io) {
         self.resume_after_home = false;
+        self.cancel_unstuck(io);
         self.cancel_goal(io);
         self.cancel_spin(io);
         self.slow_turns(false, io);
@@ -1243,6 +1295,7 @@ impl Explorer {
 
     fn go_home(&mut self, why: String, resume: bool, io: &mut impl Io) {
         self.resume_after_home = resume;
+        self.cancel_unstuck(io);
         self.cancel_spin(io);
         let Some(home) = self.home.filter(|_| self.p.return_home) else {
             self.finish("Exploration finished".into(), io);
@@ -1254,6 +1307,7 @@ impl Explorer {
     }
 
     fn finish(&mut self, why: String, io: &mut impl Io) {
+        self.cancel_unstuck(io);
         self.cancel_spin(io);
         self.slow_turns(false, io);
         self.set(State::Done, why.clone(), io);
@@ -1271,6 +1325,13 @@ impl Explorer {
     /// The 1 s timer.
     pub fn tick(&mut self, io: &mut impl Io) {
         let now = io.now();
+        if let Some(call) = self.unstuck.filter(|c| now - c.sent > self.p.unstuck_call_timeout) {
+            io.log(Level::Warn, format!("The unstuck skill did not finish within {:.0} s", self.p.unstuck_call_timeout));
+            if call.accepted {
+                io.cancel_unstuck(call.seq);
+            }
+            self.unstuck_done(false, "no answer", io);
+        }
         let spin_overdue = self.spin.is_some_and(|(_, sent, accepted)| {
             now - sent > if accepted { self.p.look_timeout + 5.0 } else { self.p.response_timeout }
         });
@@ -1290,6 +1351,7 @@ impl Explorer {
             self.look_done();
         } else if self.state == State::Exploring {
             let timeout = self.p.goal_timeout;
+            let stalled = if self.watch_progress(now, io) { self.goal } else { None };
             if let Some(b) = self.battery.filter(|&b| b < self.p.low_battery) {
                 self.go_home(format!("Battery at {:.0}%: returning to the start point", b * 100.0), false, io);
             } else if !self.tracking_ok {
@@ -1297,12 +1359,17 @@ impl Explorer {
             } else if self.message == PAUSED {
                 // Tracking is back: say what it is doing again (it kept the goal meanwhile).
                 self.message = if self.goal.is_some() { self.goal_message.clone() } else { "Looking for unmapped areas…".into() };
+            } else if stalled.is_some_and(|g| {
+                let why = format!("no progress for {:.0} s", self.p.unstuck_no_progress);
+                self.try_unstuck(Some(g), true, &why, io)
+            }) {
+                // the unstuck skill drives now
             } else if let Some(goal) = self.goal.filter(|g| now - g.sent > timeout) {
                 io.log(Level::Warn, "Frontier goal timed out; skipping it".into());
                 self.blacklist(goal.x, goal.y, true);
                 self.failed += 1;
                 self.cancel_goal(io);
-            } else if self.goal.is_none() && self.sending.is_none() && self.spin.is_none() {
+            } else if self.goal.is_none() && self.sending.is_none() && self.spin.is_none() && self.unstuck.is_none() {
                 self.next_frontier(io);
             }
         } else if self.state == State::Returning
@@ -1821,6 +1888,9 @@ impl Explorer {
                 self.visited.push((g.x, g.y));
             }
         } else if let Some(g) = goal.filter(|_| !peek) {
+            if self.p.unstuck_skill && self.boxed_in(io) && self.try_unstuck(Some(g), false, "navigation gave up next to an obstacle", io) {
+                return;
+            }
             // Unreachable or no progress: skip this spot (until the map around it opens up).
             self.failed += 1;
             self.blacklist(g.x, g.y, true);
@@ -1852,6 +1922,144 @@ impl Explorer {
         self.finish(msg, io);
     }
 
+    // ---- learned unstuck skill (unstuck_skill: true) ----
+
+    /// Ask the unstuck skill to free the robot. `retry`: the goal to try again afterwards;
+    /// `give_back`: on failure send it again too (Nav2 was still trying), else skip it as without
+    /// the skill. False (nothing done) when the skill is off, busy, not available or was already
+    /// called for this goal: the caller then carries on as without it.
+    fn try_unstuck(&mut self, retry: Option<Goal>, give_back: bool, why: &str, io: &mut impl Io) -> bool {
+        if !self.p.unstuck_skill || self.unstuck.is_some() || self.state != State::Exploring {
+            return false;
+        }
+        if let (Some(g), Some(u)) = (retry, self.unstuck_goal) {
+            if py_hypot(g.x - u.0, g.y - u.1) < 0.05 {
+                return false;
+            }
+        }
+        if !io.unstuck_ready() {
+            if !self.unstuck_missing_logged {
+                self.unstuck_missing_logged = true;
+                io.log(Level::Warn, "unstuck_skill is on but its action server is not available; carrying on without it".into());
+            }
+            return false;
+        }
+        self.cancel_goal(io);
+        self.unstuck_seq += 1;
+        let seq = self.unstuck_seq;
+        self.unstuck = Some(UnstuckCall { seq, sent: io.now(), accepted: false, retry, give_back });
+        self.unstuck_goal = retry.map(|g| (g.x, g.y));
+        self.progress = None;
+        self.message = format!("Stuck ({why}): trying the learned unstuck skill…");
+        io.log(Level::Info, format!("Stuck ({why}): calling the unstuck skill"));
+        io.send_unstuck(seq, retry.map(|g| (g.x, g.y)), self.p.unstuck_time_limit);
+        true
+    }
+
+    /// The unstuck skill's answer to call `seq`.
+    pub fn on_unstuck_response(&mut self, seq: u64, accepted: bool, io: &mut impl Io) {
+        match self.unstuck.as_mut() {
+            Some(c) if c.seq == seq => {
+                if accepted {
+                    c.accepted = true;
+                } else {
+                    self.unstuck_done(false, "rejected", io);
+                }
+            }
+            _ => {
+                if accepted {
+                    io.cancel_unstuck(seq); // given up on meanwhile
+                }
+            }
+        }
+    }
+
+    /// The unstuck skill's result for call `seq`: whether the robot is free, and its message.
+    pub fn on_unstuck_result(&mut self, seq: u64, free: bool, detail: &str, io: &mut impl Io) {
+        if self.unstuck.is_some_and(|c| c.seq == seq) {
+            self.unstuck_done(free, detail, io);
+        }
+    }
+
+    fn unstuck_done(&mut self, free: bool, detail: &str, io: &mut impl Io) {
+        let Some(call) = self.unstuck.take() else { return };
+        if free {
+            io.log(Level::Info, format!("Unstuck skill: free ({detail})"));
+        } else {
+            io.log(Level::Warn, format!("Unstuck skill did not free the robot ({detail})"));
+        }
+        if self.state != State::Exploring {
+            return;
+        }
+        match call.retry {
+            Some(g) if free || call.give_back => {
+                self.message = if free {
+                    "Free again: trying that area once more".into()
+                } else {
+                    "Unstuck skill failed: back to navigation's own recoveries".into()
+                };
+                self.send_goal(g.x, g.y, Some(g.yaw), g.kind, io);
+            }
+            Some(g) => {
+                // as without the skill: skip this spot
+                self.failed += 1;
+                self.blacklist(g.x, g.y, true);
+            }
+            None => {}
+        }
+    }
+
+    fn cancel_unstuck(&mut self, io: &mut impl Io) {
+        if let Some(c) = self.unstuck.take() {
+            if c.accepted {
+                io.cancel_unstuck(c.seq);
+            }
+        }
+    }
+
+    /// unstuck_skill: whether the accepted goal being driven to has made no progress (0.2 m) for
+    /// unstuck_no_progress_s.
+    fn watch_progress(&mut self, now: f64, io: &mut impl Io) -> bool {
+        if !self.p.unstuck_skill || self.p.unstuck_no_progress <= 0.0 || self.unstuck.is_some() || self.goal_handle.is_none() || !self.tracking_ok {
+            self.progress = None;
+            return false;
+        }
+        let Some((x, y, _)) = self.pose(io) else { return false };
+        match self.progress {
+            Some((px, py, since)) if py_hypot(x - px, y - py) < 0.2 => now - since > self.p.unstuck_no_progress,
+            _ => {
+                self.progress = Some((x, y, now));
+                false
+            }
+        }
+    }
+
+    /// unstuck_skill: a lethal cell of the global costmap within unstuck_clearance_m of the robot's
+    /// centre (it touches something, or a keep-out mark).
+    fn boxed_in(&self, io: &mut impl Io) -> bool {
+        let (Some(grid), Some(p)) = (self.grid.as_ref(), self.pose(io)) else { return false };
+        let res = grid.resolution as f64;
+        let (w, h) = (grid.width as i64, grid.height as i64);
+        if res <= 0.0 || grid.data.len() as i64 != w * h {
+            return false;
+        }
+        let cx = ((p.0 - grid.origin_x) / res).floor() as i64;
+        let cy = ((p.1 - grid.origin_y) / res).floor() as i64;
+        let r = (self.p.unstuck_clearance / res).ceil() as i64;
+        for dy in -r..=r {
+            for dx in -r..=r {
+                let (x, y) = (cx + dx, cy + dy);
+                if x < 0 || y < 0 || x >= w || y >= h || grid.data[(y * w + x) as usize] < 100 {
+                    continue;
+                }
+                if ((dx * dx + dy * dy) as f64).sqrt() * res < self.p.unstuck_clearance {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     fn cancel_goal(&mut self, io: &mut impl Io) {
         self.goal_seq += 1;
         let handle = self.goal_handle.take();
@@ -1864,6 +2072,7 @@ impl Explorer {
     /// On shutdown: cancel what the robot is doing for the explorer (goal, look-around turn), as the
     /// Python node does on Ctrl-C.
     pub fn shutdown(&mut self, io: &mut impl Io) {
+        self.cancel_unstuck(io);
         self.cancel_goal(io);
         self.cancel_spin(io);
     }
@@ -2291,6 +2500,9 @@ mod tests {
         spin_cancels: Vec<u64>,
         want_markers: bool,
         markers: Vec<Vec<MarkerSpec>>,
+        unstuck_server: bool,
+        unstuck_calls: Vec<(u64, Option<(f64, f64)>)>,
+        unstuck_cancels: Vec<u64>,
     }
 
     impl Io for TestIo {
@@ -2346,6 +2558,15 @@ mod tests {
             assert_eq!(frame, "map");
             self.markers.push(markers.to_vec());
         }
+        fn unstuck_ready(&mut self) -> bool {
+            self.unstuck_server
+        }
+        fn send_unstuck(&mut self, seq: u64, goal: Option<(f64, f64)>, _: f64) {
+            self.unstuck_calls.push((seq, goal));
+        }
+        fn cancel_unstuck(&mut self, seq: u64) {
+            self.unstuck_cancels.push(seq);
+        }
     }
 
     impl TestIo {
@@ -2385,6 +2606,94 @@ mod tests {
         e.on_mode("full", io);
         io.pose = (0.35, 1.05);
         e
+    }
+
+    /// Exploring the open room with the learned unstuck skill on (`unstuck_skill: true`) or off.
+    fn exploring_unstuck(io: &mut TestIo, on: bool) -> Explorer {
+        let mut p = Params::load(&mut crate::watchdog::Defaults).unwrap();
+        p.look_steps = 0;
+        p.unstuck_skill = on;
+        let mut e = open_room(io, p);
+        io.t = 1.0;
+        e.on_command("start", io);
+        e.tick(io);
+        assert_eq!(io.goals.len(), 1);
+        e.on_goal_response(io.goals[0].seq, true, io);
+        e
+    }
+
+    #[test]
+    fn unstuck_skill_frees_the_robot_then_retries_the_goal_once() {
+        // Off (the default): Nav2 gives up next to the wall, the spot is skipped, nothing is called.
+        let mut io = TestIo { unstuck_server: true, ..Default::default() };
+        let mut e = exploring_unstuck(&mut io, false);
+        io.pose = (0.15, 1.05); // 0.1 m from the lethal wall cells of column 0
+        e.on_result(io.goals[0].seq, 6, &mut io);
+        io.ticks(&mut e, 2, 2);
+        assert!(io.unstuck_calls.is_empty());
+        assert!(io.status.contains("\"failed\": 1"), "{}", io.status);
+
+        // On: the skill is called with that goal; no new goal while it drives; free -> same goal again.
+        let mut io = TestIo { unstuck_server: true, ..Default::default() };
+        let mut e = exploring_unstuck(&mut io, true);
+        let g = io.goals[0].clone();
+        io.pose = (0.15, 1.05);
+        e.on_result(g.seq, 6, &mut io);
+        assert_eq!(io.unstuck_calls, vec![(1, Some((g.x, g.y)))]);
+        io.ticks(&mut e, 2, 4);
+        assert_eq!(io.goals.len(), 1);
+        e.on_unstuck_response(1, true, &mut io);
+        e.on_unstuck_result(1, true, "free", &mut io);
+        assert_eq!(io.goals.len(), 2);
+        assert_eq!((io.goals[1].x, io.goals[1].y), (g.x, g.y));
+        io.ticks(&mut e, 5, 5);
+        assert!(io.status.contains("\"failed\": 0"), "{}", io.status);
+        // The same goal failing again: no second call, skipped as without the skill.
+        e.on_goal_response(io.goals[1].seq, true, &mut io);
+        e.on_result(io.goals[1].seq, 6, &mut io);
+        io.ticks(&mut e, 6, 6);
+        assert_eq!(io.unstuck_calls.len(), 1);
+        assert!(io.status.contains("\"failed\": 1"), "{}", io.status);
+
+        // Nav2 gives up in open space (unreachable, not stuck): skipped, no call.
+        let mut io = TestIo { unstuck_server: true, ..Default::default() };
+        let mut e = exploring_unstuck(&mut io, true);
+        e.on_result(io.goals[0].seq, 6, &mut io);
+        assert!(io.unstuck_calls.is_empty());
+
+        // On but the action server is missing: carries on without it (one warning).
+        let mut io = TestIo::default();
+        let mut e = exploring_unstuck(&mut io, true);
+        io.pose = (0.15, 1.05);
+        e.on_result(io.goals[0].seq, 6, &mut io);
+        assert!(io.unstuck_calls.is_empty());
+        assert_eq!(io.warnings("action server is not available"), 1);
+    }
+
+    #[test]
+    fn unstuck_skill_on_no_progress_and_its_timeout() {
+        // The robot doesn't move for 30 s on an accepted goal: the goal is cancelled and the skill
+        // called; it never answers: after 25 s the goal goes back to Nav2 (classical recoveries).
+        let mut io = TestIo { unstuck_server: true, ..Default::default() };
+        let mut e = exploring_unstuck(&mut io, true);
+        let g = io.goals[0].clone();
+        io.ticks(&mut e, 2, 32);
+        assert!(io.unstuck_calls.is_empty());
+        io.ticks(&mut e, 33, 33);
+        assert_eq!(io.unstuck_calls, vec![(1, Some((g.x, g.y)))]);
+        assert_eq!(io.cancels, vec![g.seq]);
+        e.on_unstuck_response(1, true, &mut io);
+        io.ticks(&mut e, 34, 58);
+        assert_eq!(io.goals.len(), 1);
+        io.ticks(&mut e, 59, 59);
+        assert_eq!(io.unstuck_cancels, vec![1]);
+        assert_eq!(io.goals.len(), 2);
+        assert_eq!((io.goals[1].x, io.goals[1].y), (g.x, g.y));
+        assert_eq!(io.warnings("did not finish within 25 s"), 1);
+        // Still stuck on it: no second call for the same goal.
+        e.on_goal_response(io.goals[1].seq, true, &mut io);
+        io.ticks(&mut e, 60, 100);
+        assert_eq!(io.unstuck_calls.len(), 1);
     }
 
     /// Answers the last look-around turn: accepted, then finished with `status`.

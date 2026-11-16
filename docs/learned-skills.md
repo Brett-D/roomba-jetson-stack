@@ -1,8 +1,9 @@
 # Learned navigation skills (phase 1: simulation)
 
 Two learned skills for the explorer's weakest moments, trained and evaluated in simulation against
-the classical logic, with the robot-side inference prepared but **not deployed** (nothing here is
-started by a launch file; the explorer's default behaviour is unchanged):
+the classical logic, with the robot-side inference prepared but **not deployed** (both are off by default:
+`-DLEARNED_SKILLS=ON` builds them, the launch arguments `unstuck_skill:=true` and
+`goal_ranking:=learned` turn them on; the explorer's default behaviour is unchanged):
 
 1. **Unstuck**: a small policy that drives the robot out of a stuck situation (nose to a wall inside
    the camera's 0.3 m blind zone, wedged in a corner or between chair legs, under an overhang at camera
@@ -300,10 +301,23 @@ more than the network). Model files:
   robot and exits the node if the step stops running anyway, so the launch file can respawn it;
   callers time-limit the call and treat a missing result as a failure.
 
-Intended caller (not wired yet, to keep the explorer untouched while `twinfix` reworks it): when Nav2
-aborts a frontier goal (or the explorer's goal timeout / bumps_per_goal fires), call `/unstuck_skill`
-with that goal; on SUCCEEDED resend the goal once, otherwise blacklist as now. nav_coach could call it
-from its stuck detector the same way.
+### Explorer option (`unstuck_skill`)
+
+The Rust explorer calls the skill when it is stuck on a frontier goal (`unstuck_skill: true`, default
+false; client only in the `learned` build; the Python explorer accepts the parameters and warns):
+
+| trigger | before the call | afterwards: free | afterwards: not free / no answer |
+|---|---|---|---|
+| Nav2 aborts the goal (its recoveries failed) **and** a lethal costmap cell is within `unstuck_clearance_m` (0.30 m) of the robot centre | - | the same goal once more | skip the spot (blacklist), as without the skill |
+| the accepted goal made no progress (0.2 m) for `unstuck_no_progress_s` (30 s) | cancel the Nav2 goal | the same goal once more | give the goal back to Nav2 (its own recoveries, then its abort / the goal timeout as without the skill) |
+| `bumps_per_goal` bumps on the way (the spot is skipped, as without the skill) | - | next frontier | next frontier |
+
+At most one call per goal; no new frontier is chosen while the skill drives; a call that hasn't
+finished after `unstuck_call_timeout_s` (25 s; the skill's own limit is `unstuck_time_limit_s`, 15 s) is
+cancelled and counts as a failure; stop / go home / finish cancel it. Nav2 aborting a goal in open
+space (unreachable, not stuck) is handled as before. Launch: `unstuck_skill:=true` in `nav.launch.py`
+(and `twin2d.launch.py`) starts `unstuck_skill` (respawned if its watchdog fires) and sets the explorer
+parameter; `goal_ranking:=learned` sets the ranker and its model path. Both default off.
 
 ### Explorer option (`goal_ranking`)
 
@@ -313,8 +327,7 @@ candidate list is not even built). With `learned` the explorer still runs `front
 filters (blacklist, visited, minimum distance, bumps per goal, retries, finish logic) and only hands the
 surviving candidates, in rule order, to the ranker, which returns one of them; on any error the rule's
 choice is used. The Python explorer accepts the parameters and warns that only the Rust explorer
-implements `learned`. The diff in `explorer.rs` is ~60 lines (a trait, two params, a `Vec` of
-candidates and the call), so it should rebase onto `twinfix` easily.
+implements `learned`.
 
 ## 4. First closed-loop runs in the 2D twin (WSL, real stack)
 

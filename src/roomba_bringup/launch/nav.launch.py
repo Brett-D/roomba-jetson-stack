@@ -39,7 +39,14 @@ def generate_launch_description():
         DeclareLaunchArgument('robot_mode', default_value='false',
                               description='true: the robot drives itself (status wording instead of '
                                           'instructions for a person)'),
+        # Learned navigation skills (docs/learned-skills.md), off by default; need roomba_rs built with
+        # -DLEARNED_SKILLS=ON and the Rust explorer.
+        DeclareLaunchArgument('unstuck_skill', default_value='false',
+                              description='true: run unstuck_skill and let the explorer call it when stuck'),
+        DeclareLaunchArgument('goal_ranking', default_value='rule',
+                              description="explorer goal choice: 'rule' or 'learned' (frontier ranker)"),
     ]
+    models = PathJoinSubstitution([FindPackageShare('roomba_rs'), 'models'])
 
     nodes = [
         # Rust port: same topics, parameters and output, ~1/7 of the CPU (A/B on a recorded drive).
@@ -135,7 +142,16 @@ def generate_launch_description():
              parameters=[{'base_frame': LaunchConfiguration('base_frame'), 'low_battery_fraction': 0.2,
                           'bump_mark_width_m': 0.5, 'bump_light_signal': 200, 'mark_clear_radius_m': 0.28,
                           'mark_soft_band_m': 0.22, 'look_around_steps': 4, 'look_around_step_deg': 90.0,
-                          'frontier_split_m': 2.0}],
+                          'frontier_split_m': 2.0,
+                          'unstuck_skill': ParameterValue(LaunchConfiguration('unstuck_skill'), value_type=bool),
+                          'goal_ranking': LaunchConfiguration('goal_ranking'),
+                          'goal_ranking_model': PathJoinSubstitution([models, 'explore_ranker.onnx'])}],
              condition=IfCondition(LaunchConfiguration('robot_mode'))),
+        # Learned unstuck skill (opt-in): drives through cmd_vel_nav, so the smoother, the collision
+        # monitor and the driver's reflexes stay in charge; respawned if its watchdog fires.
+        Node(package='roomba_rs', executable='unstuck_skill', name='unstuck_skill', output='screen',
+             respawn=True, respawn_delay=2.0,
+             parameters=[{'model': PathJoinSubstitution([models, 'unstuck_policy.onnx'])}],
+             condition=IfCondition(LaunchConfiguration('unstuck_skill'))),
     ]
     return LaunchDescription(args + nodes)

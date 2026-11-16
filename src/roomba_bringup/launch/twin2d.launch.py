@@ -122,6 +122,8 @@ def _setup(context):
                 ('base_frame', 'base_link'),
                 ('robot_mode', 'true'),
                 ('rust_nodes', lc('rust_nodes')),
+                ('unstuck_skill', lc('unstuck_skill')),
+                ('goal_ranking', lc('goal_ranking')),
                 ('fallback_camera_height_m', floor_height),
                 ('fixed_camera_height_m', floor_height),
             ]))
@@ -166,6 +168,10 @@ def generate_launch_description():
         DeclareLaunchArgument('cam_pitch', default_value='0.0'),
         DeclareLaunchArgument('floor_height', default_value='',
                               description='floor_obstacles camera height (empty: cam_z x the scenario depth_scale)'),
+        DeclareLaunchArgument('unstuck_skill', default_value='false',
+                              description='Learned unstuck skill (needs -DLEARNED_SKILLS=ON), see nav.launch.py'),
+        DeclareLaunchArgument('goal_ranking', default_value='rule',
+                              description="Explorer goal choice 'rule' or 'learned', see nav.launch.py"),
         DeclareLaunchArgument('explorer_params', default_value='',
                               description='Experiments: YAML mapping of parameter overrides for the explorer '
                                           '(and the other nav.launch.py nodes), e.g. {passable_cost_max: 252}'),
