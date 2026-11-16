@@ -218,8 +218,8 @@ def main():
                 if "Goal accepted" not in txt or n != fb_n:
                     fb_n, fb_t = n, time.time()
                 elif time.time() - fb_t > 5.0 and restarts < 2:
-                    # Known issue: under load the node's rclrs executor sometimes stops dispatching
-                    # (goal accepted, then no feedback). Restart the node and call again.
+                    # Safety net from before the clock-step fix (docs/learned-skills.md): if the
+                    # node accepts a goal and then goes silent, restart it and call again.
                     restarts += 1
                     killpg(call, signal.SIGTERM)
                     killpg(skill, signal.SIGTERM)

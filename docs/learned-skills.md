@@ -1,4 +1,4 @@
-# Learned navigation skills (phase 1: simulation)
+# Learned navigation skills (simulation; opt-in, not deployed)
 
 Two learned skills for the explorer's weakest moments, trained and evaluated in simulation against
 the classical logic, with the robot-side inference prepared but **not deployed** (both are off by default:
@@ -345,14 +345,127 @@ surviving candidates, in rule order, to the ranker, which returns one of them; o
 choice is used. The Python explorer accepts the parameters and warns that only the Rust explorer
 implements `learned`.
 
-## 4. First closed-loop runs in the 2D twin (WSL, real stack)
+## 4. Closed-loop runs in the 2D twin (WSL, real stack)
+
+`twin2d` runs the robot's real ROS 2 stack (driver in twin mode, perception nodes, Nav2, explorer,
+nav_coach...) in real time against a simulated 2D world with bumpers, light bumpers, cliffs, doors
+and people. These are closed-loop results of the *integrated* options (node + explorer + Nav2), not of
+the policies alone, and they are simulation results: nothing here was run on the robot.
+
+### Phase 2: A/B on main with the classical fixes (all scenarios, four configs)
+
+Base: origin/main 40bc7ff (explorer with look-around, narrow-place reachability, retries,
+finish-at-home; nav2_guard) plus this branch, overlay built with `-DLEARNED_SKILLS=ON`
+(`twin/learned/twin2d_abq.py`):
+
+| config | launch arguments |
+|---|---|
+| rule (= main) | none |
+| rule + skill | `unstuck_skill:=true` (the explorer calls the skill when stuck, see section 3) |
+| learned | `goal_ranking:=learned` |
+| learned + skill | both |
+
+Runs: all 10 scenarios in `src/roomba_bringup/config/twin2d/` on the twin house (door_closes,
+door_reopens, explore_from_dock, furniture, invisible_railing, low_battery, nose_to_wall,
+person_walking, sparse_railing, stairs), seeds 1-2, and explore_from_dock on the world built from the
+real upstairs floor plan (`tools/twin2d_plan.py`), seeds 1-4. Four to six runs at a time (ROS domains
+30-35, web app off); other twin runs (up to 4 stacks) shared the PC part of the time. Metrics from
+each run's `result.json` (coverage = mapped share of the true free area; time = until the run ended,
+i.e. the explorer had finished, including the drive home; bumper hits; stuck episode = the robot
+stayed within 0.25 m for 30 s or more; outcome) and the explorer's log (unstuck calls). Means per
+run, sums for bumps and calls:
+
+| world | config | runs | coverage | time | distance | bumps | stuck episodes (longest) | finished at home | unstuck calls: freed / no answer |
+|---|---|---|---|---|---|---|---|---|---|
+| 10 scenarios | rule (= main) | 20 | 64.9 % | 360 s | 44.6 m | 24 | 1 (49 s) | 20 / 20 | - |
+| 10 scenarios | rule + skill | 20 | 62.5 % | 353 s | 44.2 m | **15** | 1 (36 s) | 20 / 20 | 4: 4 / 0 |
+| 10 scenarios | learned | 20 | 62.8 % | 353 s | 44.0 m | 22 | 1 (131 s) | 19 / 20 | - |
+| 10 scenarios | learned + skill | 20 | 64.7 % | 349 s | 44.4 m | **13** | 2 (111 s) | 20 / 20 | 6: 6 / 0 |
+| floor-plan world | rule (= main) | 4 | 84.3 % | 978 s | 131.2 m | 107 | 8 (58 s) | 4 / 4 | - |
+| floor-plan world | rule + skill | 4 | 74.2 % | 860 s | 118.6 m | 94 | 4 (69 s) | 4 / 4 | 39: 39 / 0 |
+| floor-plan world | learned | 4 | 86.5 % | 1044 s | 151.6 m | 112 | 4 (54 s) | 4 / 4 | - |
+| floor-plan world | learned + skill | 4 | 88.3 % | 919 s | 134.0 m | 98 | 4 (40 s) | 4 / 4 | 44: 43 / 0 |
+
+Per scenario (coverage / time, mean of 2 seeds; * = one run did not get back home):
+
+| scenario | rule (= main) | rule + skill | learned | learned + skill |
+|---|---|---|---|---|
+| door_closes | 60 % / 344 s | 60 % / 310 s | 60 % / 291 s | 60 % / 270 s |
+| door_reopens | 64 % / 352 s | 62 % / 370 s | 48 % / 287 s * | 65 % / 456 s |
+| explore_from_dock | 68 % / 348 s | 67 % / 386 s | 68 % / 354 s | 68 % / 370 s |
+| furniture | 67 % / 420 s | 68 % / 478 s | 68 % / 492 s | 68 % / 453 s |
+| invisible_railing | 69 % / 412 s | 70 % / 462 s | 68 % / 413 s | 69 % / 362 s |
+| low_battery | 49 % / 183 s | 39 % / 171 s | 47 % / 180 s | 59 % / 192 s |
+| nose_to_wall | 68 % / 317 s | 64 % / 290 s | 67 % / 300 s | 69 % / 302 s |
+| person_walking | 65 % / 380 s | 68 % / 428 s | 70 % / 454 s | 63 % / 402 s |
+| sparse_railing | 68 % / 440 s | 62 % / 300 s | 64 % / 348 s | 68 % / 358 s |
+| stairs | 69 % / 399 s | 67 % / 337 s | 68 % / 406 s | 58 % / 324 s |
+| floor-plan world, explore_from_dock (4 seeds) | 84 % / 978 s | 74 % / 860 s | 87 % / 1044 s | 88 % / 919 s |
+
+(Coverage is the share of *all* free area in the world, including spots the robot can't reach, so
+the runs in the twin house end near 70 %; low_battery ends when the battery reaches 20 %.)
+
+What it shows:
+
+- **The unstuck skill works in the loop and is rarely needed.** With main's improved explorer,
+  nose_to_wall no longer traps the robot (the explorer looks around and leaves on its own), so the
+  skill was not called there. 87 of the 93 calls came after `bumps_per_goal` bumps on the way to a
+  frontier (railing / furniture scenarios and the floor-plan world, whose railings the camera can't
+  see), the other 6 after 30 s without progress; the Nav2-abort trigger never fired. Every call was
+  answered; the skill reported the robot free in 92 of 93 calls, median 2.5 s (90 % within 3.4 s; one
+  call ran into the 15 s limit). It touched something in 54 of the 93 calls (it backs away from
+  railings it can't see either). In the 10 scenarios the runs with the skill had fewer bumper hits at
+  the same distance (24 -> 15 and 22 -> 13); on the floor-plan world bumps per metre did not change
+  (0.20 -> 0.20, 0.19 -> 0.18). The remaining stuck episodes are mostly waits at the closed door
+  (door_closes / door_reopens) and Nav2 replanning at the railing ends, not physical traps.
+- **Coverage did not improve with the skill.** In the 10 scenarios it is within noise. On the
+  floor-plan world rule + skill reached less (74 vs 84 %): in 2 of its 4 runs (and in 1 of the 4
+  rule runs) the robot never entered the wing behind the end of the invisible railing: the explorer
+  skipped the frontiers there after bumping the railing (also on its retries of failed areas). That is
+  the classical railing rule, which the skill does not change; with 4 runs per config and a spread of
+  67-94 % the difference is not significant, but it is not an improvement either.
+- **The learned ranking does not beat the rule in the twin.** Over the 10 scenarios it is about
+  the same (coverage -2 points, time -2 %); on the floor-plan world it reached slightly more
+  (86.5 vs 84.3 %) but drove 16 % further and took 7 % longer. The 2D simulator's 7-11 % time saving
+  (section 2) does not carry over: the twin has Nav2's real driving and recoveries, the explorer's
+  look-around and finish rules and invisible railings, which the 2D simulator does not model. One
+  learned run (door_reopens seed 2) ended away from home: shut in by the closing door at 33 %
+  coverage, Nav2 failed 42 plans and the explorer finished before the door reopened. Learned + skill
+  had the best floor-plan coverage (88 %, 919 s), but its margins are within the run-to-run noise.
+- **First run of the skill configs, before the node-clock fix** (section 3): 19 of 34 (rule + skill)
+  and 26 of 41 (learned + skill) calls got no answer, all but one in the floor-plan runs, where the
+  action server went deaf after the first few calls; the explorer's call timeout (25 s) handled each
+  and the runs still finished at home. The table above uses the rerun with the fixed node (no
+  unanswered calls, no watchdog exits); the runs without the skill are from the first run (the fix only
+  touches `unstuck_skill`), and floor-plan seeds 3-4 of all four configs ran with the fixed build.
+
+Reproduce (WSL, after building the overlay as in section 3):
+
+```bash
+source /root/learned_ws/learned_env.sh
+python3 twin/learned/twin2d_abq.py --ws /root/learned_ws --out /root/learned_ab/phase2 \
+    --domains 30,31,32,33,34,35 --seeds 1,2 \
+    --world /root/twin2d_data/world/house.yaml --plan-world /root/learned_ab/world_plan/plan.yaml
+# the skill configs again after the node-clock fix
+python3 twin/learned/twin2d_abq.py --ws /root/learned_ws --out /root/learned_ab/phase2b --configs rule_skill,learned_skill \
+    --domains 30,31,32,33,34,35 --seeds 1,2 \
+    --world /root/twin2d_data/world/house.yaml --plan-world /root/learned_ab/world_plan/plan.yaml
+python3 twin/learned/twin2d_abq.py --ws /root/learned_ws --out /root/learned_ab/phase2c --domains 30,31,32,33 \
+    --seeds 3,4 --scenarios plan:explore_from_dock --plan-world /root/learned_ab/world_plan/plan.yaml
+# merged table (later directories replace the same config / scenario / seed): abq_summary.md, abq_rows.json
+mkdir -p /root/learned_ab/final
+python3 twin/learned/twin2d_abq.py --summary-only \
+    --out /root/learned_ab/final,/root/learned_ab/phase2,/root/learned_ab/phase2b,/root/learned_ab/phase2c
+```
+
+### Phase 1: first runs (old main, before the classical fixes)
 
 `twin/learned/twin2d_ab.py` runs scenarios in parallel through the overlay workspace's
 `scripts/run_twin2d.sh` (ROS domains 30-46, no web / Foxglove ports), with the explorer as is (`rule`),
 with `goal_ranking: learned`, or with `unstuck_skill` started and called once 12 s after the start
 (`skill`; scenarios `twin/learned/twin2d/nose_to_wall_skill.yaml` and `wall_angle_skill.yaml` start the
-explorer only after 40 s, so the skill acts alone first). Base: origin/main, i.e. the explorer
-*without* the twinfix fixes.
+explorer only after 40 s, so the skill acts alone first). Base: the origin/main of that time, i.e. the
+explorer *without* the classical fixes.
 
 | run | outcome |
 |---|---|
@@ -365,8 +478,8 @@ explorer only after 40 s, so the skill acts alone first). Base: origin/main, i.e
 What this shows: the node works end to end with the real stack (action, costmaps, sensors, the
 cmd_vel_nav -> smoother -> collision monitor -> driver chain) and frees the robot where today's stack
 does not move at all. The exploration runs are dominated by the explorer's premature "finished"
-(every run stopped at 0.42-0.68 coverage, the failure the `twinfix` branch is fixing), so they can't
-measure the ranking yet: rerun on top of twinfix. (Seeds 1-2 used the CEM-linear export, 3-4 the final
+(every run stopped at 0.42-0.68 coverage, the failure the classical fixes addressed), so they couldn't
+measure the ranking: see phase 2 above for the rerun on top of the fixes. (Seeds 1-2 used the CEM-linear export, 3-4 the final
 PPO-fine-tuned model; they behave the same in the 2D env.)
 
 ## 5. Sim-to-real gaps and what is needed before the robot
@@ -378,13 +491,17 @@ PPO-fine-tuned model; they behave the same in the 2D env.)
   costmap clearance instead). The classical baseline is an emulation of the BT + RPP, not Nav2 itself.
 - **Exploration**: 2D at 0.1 m, travel time from path length (no Nav2 dynamics, no failed plans except
   doors / people), RTAB-Map's grid simplified to ray casting, railings are visible walls here.
-- **Before trying on the robot**: (1) more closed-loop runs in the 2D twin on top of `twinfix`
-  (explore_from_dock, nose_to_wall, invisible_railing, furniture) with `goal_ranking: learned` and the
-  unstuck caller wired, rule vs learned, several seeds; (2) a run in the Isaac Sim twin with the full
-  perception stack (real costmaps); (3) calibrate the light-bumper gains / floor values on the robot; (4) robot
-  test with a person at the e-stop: first the unstuck skill alone, called by hand
+- **Before trying on the robot**: (1) done: closed-loop A/B in the 2D twin on top of the classical
+  fixes (section 4); (2) a run in the Isaac Sim twin with the full perception stack (real costmaps,
+  stereo noise) with `unstuck_skill:=true`; (3) **calibrate the light bumpers on the robot** - the
+  node's `light_gains` and `light_floor_driving` / `light_floor_still`: raw signals of each of the six
+  sensors at 1, 5 and 10 cm from a wall, and while driving and standing on each floor covering (the
+  skill only reports SUCCEEDED with the light bumpers clear, and the policy sees their proximity);
+  (4) robot test with a person at the e-stop: first the unstuck skill alone, called by hand
   (`ros2 action send_goal /unstuck_skill roomba_skills_msgs/action/Unstuck "{time_limit_s: 10.0}"`)
-  from known stuck poses (nose to the hallway wall, in a corner), then inside exploration.
+  from known stuck poses (nose to the hallway wall, in a corner, at a railing), checking that the
+  collision monitor, the driver's bump reflex and cliff stop stay in charge; then inside exploration
+  with `unstuck_skill:=true`. Keep `goal_ranking: rule` (no benefit in the twin).
 - **Retraining**: domain-randomise more (turn efficiency 40-90 % for carpet, stereo noise on the
   marks, real light-bumper curves), add wheel suspension, and fine-tune on stuck episodes recorded by
   the twin and the robot.
@@ -424,19 +541,28 @@ python record_explore.py --layout heldout:2 --yaw -1.327 --out E:/twin/learned/r
 python render_explore.py --runs E:/twin/learned/runs/video/explore_up1.pkl E:/twin/learned/runs/video/explore_h2.pkl --seconds 21 16
 ```
 
-Live, in the 2D twin with the real stack (`twin/learned/twin2d_live.py`): loops
-`twin/learned/twin2d/nose_to_wall_live.yaml` and `wall_angle_live.yaml` (robot nose to the hallway
-wall; `unstuck_skill` is called 20 s after the start, the explorer starts at 45 s, the run ends at
-150 s and the next one starts), with the web app and Foxglove on fixed ports and a status file. If the
-skill node stops answering (the executor stall above) the loop restarts it and calls again, and says
-so in the status file. With the light-bumper calibration the first live runs ended SUCCEEDED in
-2.2-2.5 s with 0 bumps (4 of 4); before it, the same calls ran into the 15 s limit while the robot kept
-backing away, because the carpet share of the side light bumpers read as an obstacle 6 cm away.
+Live, in the 2D twin with the real stack (`twin/learned/twin2d_live.py`), with the web app and
+Foxglove on fixed ports and a status file. Two modes:
+
+- **Explorer-driven** (`--skill_at -1`, current demo): loops explore_from_dock on the world built from
+  the real upstairs floor plan with the best twin config (`goal_ranking:=learned unstuck_skill:=true`);
+  the explorer calls the skill itself when stuck; a run ends when the explorer is back home (~15 min).
+  The status file shows the explorer's last message and the skill's calls / successes.
+- **Skill alone** (default): loops `twin/learned/twin2d/nose_to_wall_live.yaml` and
+  `wall_angle_live.yaml` (robot nose to the hallway wall; `unstuck_skill` is called 20 s after the
+  start, the explorer starts at 45 s, the run ends at 150 s and the next one starts). If the skill node
+  accepts a goal and goes silent (the clock-step bug of section 3, fixed since) the loop restarts it and
+  calls again, and says so in the status file. With the light-bumper calibration the first live runs
+  ended SUCCEEDED in 2.2-2.5 s with 0 bumps (4 of 4); before it, the same calls ran into the 15 s limit
+  while the robot kept backing away, because the carpet share of the side light bumpers read as an
+  obstacle 6 cm away.
 
 ```bash
 source /root/learned_ws/learned_env.sh
 python3 twin/learned/twin2d_live.py --ws /root/learned_ws --out /root/twin2d_data/runs/learned_live \
     --domain 40 --web_port 18099 --foxglove_port 18767 \
+    --scenarios explore_from_dock --world /root/learned_ab/world_plan/plan.yaml --skill_at -1 \
+    --launch-args 'unstuck_skill:=true goal_ranking:=learned' \
     --status /mnt/e/twin/learned_NOW.txt --password_file /mnt/e/twin/learned_watch_password.txt
 bash twin/learned/twin2d_live_stop.sh            # stops it and everything it started
 ```
@@ -448,7 +574,9 @@ bash twin/learned/twin2d_live_stop.sh            # stops it and everything it st
 | `twin/learned/unstuck/` | robot USD, tile generator, house tiles, Isaac Lab env, classical baseline, PPO training, evaluation, ONNX export |
 | `twin/learned/explore/` | layouts (procedural + the real floor plans), GPU env, model, PPO and CEM training, evaluation, ONNX export |
 | `twin/learned/plot_curves.py` | the plots in `docs/learned-skills/` |
-| `twin/learned/twin2d_ab.py`, `twin/learned/twin2d/` | closed-loop A/B runs in the 2D twin, the late-explorer and live-demo scenarios |
+| `twin/learned/twin2d_ab.py`, `twin/learned/twin2d/` | phase-1 closed-loop runs in the 2D twin, the late-explorer and live-demo scenarios |
+| `twin/learned/twin2d_abq.py` | phase-2 A/B: every scenario x seed x config, queued over N ROS domains, merged summary |
+| `twin/learned/unstuck_hangtest.sh` | reproduces the clock-step hang of the skill's action server (section 3) |
 | `twin/learned/twin2d_live.py`, `twin2d_live_stop.sh` | the looping live demo (web app + Foxglove) and its stop script |
 | `twin/learned/viz/` | rollout recorders and the video renderers (section 6) |
 | `src/roomba_skills_msgs/` | `action/Unstuck.action` |

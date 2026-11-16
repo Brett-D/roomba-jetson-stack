@@ -20,6 +20,7 @@ so).
 | model | YOLO11s, 9.4 M parameters (YOLO11n 2.6 M) | MLP 596 -> 256 -> 128 -> 64 -> 2, 194 k parameters | CNN + MLP, 170 k parameters (146 k in the exported policy) |
 | training budget (one RTX 5090) | 30 epochs, 27 min + 10 epochs, 10 min | 312 PPO iterations, 30.7 M simulated steps, 39 min | CEM 40 generations, 18 min + PPO 120 updates (450 k decisions), 17 min |
 | headline result (simulation) | person recall 0.75 vs 0.28 for the COCO model at the same precision (0.96 vs 0.93); 0 false-positive frames on 312 held-out real frames | freed the robot in 86 % of 440 held-out generated situations vs 28 % for today's recovery; 85 % vs 30 % on 117 spots from the real floor plans | same final coverage with 10.6 % less time and 15.8 % less driving on 200 held-out houses |
+| closed loop in `twin2d` (real stack, 2D twin) | - | called by the explorer when stuck: freed the robot in 92 of 93 calls (median 2.5 s); fewer bumper hits in the 10 scenarios, no coverage gain | no gain over the rule (coverage within noise, the time saving did not carry over) |
 | deployed | no | no (`unstuck_skill` node, opt-in) | no (`goal_ranking: learned`, opt-in) |
 
 Details of the two navigation skills: [learned-skills.md](learned-skills.md). Details of the Isaac
@@ -188,7 +189,13 @@ Weak spots: dense clutter (0.31 success) and chair legs (0.67).
 
 **Status / limitations**: simulation only. The robot-side node (`unstuck_skill`, Rust, `tract` ONNX
 inference, reproduces PyTorch within 5e-7) is built only with `-DLEARNED_SKILLS=ON` and is not started
-by any launch file by default. Sim-to-real gaps: rigid wheels, rugs not simulated as obstacles,
+by any launch file by default; with `unstuck_skill:=true` the Rust explorer calls it when it is stuck
+(default off). In the 2D twin with the real stack (phase-2 A/B, 10 scenarios x 2 seeds + the real
+upstairs floor plan x 4 seeds) the explorer called it 93 times, mostly after bumping an invisible
+railing; it reported the robot free in 92 (median 2.5 s), the 10 scenarios had fewer bumper hits
+(24 -> 15), and coverage did not improve
+([learned-skills.md section 4](learned-skills.md#4-closed-loop-runs-in-the-2d-twin-wsl-real-stack)).
+Sim-to-real gaps: rigid wheels, rugs not simulated as obstacles,
 idealised costmap marks, a simplified light-bumper model whose real gains and floor offsets must be
 calibrated on the robot (the node's `light_gains`, `light_floor_driving`, `light_floor_still`).
 
@@ -265,9 +272,12 @@ the upstairs plan saw more failed goals.
 **Status / limitations**: simulation only. In the Rust explorer, `goal_ranking: learned` (with
 `goal_ranking_model`) re-ranks the surviving candidates; default `rule`, and the build feature is off by
 default. The 2D simulator has no Nav2 dynamics (travel time from path length), simplified mapping and
-visible railings. First runs in `twin2d` (the real stack) were inconclusive because the explorer of
-that time stopped early; the phase-2 A/B on the current explorer is in
-[learned-skills.md section 4](learned-skills.md#4-first-closed-loop-runs-in-the-2d-twin-wsl-real-stack).
+visible railings. In `twin2d` (the real stack; phase-2 A/B on the current explorer, 10 scenarios x 2
+seeds + the real upstairs floor plan x 4 seeds) the learned ranking did not beat the rule: about the
+same coverage over the scenarios (62.8 vs 64.9 %, time -2 %), and on the floor-plan world slightly
+more coverage (86.5 vs 84.3 %) with 16 % more driving; details in
+[learned-skills.md section 4](learned-skills.md#4-closed-loop-runs-in-the-2d-twin-wsl-real-stack).
+Keep `goal_ranking: rule`.
 
 Reproduce:
 ```powershell

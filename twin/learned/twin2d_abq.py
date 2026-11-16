@@ -7,6 +7,7 @@ each), then a summary table.
   twin/learned/twin2d_abq.py --ws /root/learned_ws --out /root/learned_ab/phase2 --domains 30,31,32,33,34,35 \
       --seeds 1,2 --world /root/twin2d_data/world/house.yaml --plan-world /root/learned_ab/world_plan/plan.yaml
   twin/learned/twin2d_abq.py --out /root/learned_ab/phase2 --summary-only
+  twin/learned/twin2d_abq.py --out /root/learned_ab/final,/root/learned_ab/phase2,/root/learned_ab/phase2b --summary-only
 
 Configs (twin2d.launch.py arguments; the workspace must be built with -DLEARNED_SKILLS=ON):
   rule           the explorer as on main (goal_ranking rule, no unstuck skill)
@@ -74,15 +75,20 @@ def run_row(cfg, scen, seed, d):
 
 
 def summarise(out):
-    rows = []
-    for cfg in CONFIGS:
-        for root, prefix in ((os.path.join(out, cfg), ""), (os.path.join(out, cfg + "_plan"), "plan:")):
-            for d in sorted(glob.glob(os.path.join(root, "*_s*"))):
-                m = re.match(r"(.+)_s(\d+)$", os.path.basename(d))
-                if m:
-                    row = run_row(cfg, prefix + m.group(1), int(m.group(2)), d)
-                    if row:
-                        rows.append(row)
+    """`out`: one output directory, or several comma-separated (a run in a later one replaces the
+    same config / scenario / seed from an earlier one); the summary goes to the first."""
+    found = {}
+    for o in out.split(","):
+        for cfg in CONFIGS:
+            for root, prefix in ((os.path.join(o, cfg), ""), (os.path.join(o, cfg + "_plan"), "plan:")):
+                for d in sorted(glob.glob(os.path.join(root, "*_s*"))):
+                    m = re.match(r"(.+)_s(\d+)$", os.path.basename(d))
+                    if m:
+                        row = run_row(cfg, prefix + m.group(1), int(m.group(2)), d)
+                        if row:
+                            found[(cfg, row["scenario"], row["seed"])] = row
+    rows = list(found.values())
+    out = out.split(",")[0]
     json.dump(rows, open(os.path.join(out, "abq_rows.json"), "w"), indent=1)
     keys = ["scenario", "seed", "config", "coverage", "sim_s", "distance_m", "bumps", "stuck", "stuck_longest_s", "idle_s", "outcome", "unstuck_calls", "unstuck_free"]
     lines = ["| " + " | ".join(keys) + " |", "|" + "---|" * len(keys)]
@@ -137,7 +143,7 @@ def main():
         stem = name.split(":", 1)[-1]
         for seed in [int(s) for s in a.seeds.split(",")]:
             for cfg in a.configs.split(","):
-                world = a.plan_world if plan else a.world
+                world = (a.plan_world or a.world) if plan else a.world
                 items.append((cfg, os.path.join(scen_dir, stem + ".yaml"), seed, os.path.join(a.out, cfg + ("_plan" if plan else "")),
                               ["web:=false", f"world:={world}"] + CONFIGS[cfg]))
     q = queue.Queue()
