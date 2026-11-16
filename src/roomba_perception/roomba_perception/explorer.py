@@ -33,10 +33,14 @@ cliff marks never cover the robot itself (mark_clear_radius_m around it stays fr
 still turn and back away.
 Drop-offs floor_obstacles reports (a stair opening the map shows as floor) are remembered: no
 frontier or goal within drop_clear_m of one, and no way through.
+A bump with a person seen in front is not marked; a bump mark lasts bump_mark_short_ttl_s
+unless the same spot is bumped again; boxed in by its own marks (the area it can reach tiny
+while the map has more), it removes them one at a time.
 
 Subscribes: /global_costmap/costmap (OccupancyGrid), /roomba/mode (String), /battery_state,
             /roomba/sensors, /vslam_filter/status (String JSON),
             /perception/drops (PointCloud2),
+            /perception/person_detector/detections_3d (Detection3DArray),
             ~/command (String: "start" | "stop" | "home")
 Publishes:  ~/status (String JSON, transient local), /perception/ignore_zones/command,
             ~/markers (MarkerArray, map frame, transient local; only while someone listens): how it
@@ -67,6 +71,7 @@ from rclpy.time import Time
 from sensor_msgs.msg import BatteryState, PointCloud2
 from std_msgs.msg import String
 from tf2_ros import Buffer, TransformException, TransformListener
+from vision_msgs.msg import Detection3DArray
 from visualization_msgs.msg import Marker, MarkerArray
 
 ROTATE_PARAM = 'FollowPath.rotate_to_heading_angular_vel'
@@ -306,6 +311,14 @@ def _rotation(q):
             (2.0 * (x * y + z * w), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z - x * w)))
 
 
+def _mark_centre(points):
+    return sum(p[0] for p in points) / len(points), sum(p[1] for p in points) / len(points)
+
+
+def _duration_text(ttl):
+    return f'{ttl / 60:.0f} min' if ttl >= 120 else f'{ttl:.0f} s'
+
+
 def _cloud_xyz(msg):
     """x, y, z (float32 fields) of every point of a PointCloud2, as an N x 3 float32 array."""
     off = {f.name: f.offset for f in msg.fields if f.datatype == 7}
@@ -391,7 +404,13 @@ class Explorer(Node):
         # wall (it's a vacuum); it just won't plan through that spot. Never saved with the map.
         self.bump_marks = bool(p('bump_marks', True).value) and SensorState is not None
         self.bump_mark_ttl = float(p('bump_mark_ttl_s', 600.0).value)
+        # A mark not confirmed by another bump at the same spot (within bump_mark_spacing_m) lasts
+        # only this long: people walking into the robot leave single hits (0 = all bump_mark_ttl_s).
+        self.bump_mark_short_ttl = float(p('bump_mark_short_ttl_s', 60.0).value)
         self.bump_mark_margin = float(p('bump_mark_margin_m', 0.15).value)
+        # A confirmed mark (bumped twice at the same spot: a railing, glass) keeps the robot's
+        # centre this far off: radius 0.17 + 0.1 m clearance (+ 1 cm) - keep-out isn't inflated.
+        self.bump_mark_confirmed_margin = float(p('bump_mark_confirmed_margin_m', 0.28).value)
         self.bump_mark_spacing = float(p('bump_mark_spacing_m', 0.15).value)
         self.bump_mark_width = float(p('bump_mark_width_m', 0.3).value)
         # Bump and cliff marks leave the robot's own footprint (plus clearance) free, so Nav2 can
@@ -408,6 +427,17 @@ class Explorer(Node):
         # A frontier whose way in keeps hitting something the camera can't see (railing posts,
         # glass) is skipped after this many bumps (0 = never).
         self.bumps_per_goal = int(p('bumps_per_goal', 2).value)
+        # A bump while a person was detected in front within this distance (in the last
+        # person_bump_window_s) is a person's leg: not marked, not counted (0 = mark all).
+        self.person_bump_dist = float(p('person_bump_dist_m', 1.2).value)
+        self.person_bump_window = float(p('person_bump_window_s', 3.0).value)
+        # Boxed in by its own bump marks (Nav2 plans 4-connected, so a ring of marks with only
+        # diagonal gaps closes it in): when the area it can reach is below this while the map has
+        # more free space elsewhere and bump marks lie within trap_radius_m, it removes them one at
+        # a time (unconfirmed first, rows along a railing last), trap_wait_s apart (0 = never).
+        self.trap_area = float(p('trap_area_m2', 1.0).value)
+        self.trap_radius = float(p('trap_radius_m', 1.5).value)
+        self.trap_wait = float(p('trap_wait_s', 3.0).value)
         # Areas that failed (blocked, bumped, timed out) are skipped, but a door shut or a chair
         # moved since: before giving up, retry them - again only after some goal has been reached.
         self.retry_failed = bool(p('retry_failed_before_finish', True).value)
@@ -425,7 +455,9 @@ class Explorer(Node):
         self.goal_bumps = 0
         self.bumped = False
         self.bump_points = []        # (x, y, monotonic) of recent marks
+        self.persons = []            # (time, x, y) in the map frame of people the detector saw lately
         self.drop_hits = {}          # drop-off cell (DROP_CELL_M lattice, map frame) -> clouds with drop points there
+        self.trap_next = -math.inf   # no trap-breaking mark removal before this time
 
         self.grid = None
         self.robot_mode = None
@@ -486,6 +518,7 @@ class Explorer(Node):
         if self.auto_keepout or self.bump_marks:
             self.create_subscription(SensorState, '/roomba/sensors', self._on_sensors, 10)
         self.create_subscription(PointCloud2, '/perception/drops', self._on_drops, 2)
+        self.create_subscription(Detection3DArray, '/perception/person_detector/detections_3d', self._on_persons, 5)
         self.pub_status = self.create_publisher(String, '~/status', latched)
         # How it decides where to go (only built while someone listens): see _marker_specs.
         self.pub_markers = self.create_publisher(MarkerArray, '~/markers', latched)
@@ -521,10 +554,50 @@ class Explorer(Node):
         bumped = bool(msg.bump_left or msg.bump_right) or light
         if bumped and not self.bumped and self.bump_marks and self.robot_mode in ('safe', 'full') \
                 and not (msg.wheel_drop_left or msg.wheel_drop_right):
-            self._mark_bump(bump_bearing(msg, self.bump_light_min or 200), now)
-            self._bumped_on_goal()
+            bearing = bump_bearing(msg, self.bump_light_min or 200)
+            if self._person_in_front(now):
+                self.get_logger().info(f'Bumper hit at {math.degrees(bearing):+.0f} deg with a person in front: '
+                                       'not marked')
+            else:
+                self._mark_bump(bearing, now)
+                self._bumped_on_goal()
         self.bumped = bumped
 
+    def _on_persons(self, msg):
+        """People the person detector reports: kept person_bump_window_s in the map frame."""
+        points = [(d.bbox.center.position.x, d.bbox.center.position.y, d.bbox.center.position.z)
+                  for d in msg.detections]
+        self._persons(msg.header.frame_id, points)
+
+    def _persons(self, frame, points):
+        if self.person_bump_dist <= 0 or not points:
+            return
+        tf = self._lookup(frame)
+        if tf is None:
+            return
+        (tx, ty, _), q = tf
+        now = self._now()
+        r = _rotation(q)
+        for px, py, pz in points:
+            x = r[0][0] * px + r[0][1] * py + r[0][2] * pz + tx
+            y = r[1][0] * px + r[1][1] * py + r[1][2] * pz + ty
+            self.persons.append((now, x, y))
+        self.persons = [p for p in self.persons if now - p[0] <= self.person_bump_window][-100:]
+
+    def _person_in_front(self, now):
+        """Whether someone was seen in front of the robot within person_bump_dist_m lately."""
+        if self.person_bump_dist <= 0:
+            return False
+        self.persons = [p for p in self.persons if now - p[0] <= self.person_bump_window]
+        if not self.persons:
+            return False
+        pose = self._pose()
+        if pose is None:
+            return False
+        x, y, yaw = pose
+        c, s = math.cos(yaw), math.sin(yaw)
+        return any(math.hypot(px - x, py - y) <= self.person_bump_dist and (px - x) * c + (py - y) * s > 0.0
+                   for _, px, py in self.persons)
 
     def _on_drops(self, msg):
         self._drops(msg.header.frame_id, _cloud_xyz(msg))
@@ -580,21 +653,53 @@ class Explorer(Node):
         points = bump_zone(pose[0], pose[1], pose[2], bearing, width=self.bump_mark_width)
         cx = sum(p[0] for p in points) / 4.0
         cy = sum(p[1] for p in points) / 4.0
+        # A bump at the same spot again (within bump_mark_spacing_m of a mark's centre) confirms
+        # the mark there: something the camera can't see (railing, glass), not someone walking by.
+        # Hits around the robot at one spot (people's legs as it turns) are different spots.
+        active = self._bump_marks(now)
+
+        def near(m, d):
+            mx, my = _mark_centre(m[2])
+            return math.hypot(cx - mx, cy - my) < d
+        same = [m[1] for m in active if near(m, self.bump_mark_spacing)]
+        for name in same:
+            self._confirm_mark(name, now, pose)
         self.bump_points = [b for b in self.bump_points if now - b[2] < self.bump_mark_ttl]
-        if any(math.hypot(cx - bx, cy - by) < self.bump_mark_spacing for bx, by, _ in self.bump_points):
+        if same:
             return   # already marked here
+        ttl = self.bump_mark_ttl if self.bump_mark_short_ttl <= 0 else self.bump_mark_short_ttl
         self.bump_points.append((cx, cy, now))
         name = time.strftime('bump_%H%M%S') + f'_{len(self.bump_points)}'
         cmd = {'op': 'add', 'kind': 'keepout', 'name': name, 'points': points,
-               'margin': self.bump_mark_margin, 'ttl_s': self.bump_mark_ttl}
+               'margin': self.bump_mark_margin, 'ttl_s': ttl}
         self._clear_robot(cmd, pose)
         self.pub_zone_cmd.publish(String(data=json.dumps(cmd)))
-        self._sent_mark('bump', name, points, now, self.bump_mark_ttl)
+        self._sent_mark('bump', name, points, now, ttl, cmd, self.bump_mark_short_ttl <= 0)
         self.get_logger().info(f'Bumper hit at {math.degrees(bearing):+.0f} deg: marked {name} '
-                               f'for {self.bump_mark_ttl / 60:.0f} min')
+                               f'for {_duration_text(ttl)}')
 
-    def _sent_mark(self, kind, name, points, now, ttl):
-        self.marks_sent.append((kind, name, points, now, ttl))
+    def _confirm_mark(self, name, now, pose):
+        """Bumped again at mark `name`: something solid (a railing): make it last bump_mark_ttl_s
+        from now and keep planned paths bump_mark_confirmed_margin_m from it (the robot's free
+        circle moves to where it stands now)."""
+        k = next(i for i, m in enumerate(self.marks_sent) if m[1] == name)
+        kind, _, points, sent, ttl, cmd, confirmed = self.marks_sent[k]
+        if confirmed:
+            return
+        if cmd is not None:
+            self.pub_zone_cmd.publish(String(data=json.dumps({'op': 'delete', 'name': name})))
+            cmd = dict(cmd)
+            cmd['margin'] = max(cmd['margin'], self.bump_mark_confirmed_margin)
+            cmd['ttl_s'] = self.bump_mark_ttl
+            self._clear_robot(cmd, pose)
+            self.pub_zone_cmd.publish(String(data=json.dumps(cmd)))
+            sent, ttl = now, self.bump_mark_ttl
+        self.marks_sent[k] = (kind, name, points, sent, ttl, cmd, True)
+        if cmd is not None:
+            self.get_logger().info(f'Bumped at {name} again: keeping it for {_duration_text(self.bump_mark_ttl)}')
+
+    def _sent_mark(self, kind, name, points, now, ttl, cmd=None, confirmed=True):
+        self.marks_sent.append((kind, name, points, now, ttl, cmd, confirmed))
         del self.marks_sent[:-50]
 
     def _clear_robot(self, cmd, pose):
@@ -772,6 +877,9 @@ class Explorer(Node):
         if seed is None:
             self.message = 'Robot is not in free space on the costmap; waiting…'
             return
+        free_cells = int(np.count_nonzero((grid >= 0) & (grid <= self.free_max)))
+        if self._break_trap(reach_cells, free_cells, res, pose):
+            return
         if self.turn is not None:
             turn, self.turn = self.turn, None
             self.message = 'Turning to face the unmapped area…'
@@ -887,12 +995,60 @@ class Explorer(Node):
         all of them before the last trip."""
         if not marks:
             return
-        for m in marks:
-            self.pub_zone_cmd.publish(String(data=json.dumps({'op': 'delete', 'name': m[1]})))
-        self.marks_sent = [m for m in self.marks_sent if m not in marks]
+        self._delete_marks(marks)
         self.bump_points = []
         self.get_logger().info(f'Removed {len(marks)} bump mark(s) (a person walking into the robot leaves '
                                'them too): checking again')
+
+    def _break_trap(self, reach_cells, free_cells, res, pose):
+        """Boxed in by its own bump marks (see trap_area_m2): removes the one that matters least
+        (unconfirmed before confirmed, rows along a railing last, oldest first), at most one every
+        trap_wait_s. True when it removed one."""
+        now = self._now()
+        if self.trap_area <= 0 or now < self.trap_next:
+            return False
+        reach = reach_cells * res * res
+        free = free_cells * res * res
+        if reach >= self.trap_area or free - reach < self.trap_area:
+            return False
+        active = self._bump_marks(now)
+        near = [m for m in active
+                if math.hypot(_mark_centre(m[2])[0] - pose[0], _mark_centre(m[2])[1] - pose[1]) <= self.trap_radius]
+        if not near:
+            return False
+        pick = near[0]
+        for m in near[1:]:
+            a = (self._in_row(m, active) * 2 + m[6], m[3])
+            b = (self._in_row(pick, active) * 2 + pick[6], pick[3])
+            if a[0] < b[0] or (a[0] == b[0] and a[1] < b[1]):
+                pick = m
+        self._delete_marks([pick])
+        self.get_logger().info(f'Boxed in by its own bump marks ({reach:.1f} m2 to move in): removed {pick[1]}')
+        self.message = 'Boxed in by its own bump marks: clearing a way out…'
+        self.trap_next = now + self.trap_wait
+        return True
+
+    def _in_row(self, mark, active):
+        """Whether a bump mark lies in a row of marks (a railing or glass wall marked along its
+        length): it has neighbours within twice the mark width, all roughly on one line through it."""
+        cx, cy = _mark_centre(mark[2])
+        dirs = []
+        for m in active:
+            if m[1] == mark[1]:
+                continue
+            x, y = _mark_centre(m[2])
+            if math.hypot(x - cx, y - cy) < 2.0 * self.bump_mark_width:
+                dirs.append((x - cx, y - cy))
+        if not dirs:
+            return False
+        return all(abs(a[0] * b[1] - a[1] * b[0]) <= 0.5 * math.hypot(*a) * math.hypot(*b)
+                   for k, a in enumerate(dirs) for b in dirs[k + 1:])
+
+    def _delete_marks(self, marks):
+        """Send a delete for these marks and forget them."""
+        for m in marks:
+            self.pub_zone_cmd.publish(String(data=json.dumps({'op': 'delete', 'name': m[1]})))
+        self.marks_sent = [m for m in self.marks_sent if m not in marks]
 
     def _peek(self, peeks, pose, res, ox, oy):
         """The nearest spot to take a closer look at a frontier it can't reach, not tried yet:
@@ -1227,7 +1383,7 @@ class Explorer(Node):
                           [((i + 0.5) * DROP_CELL_M, (j + 0.5) * DROP_CELL_M, 0.01) for i, j in drops], ''))
         now = self._now()
         marks = [m for m in self.marks_sent if m[4] <= 0 or now - m[3] < m[4]]
-        for k, (kind, name, points, _, _) in enumerate(marks):
+        for k, (kind, name, points, *_) in enumerate(marks):
             specs.append(('marks', k, Marker.LINE_STRIP, (0.0, 0.0, 0.0), (0.03, 0.0, 0.0),
                           YELLOW if kind == 'bump' else RED, [(x, y, 0.03) for x, y in points + points[:1]], ''))
             labels.append((points[0][0], points[0][1], name))

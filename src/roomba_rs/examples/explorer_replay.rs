@@ -273,6 +273,7 @@ fn main() -> anyhow::Result<()> {
                 let pts: Vec<[f32; 3]> = points(&e).iter().map(|p| [p[0] as f32, p[1] as f32, p[2] as f32]).collect();
                 core.on_drops(e[3].as_str().unwrap(), &pts, &mut io);
             }
+            "PD" => core.on_persons(e[3].as_str().unwrap(), &points(&e), &mut io),
             "NR" => io.ready = [b(&e[3]), b(&e[4]), b(&e[5]), e.get(6).map_or(io.ready[3], b)],
             "GR" => core.on_goal_response(e[3].as_u64().unwrap(), b(&e[4]), &mut io),
             "RS" => core.on_result(e[3].as_u64().unwrap(), e[4].as_i64().unwrap() as i8, &mut io),

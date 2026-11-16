@@ -674,13 +674,20 @@ pub struct Params {
     pub auto_keepout: bool,
     pub bump_marks: bool,
     pub bump_mark_ttl: f64,
+    pub bump_mark_short_ttl: f64,
     pub bump_mark_margin: f64,
+    pub bump_mark_confirmed_margin: f64,
     pub bump_mark_spacing: f64,
     pub bump_mark_width: f64,
     pub mark_clear: f64,
     pub mark_soft: f64,
     pub bump_light_min: i64,
     pub bumps_per_goal: i64,
+    pub person_bump_dist: f64,
+    pub person_bump_window: f64,
+    pub trap_area: f64,
+    pub trap_radius: f64,
+    pub trap_wait: f64,
     pub retry_failed: bool,
     /// "rule" (default: the score below) or "learned" (a [`GoalRanker`] re-orders the same
     /// candidates; needs the `learned` build feature and `goal_ranking_model`).
@@ -752,7 +759,14 @@ impl Params {
             auto_keepout: p.boolean("auto_keepout", true)?,
             bump_marks: p.boolean("bump_marks", true)?,
             bump_mark_ttl: p.float("bump_mark_ttl_s", 600.0)?,
+            // A mark not confirmed by another bump at the same spot (within bump_mark_spacing_m)
+            // lasts only this long: people walking into the robot leave single hits (0 = all
+            // bump_mark_ttl_s).
+            bump_mark_short_ttl: p.float("bump_mark_short_ttl_s", 60.0)?,
             bump_mark_margin: p.float("bump_mark_margin_m", 0.15)?,
+            // A confirmed mark (bumped twice at the same spot: a railing, glass) keeps the robot's
+            // centre this far off: radius 0.17 + 0.1 m clearance (+ 1 cm) - keep-out isn't inflated.
+            bump_mark_confirmed_margin: p.float("bump_mark_confirmed_margin_m", 0.28)?,
             bump_mark_spacing: p.float("bump_mark_spacing_m", 0.15)?,
             bump_mark_width: p.float("bump_mark_width_m", 0.3)?,
             // Bump and cliff marks leave the robot's footprint (plus clearance) free: footprint
@@ -763,6 +777,18 @@ impl Params {
             mark_soft: p.float("mark_soft_band_m", 0.22)?,
             bump_light_min: p.int("bump_light_signal", 0)?,
             bumps_per_goal: p.int("bumps_per_goal", 2)?,
+            // A bump while a person was detected in front within this distance (in the last
+            // person_bump_window_s) is a person's leg: not marked, not counted (0 = mark all).
+            person_bump_dist: p.float("person_bump_dist_m", 1.2)?,
+            person_bump_window: p.float("person_bump_window_s", 3.0)?,
+            // Boxed in by its own bump marks (Nav2 plans 4-connected, so a ring of marks with only
+            // diagonal gaps closes it in): when the area it can reach is below this while the map
+            // has more free space elsewhere and bump marks lie within trap_radius_m, it removes
+            // them one at a time (unconfirmed first, rows along a railing last), trap_wait_s apart
+            // (0 = never).
+            trap_area: p.float("trap_area_m2", 1.0)?,
+            trap_radius: p.float("trap_radius_m", 1.5)?,
+            trap_wait: p.float("trap_wait_s", 3.0)?,
             retry_failed: p.boolean("retry_failed_before_finish", true)?,
             goal_ranking: p.string("goal_ranking", "rule")?,
             goal_ranking_model: p.string("goal_ranking_model", "")?,
@@ -911,6 +937,10 @@ struct SentMark {
     points: Vec<[f64; 2]>,
     sent: f64,
     ttl: f64,
+    /// The add command (bump marks; sent again with the long TTL once confirmed).
+    cmd: Option<Map<String, Value>>,
+    /// Bumped again at the same spot.
+    confirmed: bool,
 }
 
 // ~/markers colours (exact in f32), as in explorer.py.
@@ -1038,8 +1068,12 @@ pub struct Explorer {
     unstuck_goal: Option<(f64, f64)>,
     progress: Option<(f64, f64, f64)>,
     unstuck_missing_logged: bool,
+    /// People the person detector saw lately: (time, x, y) in the map frame.
+    persons: Vec<(f64, f64, f64)>,
     /// Drop-off cells (DROP_CELL_M lattice in the map frame) -> clouds that had drop points there.
     drop_hits: HashMap<(i64, i64), i64>,
+    /// No trap-breaking mark removal before this time.
+    trap_next: f64,
 }
 
 const WHEEL_DROP: usize = 4;
@@ -1095,7 +1129,9 @@ impl Explorer {
             unstuck_goal: None,
             progress: None,
             unstuck_missing_logged: false,
+            persons: Vec::new(),
             drop_hits: HashMap::new(),
+            trap_next: f64::NEG_INFINITY,
         };
         e.publish_status(io);
         e
@@ -1152,12 +1188,53 @@ impl Explorer {
         let bumped = s.bump_left || s.bump_right || light;
         if bumped && !self.bumped && self.p.bump_marks && self.mode_drives() && !wheel_drop {
             let light_min = if self.p.bump_light_min != 0 { self.p.bump_light_min } else { 200 };
-            self.mark_bump(bump_bearing(s, light_min), now, io);
-            self.bumped_on_goal(io);
+            let bearing = bump_bearing(s, light_min);
+            if self.person_in_front(now, io) {
+                io.log(Level::Info, format!("Bumper hit at {:+.0} deg with a person in front: not marked", bearing.to_degrees()));
+            } else {
+                self.mark_bump(bearing, now, io);
+                self.bumped_on_goal(io);
+            }
         }
         self.bumped = bumped;
     }
 
+    /// People the person detector reports (/perception/person_detector/detections_3d): their
+    /// positions in `frame`, kept person_bump_window_s in the map frame.
+    pub fn on_persons(&mut self, frame: &str, points: &[[f64; 3]], io: &mut impl Io) {
+        if self.p.person_bump_dist <= 0.0 || points.is_empty() {
+            return;
+        }
+        let Some((t, q)) = io.lookup(&self.p.map_frame, frame) else { return };
+        let now = io.now();
+        let r = rotation(q);
+        for p in points {
+            let (x, y) = to_frame(&r, t, p[0], p[1], p[2]);
+            self.persons.push((now, x, y));
+        }
+        let window = self.p.person_bump_window;
+        self.persons.retain(|p| now - p.0 <= window);
+        if self.persons.len() > 100 {
+            self.persons.drain(..self.persons.len() - 100);
+        }
+    }
+
+    /// Whether someone was seen in front of the robot within person_bump_dist_m lately.
+    fn person_in_front(&mut self, now: f64, io: &mut impl Io) -> bool {
+        if self.p.person_bump_dist <= 0.0 {
+            return false;
+        }
+        let window = self.p.person_bump_window;
+        self.persons.retain(|p| now - p.0 <= window);
+        if self.persons.is_empty() {
+            return false;
+        }
+        let Some((x, y, yaw)) = self.pose(io) else { return false };
+        let (c, s) = (yaw.cos(), yaw.sin());
+        self.persons
+            .iter()
+            .any(|&(_, px, py)| py_hypot(px - x, py - y) <= self.p.person_bump_dist && (px - x) * c + (py - y) * s > 0.0)
+    }
 
     /// Drop points floor_obstacles reports (/perception/drops), in `frame`: remembered as drop-off
     /// cells (a cell counts once per cloud).
@@ -1225,27 +1302,67 @@ impl Explorer {
         let points = bump_zone(x, y, yaw, bearing, self.p.bump_mark_width);
         let cx = py_sum(points.iter().map(|p| p[0])) / 4.0;
         let cy = py_sum(points.iter().map(|p| p[1])) / 4.0;
+        // A bump at the same spot again (within bump_mark_spacing_m of a mark's centre) confirms
+        // the mark there: something the camera can't see (railing, glass), not someone walking by.
+        // Hits around the robot at one spot (people's legs as it turns) are different spots.
+        let active = self.bump_marks(now, false);
+        let near = |m: &SentMark, d: f64| {
+            let (mx, my) = mark_centre(&m.points);
+            py_hypot(cx - mx, cy - my) < d
+        };
+        let same: Vec<usize> = active.iter().copied().filter(|&i| near(&self.marks_sent[i], self.p.bump_mark_spacing)).collect();
+        for &i in &same {
+            self.confirm_mark(i, now, (x, y), io);
+        }
         let ttl = self.p.bump_mark_ttl;
         self.bump_points.retain(|b| now - b.2 < ttl);
-        if self.bump_points.iter().any(|&(bx, by, _)| py_hypot(cx - bx, cy - by) < self.p.bump_mark_spacing) {
+        if !same.is_empty() {
             return; // already marked here
         }
+        let confirmed = self.p.bump_mark_short_ttl <= 0.0;
+        let ttl = if confirmed { self.p.bump_mark_ttl } else { self.p.bump_mark_short_ttl };
         self.bump_points.push((cx, cy, now));
         let name = format!("bump_{}_{}", io.local_hms(), self.bump_points.len());
         let mut cmd = zone_add(&name, &points);
         cmd.insert("margin".into(), Value::from(self.p.bump_mark_margin));
-        cmd.insert("ttl_s".into(), Value::from(self.p.bump_mark_ttl));
+        cmd.insert("ttl_s".into(), Value::from(ttl));
         self.clear_robot(&mut cmd, x, y);
-        io.zone_command(py_json(&Value::Object(cmd), None));
-        self.sent_mark(true, &name, points, now, self.p.bump_mark_ttl);
-        io.log(
-            Level::Info,
-            format!("Bumper hit at {:+.0} deg: marked {name} for {:.0} min", bearing.to_degrees(), self.p.bump_mark_ttl / 60.0),
-        );
+        io.zone_command(py_json(&Value::Object(cmd.clone()), None));
+        self.sent_mark(true, &name, points, now, ttl, Some(cmd), confirmed);
+        io.log(Level::Info, format!("Bumper hit at {:+.0} deg: marked {name} for {}", bearing.to_degrees(), duration_text(ttl)));
     }
 
-    fn sent_mark(&mut self, bump: bool, name: &str, points: Vec<[f64; 2]>, sent: f64, ttl: f64) {
-        self.marks_sent.push(SentMark { bump, name: name.into(), points, sent, ttl });
+    /// Bumped again at mark `i` (index in marks_sent): something solid (a railing): make it last
+    /// bump_mark_ttl_s from now and keep planned paths bump_mark_confirmed_margin_m from it (the
+    /// robot's free circle moves to where it stands now, `at`).
+    fn confirm_mark(&mut self, i: usize, now: f64, at: (f64, f64), io: &mut impl Io) {
+        let m = &mut self.marks_sent[i];
+        if m.confirmed {
+            return;
+        }
+        m.confirmed = true;
+        let Some(mut cmd) = m.cmd.clone() else { return };
+        let ttl = self.p.bump_mark_ttl;
+        let name = m.name.clone();
+        let mut del = Map::new();
+        del.insert("op".into(), "delete".into());
+        del.insert("name".into(), name.clone().into());
+        io.zone_command(py_json(&Value::Object(del), None));
+        let margin = cmd.get("margin").and_then(Value::as_f64).unwrap_or(0.0).max(self.p.bump_mark_confirmed_margin);
+        cmd.insert("margin".into(), Value::from(margin));
+        cmd.insert("ttl_s".into(), Value::from(ttl));
+        self.clear_robot(&mut cmd, at.0, at.1);
+        io.zone_command(py_json(&Value::Object(cmd.clone()), None));
+        let m = &mut self.marks_sent[i];
+        m.cmd = Some(cmd);
+        m.sent = now;
+        m.ttl = ttl;
+        io.log(Level::Info, format!("Bumped at {name} again: keeping it for {}", duration_text(ttl)));
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn sent_mark(&mut self, bump: bool, name: &str, points: Vec<[f64; 2]>, sent: f64, ttl: f64, cmd: Option<Map<String, Value>>, confirmed: bool) {
+        self.marks_sent.push(SentMark { bump, name: name.into(), points, sent, ttl, cmd, confirmed });
         if self.marks_sent.len() > 50 {
             self.marks_sent.remove(0);
         }
@@ -1275,7 +1392,7 @@ impl Explorer {
         let mut cmd = zone_add(&name, &points);
         self.clear_robot(&mut cmd, x, y);
         io.zone_command(py_json(&Value::Object(cmd), None));
-        self.sent_mark(false, &name, points, now, 0.0);
+        self.sent_mark(false, &name, points, now, 0.0, None, true);
         io.log(Level::Info, format!("Cliff ({names}): added keep-out zone {name}"));
         self.message = format!("Cliff sensor stop: added keep-out zone {name}");
     }
@@ -1507,6 +1624,10 @@ impl Explorer {
             self.message = "Robot is not in free space on the costmap; waiting…".into();
             return;
         }
+        let free_cells = data.iter().filter(|&&g| g >= 0 && (g as i64) <= self.p.free_max).count();
+        if self.break_trap(reach_cells, free_cells, res, pose, io) {
+            return;
+        }
         if let Some(turn) = self.turn.take() {
             self.message = "Turning to face the unmapped area…".into();
             self.send_spin(turn, io);
@@ -1682,6 +1803,77 @@ impl Explorer {
         if marks.is_empty() {
             return;
         }
+        self.delete_marks(marks, io);
+        self.bump_points.clear();
+        io.log(
+            Level::Info,
+            format!("Removed {} bump mark(s) (a person walking into the robot leaves them too): checking again", marks.len()),
+        );
+    }
+
+    /// Boxed in by its own bump marks (see trap_area_m2): removes the one that matters least
+    /// (unconfirmed before confirmed, rows along a railing last, oldest first), at most one every
+    /// trap_wait_s. True when it removed one.
+    fn break_trap(&mut self, reach_cells: usize, free_cells: usize, res: f64, pose: (f64, f64, f64), io: &mut impl Io) -> bool {
+        let now = io.now();
+        if self.p.trap_area <= 0.0 || now < self.trap_next {
+            return false;
+        }
+        let reach = reach_cells as f64 * res * res;
+        let free = free_cells as f64 * res * res;
+        if reach >= self.p.trap_area || free - reach < self.p.trap_area {
+            return false;
+        }
+        let active = self.bump_marks(now, false);
+        let near: Vec<usize> = active
+            .iter()
+            .copied()
+            .filter(|&i| {
+                let (mx, my) = mark_centre(&self.marks_sent[i].points);
+                py_hypot(mx - pose.0, my - pose.1) <= self.p.trap_radius
+            })
+            .collect();
+        let Some(&first) = near.first() else { return false };
+        let rank = |i: usize| self.in_row(i, &active) as u8 * 2 + self.marks_sent[i].confirmed as u8;
+        let mut pick = first;
+        for &i in &near[1..] {
+            let (a, b) = ((rank(i), self.marks_sent[i].sent), (rank(pick), self.marks_sent[pick].sent));
+            if a.0 < b.0 || (a.0 == b.0 && a.1 < b.1) {
+                pick = i;
+            }
+        }
+        let name = self.marks_sent[pick].name.clone();
+        self.delete_marks(&[pick], io);
+        io.log(Level::Info, format!("Boxed in by its own bump marks ({reach:.1} m2 to move in): removed {name}"));
+        self.message = "Boxed in by its own bump marks: clearing a way out…".into();
+        self.trap_next = now + self.p.trap_wait;
+        true
+    }
+
+    /// Whether bump mark `i` lies in a row of marks (a railing or glass wall marked along its
+    /// length): it has neighbours within twice the mark width, all roughly on one line through it.
+    fn in_row(&self, i: usize, active: &[usize]) -> bool {
+        let (cx, cy) = mark_centre(&self.marks_sent[i].points);
+        let near = 2.0 * self.p.bump_mark_width;
+        let dirs: Vec<(f64, f64)> = active
+            .iter()
+            .filter(|&&j| j != i)
+            .map(|&j| {
+                let (x, y) = mark_centre(&self.marks_sent[j].points);
+                (x - cx, y - cy)
+            })
+            .filter(|&(dx, dy)| py_hypot(dx, dy) < near)
+            .collect();
+        if dirs.is_empty() {
+            return false;
+        }
+        dirs.iter().enumerate().all(|(k, a)| {
+            dirs[k + 1..].iter().all(|b| (a.0 * b.1 - a.1 * b.0).abs() <= 0.5 * py_hypot(a.0, a.1) * py_hypot(b.0, b.1))
+        })
+    }
+
+    /// Send a delete for these marks (indexes in marks_sent) and forget them.
+    fn delete_marks(&mut self, marks: &[usize], io: &mut impl Io) {
         for &i in marks {
             let mut cmd = Map::new();
             cmd.insert("op".into(), "delete".into());
@@ -1693,11 +1885,6 @@ impl Explorer {
             k += 1;
             !marks.contains(&(k - 1))
         });
-        self.bump_points.clear();
-        io.log(
-            Level::Info,
-            format!("Removed {} bump mark(s) (a person walking into the robot leaves them too): checking again", marks.len()),
-        );
     }
 
     /// The nearest spot to take a closer look at a frontier it can't reach, not tried yet:
@@ -2333,6 +2520,11 @@ fn zone_add(name: &str, points: &[[f64; 2]]) -> Map<String, Value> {
     m
 }
 
+/// A mark's centre: the mean of its corners (Python's sum).
+fn mark_centre(points: &[[f64; 2]]) -> (f64, f64) {
+    let n = points.len() as f64;
+    (py_sum(points.iter().map(|p| p[0])) / n, py_sum(points.iter().map(|p| p[1])) / n)
+}
 
 /// Rotation matrix rows of a quaternion (x, y, z, w), as explorer.py _rotation computes them.
 fn rotation(q: [f64; 4]) -> [[f64; 3]; 2] {
@@ -2347,6 +2539,16 @@ fn rotation(q: [f64; 4]) -> [[f64; 3]; 2] {
 fn to_frame(r: &[[f64; 3]; 2], t: [f64; 3], px: f64, py: f64, pz: f64) -> (f64, f64) {
     (r[0][0] * px + r[0][1] * py + r[0][2] * pz + t[0], r[1][0] * px + r[1][1] * py + r[1][2] * pz + t[1])
 }
+
+/// "10 min" / "60 s", as the marks' log lines say how long they last.
+fn duration_text(ttl: f64) -> String {
+    if ttl >= 120.0 {
+        format!("{:.0} min", ttl / 60.0)
+    } else {
+        format!("{ttl:.0} s")
+    }
+}
+
 /// json.loads for status messages: like serde_json, but also accepting Python's NaN / Infinity
 /// / -Infinity tokens (json.dumps writes them for non-finite floats).
 pub fn py_json_loads(text: &str) -> Option<Value> {
@@ -2689,8 +2891,14 @@ mod tests {
     /// Exploring the open room of frontier_goal_in_open_room (0.1 m cells, robot in cell (10, 3)),
     /// its one frontier goal sent at t = 1 s and not answered yet (no look-around).
     fn exploring(io: &mut TestIo) -> Explorer {
+        exploring_with(io, |_| {})
+    }
+
+    /// `exploring` with some parameters changed.
+    fn exploring_with(io: &mut TestIo, change: impl FnOnce(&mut Params)) -> Explorer {
         let mut p = Params::load(&mut crate::watchdog::Defaults).unwrap();
         p.look_steps = 0;
+        change(&mut p);
         let mut e = open_room(io, p);
         io.t = 1.0;
         e.on_command("start", io);
@@ -2917,7 +3125,7 @@ mod tests {
         let mut io = TestIo::default();
         let mut e = exploring(&mut io);
         e.on_sensors(&Sensors { bump_left: true, ..Default::default() }, &mut io);
-        assert!(io.zones[0].ends_with(r#""ttl_s": 600.0, "clear": [0.35, 1.05, 0.28], "soft": 0.22}"#), "{}", io.zones[0]);
+        assert!(io.zones[0].ends_with(r#""ttl_s": 60.0, "clear": [0.35, 1.05, 0.28], "soft": 0.22}"#), "{}", io.zones[0]);
         e.on_sensors(&Sensors { cliff: [false, true, false, false], ..Default::default() }, &mut io);
         e.on_mode("passive", &mut io);
         e.cliff_check(&mut io);
@@ -3061,7 +3269,7 @@ mod tests {
     #[test]
     fn railing_marks_stay_for_the_next_trip_home() {
         let mut io = TestIo::default();
-        let mut e = exploring(&mut io);
+        let mut e = exploring_with(&mut io, |p| p.bump_mark_short_ttl = 0.0);
         let g = io.goals[0].clone();
         e.on_goal_response(g.seq, true, &mut io);
         io.pose = (g.x, g.y);
@@ -3087,6 +3295,87 @@ mod tests {
         assert_eq!(e.state(), State::Done);
     }
 
+    #[test]
+    fn bump_with_a_person_in_front_is_not_marked() {
+        let mut io = TestIo::default();
+        let mut e = exploring(&mut io);
+        let g = io.goals[0].clone();
+        e.on_goal_response(g.seq, true, &mut io);
+        // Someone 0.5 m ahead, seen a second before the hit: a leg, not a railing.
+        e.on_persons("base_link", &[[0.5, 0.0, 0.8]], &mut io);
+        io.t = 2.0;
+        e.on_sensors(&Sensors { bump_left: true, ..Default::default() }, &mut io);
+        e.on_sensors(&Sensors::default(), &mut io);
+        assert!(io.zones.is_empty(), "{:?}", io.zones);
+        assert!(io.logs.iter().any(|(_, m)| m == "Bumper hit at +29 deg with a person in front: not marked"), "{:?}", io.logs);
+        // Someone behind it, or seen too long ago: marked, and counted towards skipping the goal.
+        io.t = 6.0;
+        e.on_persons("base_link", &[[-0.5, 0.0, 0.8]], &mut io);
+        e.on_sensors(&Sensors { bump_left: true, ..Default::default() }, &mut io);
+        assert_eq!(io.zones.len(), 1);
+        assert!(io.cancels.is_empty(), "one bump counted, not two");
+    }
+
+    #[test]
+    fn bump_mark_is_short_lived_unless_bumped_again() {
+        let mut io = TestIo::default();
+        let mut e = exploring(&mut io);
+        e.on_sensors(&Sensors { bump_left: true, ..Default::default() }, &mut io);
+        e.on_sensors(&Sensors::default(), &mut io);
+        assert!(io.zones[0].contains(r#""ttl_s": 60.0"#), "{}", io.zones[0]);
+        assert!(io.logs.iter().any(|(_, m)| m.ends_with("marked bump_000000_1 for 60 s")), "{:?}", io.logs);
+        // The same spot again: that mark now lasts 10 min (sent again); no second mark.
+        io.t = 20.0;
+        e.on_sensors(&Sensors { bump_left: true, ..Default::default() }, &mut io);
+        assert_eq!(io.zones.len(), 3, "{:?}", io.zones);
+        assert_eq!(io.zones[1], r#"{"op": "delete", "name": "bump_000000_1"}"#);
+        assert!(io.zones[2].contains(r#""ttl_s": 600.0"#), "{}", io.zones[2]);
+        // ... and keeps planned paths 0.1 m off: the robot's radius + 0.1 m (+ 1 cm) of margin.
+        assert!(io.zones[2].contains(r#""margin": 0.28"#), "{}", io.zones[2]);
+        assert!(io.logs.iter().any(|(_, m)| m == "Bumped at bump_000000_1 again: keeping it for 10 min"));
+        // A hit beside it (turned 1.2 rad at the same spot: someone's legs) is another short mark.
+        e.on_sensors(&Sensors::default(), &mut io);
+        io.yaw = 1.2;
+        io.t = 25.0;
+        e.on_sensors(&Sensors { bump_left: true, ..Default::default() }, &mut io);
+        assert_eq!(io.zones.len(), 4, "{:?}", io.zones);
+        assert!(io.zones[3].contains(r#""ttl_s": 60.0"#), "{}", io.zones[3]);
+    }
+
+    #[test]
+    fn boxed_in_by_its_own_marks_it_removes_them() {
+        let mut io = TestIo::default();
+        let mut e = exploring(&mut io);
+        let g = io.goals[0].clone();
+        e.on_goal_response(g.seq, true, &mut io);
+        e.on_result(g.seq, 6, &mut io);
+        // Three hits around the robot (people's legs, as at the stair head in Isaac run 9) ...
+        for (k, yaw) in [0.0, 2.0, 4.0].into_iter().enumerate() {
+            io.yaw = yaw;
+            io.t = 2.0 + k as f64;
+            e.on_sensors(&Sensors { bump_left: true, ..Default::default() }, &mut io);
+            e.on_sensors(&Sensors::default(), &mut io);
+        }
+        assert_eq!(io.zones.len(), 3);
+        // ... and the costmap closed around it (a ring 2 cells out), the rest of the room free.
+        let mut boxed = e.grid.clone().unwrap();
+        for r in 0..20i64 {
+            for c in 0..13i64 {
+                if (r - 10).abs().max((c - 3).abs()) == 2 {
+                    boxed.data[(r * 20 + c) as usize] = 100;
+                }
+            }
+        }
+        e.on_grid(boxed);
+        io.ticks(&mut e, 10, 10);
+        assert_eq!(io.zones.len(), 4);
+        assert_eq!(io.zones[3], r#"{"op": "delete", "name": "bump_000000_1"}"#, "the oldest first");
+        assert!(io.logs.iter().any(|(_, m)| m == "Boxed in by its own bump marks (0.1 m2 to move in): removed bump_000000_1"));
+        io.ticks(&mut e, 11, 12);
+        assert_eq!(io.zones.len(), 4, "one every trap_wait_s");
+        io.ticks(&mut e, 13, 13);
+        assert_eq!(io.zones[4], r#"{"op": "delete", "name": "bump_000000_2"}"#);
+    }
 
     #[test]
     fn drop_offs_keep_frontiers_and_goals_out() {

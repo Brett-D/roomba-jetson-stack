@@ -5,6 +5,7 @@ compares every output in order: status JSON, ~/markers (every marker field; the 
 they are built), NavigateToPose goals (frame, position, orientation,
 stamp), cancels, controller parameter get/set requests, keep-out commands, cliff timers and log
 lines, plus the frontier goals and reachable area computed for every costmap (Q events). Inputs
+also include people the person detector reports (PD) and floor_obstacles' drop-off points (DR). Nothing goes through ROS:
 time.monotonic, the node clock and the wall clock (mark names, UTC) follow the script. A scripted
 NavigateToPose server answers goals (accept / reject, at once, late or never; succeed / abort /
 never, cancel -> canceled) and fake controller parameter services answer get/set. Some scenarios
@@ -41,6 +42,7 @@ from rclpy.time import Time
 from roomba_msgs.msg import SensorState
 from sensor_msgs.msg import BatteryState, PointCloud2, PointField
 from std_msgs.msg import String
+from vision_msgs.msg import Detection3D, Detection3DArray
 
 import roomba_perception.explorer as E
 
@@ -68,6 +70,20 @@ def cloud_msg(frame, pts):
     msg.fields = [PointField(name=n, offset=4 * i, datatype=PointField.FLOAT32, count=1) for i, n in enumerate('xyz')]
     msg.data = np.ascontiguousarray(pts, dtype=np.float32).tobytes()
     return msg
+
+
+def detections_msg(frame, pts):
+    """Detection3DArray with a box centred at each point (as the person detector publishes it)."""
+    msg = Detection3DArray()
+    msg.header.frame_id = frame
+    for x, y, z in pts:
+        d = Detection3D()
+        d.header.frame_id = frame
+        d.bbox.center.position.x, d.bbox.center.position.y, d.bbox.center.position.z = float(x), float(y), float(z)
+        msg.detections.append(d)
+    return msg
+
+
 class Outputs(list):
     """The Python node's outputs, with the (script) time of each in .t for scenario checks."""
 
@@ -398,6 +414,10 @@ class Harness:
             arr = np.asarray(pts, dtype=np.float32).reshape(-1, 3)
             self.ev('DR', frame, [[float(v) for v in row] for row in arr])
             self.subs['/perception/drops'](cloud_msg(frame, arr))
+        elif kind == 'PD':
+            frame, pts = p
+            self.ev('PD', frame, [[float(v) for v in q] for q in pts])
+            self.subs['/perception/person_detector/detections_3d'](detections_msg(frame, pts))
         elif kind == 'Q':
             self.ev('Q', *(p or ()))
             self.py.append(self.frontier_query(p))
@@ -1071,7 +1091,8 @@ def sc_home_retry(h):
 def sc_home_retry_marks(h):
     """home_retry with two bump marks side by side (a railing the camera misses) made while it
     looks around: kept for the second trip home (they route it around the railing), dropped before
-    the third."""
+    the third (bump_mark_short_ttl_s 0: unconfirmed marks would have expired by then)."""
+    h.params['bump_mark_short_ttl_s'] = 0.0
     sc_home_retry(h)
     for t, x in ((3.0, 2.5), (4.2, 2.75)):
         h.inp(t - 0.3, 'CALL', lambda x=x: (setattr(h.world, 'pose', (x, 1.5, 0.0)), h.world.publish()))
@@ -1276,6 +1297,96 @@ def sc_drop_void(h):
         return [f'goals past the drop: {[(round(o[3], 2), round(o[4], 2)) for o in bad]}'] if bad else []
     h.checks = [stayed_out, check_final]
     return 1500
+
+
+def sc_people_bump(h):
+    """People walk into the robot while it explores: a hit with a person seen in front of it
+    (detections_3d, base_link) is neither marked nor counted towards skipping the goal; a hit with
+    nobody seen is marked for bump_mark_short_ttl_s."""
+    start_world(h, house())
+    h.policy = moving_policy(h)
+    h.inp(0.0, 'CALL', lambda: [h.inp(t, 'S', {}) for t in np.arange(1.1, 400.0, 1.0)])
+    for t, seen in ((30.0, True), (60.0, True), (90.0, False), (120.0, True), (150.0, False)):
+        if seen:
+            h.inp(t, 'PD', ('base_link', [(0.6, 0.1, 0.8), (2.5, -1.0, 0.8)]))
+        else:
+            h.inp(t, 'PD', ('base_link', [(-0.6, 0.0, 0.8)]))   # behind it
+        h.inp(t + 0.5, 'S', {'bump_left': True})
+        h.inp(t + 0.7, 'S', {})
+
+    def short_marks(h):
+        adds = [json.loads(o[1]) for o in h.py if o[0] == 'ZN' and json.loads(o[1]).get('op') == 'add']
+        return [] if adds and all(a['ttl_s'] == 60.0 for a in adds) else [f'marks: {adds}']
+    h.checks = [lambda h: check_logs(h, 'with a person in front: not marked', 3), short_marks]
+    return 400
+
+
+def sc_bump_confirm(h):
+    """Nothing to explore (it finishes where it stands): a bump is marked for bump_mark_short_ttl_s;
+    the same spot bumped again makes that mark last bump_mark_ttl_s (sent again, no new mark);
+    another spot gets its own short mark, which then expires from the markers."""
+    truth = np.full((80, 100), 100, np.int8)
+    truth[2:-2, 2:-2] = 0
+    start_world(h, truth, start=(1.0, 1.0, 0.0))
+    h.world.known[:] = True
+    h.policy = moving_policy(h)
+    for t in (5.0, 9.0):
+        h.inp(t, 'S', {'bump_left': True})
+        h.inp(t + 0.2, 'S', {})
+    h.inp(14.5, 'CALL', lambda: (setattr(h.world, 'pose', (1.0, 1.0, 3.0)), h.world.publish()))
+    h.inp(15.0, 'S', {'bump_left': True})
+    h.inp(15.2, 'S', {})
+
+    def commands(h):
+        ops = [(z['op'], z.get('ttl_s')) for o in h.py if o[0] == 'ZN' for z in [json.loads(o[1])]]
+        want = [('add', 60.0), ('delete', None), ('add', 600.0), ('add', 60.0)]
+        return [] if ops[:4] == want else [f'mark commands {ops}']
+    h.checks = [commands, lambda h: check_logs(h, 'again: keeping it for 10 min', 1)]
+    return 120
+
+
+def sc_ring_trap(h):
+    """Six bumps around the robot before it starts (as at the stair head in Isaac run 9), the costmap
+    closed around it: boxed in, it removes its marks one at a time (oldest first); once one is gone
+    there is a way out (the ring was its marks) and it explores."""
+    truth = house()
+    start_world(h, truth, cmd_at=20.0)
+    r0, c0 = h.world.cell(0.5, 0.5)
+    ring = [(r, c) for r in range(r0 - 8, r0 + 9) for c in range(c0 - 8, c0 + 9)
+            if max(abs(r - r0), abs(c - c0)) == 8]
+    under = [int(truth[rc]) for rc in ring]
+    for k in range(6):
+        t = 3.0 + 2.0 * k
+        h.inp(t - 0.5, 'CALL', lambda yaw=k * math.pi / 3.0: (setattr(h.world, 'pose', (0.5, 0.5, yaw)),
+                                                              h.world.publish()))
+        h.inp(t, 'S', {'bump_left': True})
+        h.inp(t + 0.2, 'S', {})
+
+    def deletes():
+        return sum(1 for o in h.py if o[0] == 'ZN' and json.loads(o[1]).get('op') == 'delete')
+
+    def close():
+        for r, c in ring:
+            truth[r, c] = 100
+        state['deletes'] = deletes()
+        h.world.publish()
+    h.inp(16.0, 'CALL', close)
+
+    def opened():
+        if state['closed'] and deletes() > state['deletes']:
+            state['closed'] = False
+            for rc, v in zip(ring, under):
+                truth[rc] = v
+            h.world.publish()
+    state = {'closed': True, 'deletes': 0}
+    h.inp(0.0, 'CALL', lambda: [h.inp(t, 'CALL', opened) for t in np.arange(16.5, 600.0, 1.0)])
+    h.policy = moving_policy(h)
+
+    def got_out(h):
+        goals = [o for o in h.py if o[0] == 'GL']
+        return [] if len(goals) >= 3 else [f'{len(goals)} goals after the ring opened']
+    h.checks = [lambda h: check_logs_any(h, 'Boxed in by its own bump marks'), got_out]
+    return 600
 SCENARIOS = {name[3:]: fn for name, fn in globals().items() if name.startswith('sc_')}
 
 

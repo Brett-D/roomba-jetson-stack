@@ -7,6 +7,7 @@
 //! Subscribes: /global_costmap/costmap, /roomba/mode (latched), /battery_state, /roomba/sensors,
 //!             /vslam_filter/status, ~/command ("start" | "stop" | "home"), /tf, /tf_static
 //!             /perception/drops (drop-offs floor_obstacles saw)
+//!             /perception/person_detector/detections_3d (people the detector sees)
 //! Publishes:  ~/status (JSON, transient local), /perception/ignore_zones/command, ~/markers (how it
 //!             decides where to go; transient local, only while someone listens)
 //! Uses:       navigate_to_pose action, /controller_server/get_parameters|set_parameters,
@@ -18,7 +19,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use rclrs::*;
-use ros_env::{builtin_interfaces, geometry_msgs, nav2_msgs, nav_msgs, rcl_interfaces, roomba_msgs, sensor_msgs, std_msgs, visualization_msgs};
+use ros_env::{builtin_interfaces, geometry_msgs, nav2_msgs, nav_msgs, rcl_interfaces, roomba_msgs, sensor_msgs, std_msgs, vision_msgs, visualization_msgs};
 
 use nav2_msgs::action::{NavigateToPose, Spin};
 use rcl_interfaces::msg::{Parameter, ParameterValue};
@@ -511,6 +512,13 @@ fn main() -> Result<()> {
         |s: &mut State, m: sensor_msgs::msg::PointCloud2| {
             let points = cloud_xyz(&m);
             s.core.on_drops(&m.header.frame_id, &points, &mut s.io)
+        },
+    )?;
+    let _persons = worker.create_subscription::<vision_msgs::msg::Detection3DArray, _>(
+        "/perception/person_detector/detections_3d".keep_last(5),
+        |s: &mut State, m: vision_msgs::msg::Detection3DArray| {
+            let points: Vec<[f64; 3]> = m.detections.iter().map(|d| [d.bbox.center.position.x, d.bbox.center.position.y, d.bbox.center.position.z]).collect();
+            s.core.on_persons(&m.header.frame_id, &points, &mut s.io)
         },
     )?;
     // Steady-clock timers: with a ROS-time (system clock) timer, a wait that ends for it just as the

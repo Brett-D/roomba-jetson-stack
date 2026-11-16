@@ -145,6 +145,13 @@ def generate_launch_description():
                           # Drop-offs floor_obstacles reports (a stair opening the map shows as
                           # floor) keep frontiers and goal spots 0.3 m away.
                           'drop_clear_m': 0.3,
+                          # Bumps with a person seen in front are not marked, a mark lasts 60 s
+                          # unless the same spot is bumped again, and marks that box it in are removed.
+                          'bump_mark_short_ttl_s': 60.0, 'person_bump_dist_m': 1.2, 'trap_area_m2': 1.0,
+                          # A mark bumped again is a railing or glass: the robot's centre stays 0.28 m
+                          # from it (footprint 0.17 + 0.1 m; keep-out cells aren't inflated, and in
+                          # Isaac run 9 it rubbed along the stair railing).
+                          'bump_mark_confirmed_margin_m': 0.28,
                           'frontier_split_m': 2.0,
                           'unstuck_skill': ParameterValue(LaunchConfiguration('unstuck_skill'), value_type=bool),
                           'goal_ranking': LaunchConfiguration('goal_ranking'),
