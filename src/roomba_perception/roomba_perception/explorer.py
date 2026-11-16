@@ -414,7 +414,8 @@ class Explorer(Node):
         self.bump_marks = bool(p('bump_marks', True).value) and SensorState is not None
         self.bump_mark_ttl = float(p('bump_mark_ttl_s', 600.0).value)
         # A mark not confirmed by another bump at the same spot (within bump_mark_spacing_m) lasts
-        # only this long: people walking into the robot leave single hits (0 = all bump_mark_ttl_s).
+        # only this long: people walking into the robot leave single hits (0: new marks last
+        # bump_mark_ttl_s too; they still widen only once confirmed).
         self.bump_mark_short_ttl = float(p('bump_mark_short_ttl_s', 60.0).value)
         self.bump_mark_margin = float(p('bump_mark_margin_m', 0.15).value)
         # A confirmed mark (bumped twice at the same spot: a railing, glass) keeps the robot's
@@ -730,14 +731,16 @@ class Explorer(Node):
         self.bump_points = [b for b in self.bump_points if now - b[2] < self.bump_mark_ttl]
         if same:
             return   # already marked here
-        ttl = self.bump_mark_ttl if self.bump_mark_short_ttl <= 0 else self.bump_mark_short_ttl
+        # New marks start unconfirmed (bump_mark_margin_m) whatever their TTL: a repeat hit there
+        # confirms and widens them.
+        ttl = self.bump_mark_short_ttl if self.bump_mark_short_ttl > 0 else self.bump_mark_ttl
         self.bump_points.append((cx, cy, now))
         name = time.strftime('bump_%H%M%S') + f'_{len(self.bump_points)}'
         cmd = {'op': 'add', 'kind': 'keepout', 'name': name, 'points': points,
                'margin': self.bump_mark_margin, 'ttl_s': ttl}
         self._clear_robot(cmd, pose)
         self.pub_zone_cmd.publish(String(data=json.dumps(cmd)))
-        self._sent_mark('bump', name, points, now, ttl, cmd, self.bump_mark_short_ttl <= 0)
+        self._sent_mark('bump', name, points, now, ttl, cmd, False)
         self.get_logger().info(f'Bumper hit at {math.degrees(bearing):+.0f} deg: marked {name} '
                                f'for {_duration_text(ttl)}')
 

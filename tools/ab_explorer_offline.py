@@ -1412,6 +1412,21 @@ def sc_bump_confirm(h):
     return 120
 
 
+def sc_bump_confirm_no_short_ttl(h):
+    """bump_confirm with bump_mark_short_ttl_s 0: every mark lasts bump_mark_ttl_s, but a new one
+    still has the ordinary margin; the same spot bumped again widens it to
+    bump_mark_confirmed_margin_m (sent again)."""
+    h.params['bump_mark_short_ttl_s'] = 0.0
+    until = sc_bump_confirm(h)
+
+    def commands(h):
+        ops = [(z['op'], z.get('ttl_s'), z.get('margin')) for o in h.py if o[0] == 'ZN' for z in [json.loads(o[1])]]
+        want = [('add', 600.0, 0.15), ('delete', None, None), ('add', 600.0, 0.28), ('add', 600.0, 0.15)]
+        return [] if ops[:4] == want else [f'mark commands {ops}']
+    h.checks = [commands, lambda h: check_logs(h, 'again: keeping it for 10 min', 1)]
+    return until
+
+
 def sc_ring_trap(h):
     """Six bumps around the robot before it starts (as at the stair head in Isaac run 9), the costmap
     closed around it: boxed in, it removes its marks one at a time (oldest first); once one is gone

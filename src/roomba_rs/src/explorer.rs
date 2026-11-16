@@ -774,8 +774,8 @@ impl Params {
             bump_marks: p.boolean("bump_marks", true)?,
             bump_mark_ttl: p.float("bump_mark_ttl_s", 600.0)?,
             // A mark not confirmed by another bump at the same spot (within bump_mark_spacing_m)
-            // lasts only this long: people walking into the robot leave single hits (0 = all
-            // bump_mark_ttl_s).
+            // lasts only this long: people walking into the robot leave single hits (0: new marks
+            // last bump_mark_ttl_s too; they still widen only once confirmed).
             bump_mark_short_ttl: p.float("bump_mark_short_ttl_s", 60.0)?,
             bump_mark_margin: p.float("bump_mark_margin_m", 0.15)?,
             // A confirmed mark (bumped twice at the same spot: a railing, glass) keeps the robot's
@@ -1417,8 +1417,9 @@ impl Explorer {
         if !same.is_empty() {
             return; // already marked here
         }
-        let confirmed = self.p.bump_mark_short_ttl <= 0.0;
-        let ttl = if confirmed { self.p.bump_mark_ttl } else { self.p.bump_mark_short_ttl };
+        // New marks start unconfirmed (bump_mark_margin_m) whatever their TTL: a repeat hit there
+        // confirms and widens them.
+        let ttl = if self.p.bump_mark_short_ttl > 0.0 { self.p.bump_mark_short_ttl } else { self.p.bump_mark_ttl };
         self.bump_points.push((cx, cy, now));
         let name = format!("bump_{}_{}", io.local_hms(), self.bump_points.len());
         let mut cmd = zone_add(&name, &points);
@@ -1426,7 +1427,7 @@ impl Explorer {
         cmd.insert("ttl_s".into(), Value::from(ttl));
         self.clear_robot(&mut cmd, x, y);
         io.zone_command(py_json(&Value::Object(cmd.clone()), None));
-        self.sent_mark(true, &name, points, now, ttl, Some(cmd), confirmed);
+        self.sent_mark(true, &name, points, now, ttl, Some(cmd), false);
         io.log(Level::Info, format!("Bumper hit at {:+.0} deg: marked {name} for {}", bearing.to_degrees(), duration_text(ttl)));
     }
 
@@ -3517,6 +3518,20 @@ mod tests {
         io.ticks(&mut e, 32, 32);
         assert!(e.pending_persons.is_empty());
         assert_eq!(io.warnings("Person detections without a transform"), 1);
+    }
+
+    #[test]
+    fn without_a_short_ttl_a_repeat_hit_still_widens_the_mark() {
+        let mut io = TestIo::default();
+        let mut e = exploring_with(&mut io, |p| p.bump_mark_short_ttl = 0.0);
+        e.on_sensors(&Sensors { bump_left: true, ..Default::default() }, &mut io);
+        e.on_sensors(&Sensors::default(), &mut io);
+        assert!(io.zones[0].contains(r#""margin": 0.15"#) && io.zones[0].contains(r#""ttl_s": 600.0"#), "{}", io.zones[0]);
+        io.t = 20.0;
+        e.on_sensors(&Sensors { bump_left: true, ..Default::default() }, &mut io);
+        assert_eq!(io.zones.len(), 3, "{:?}", io.zones);
+        assert_eq!(io.zones[1], r#"{"op": "delete", "name": "bump_000000_1"}"#);
+        assert!(io.zones[2].contains(r#""margin": 0.28"#), "{}", io.zones[2]);
     }
 
     #[test]
