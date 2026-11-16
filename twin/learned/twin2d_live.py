@@ -72,8 +72,12 @@ def main():
     ap.add_argument("--foxglove_port", type=int, default=18767, help="0 = no Foxglove bridge")
     ap.add_argument("--scenarios", nargs="+", default=["nose_to_wall_live", "wall_angle_live"])
     ap.add_argument("--loops", type=int, default=0, help="0 = until stopped")
-    ap.add_argument("--skill_at", type=float, default=20.0)
+    ap.add_argument("--skill_at", type=float, default=20.0,
+                    help="call the skill by hand this long after the start; < 0: never (the explorer calls it, unstuck_skill:=true)")
     ap.add_argument("--world", default="/root/twin2d_data/world/house.yaml")
+    ap.add_argument("--launch-args", default="", help="extra twin2d.launch.py arguments, e.g. 'unstuck_skill:=true goal_ranking:=learned'")
+    ap.add_argument("--title", default="Learned unstuck skill - live 2D twin demo (WSL, real navigation stack + unstuck_skill)")
+    ap.add_argument("--about", default="", help="status-file lines (separated by |) describing a run; default: the nose-to-wall demo")
     ap.add_argument("--status", default="")
     ap.add_argument("--password_file", default="")
     a = ap.parse_args()
@@ -96,13 +100,17 @@ def main():
         except ValueError:
             history = []
     state = {"loop": 0, "scenario": "", "phase": "starting", "since": started}
+    about = a.about.split("|") if a.about else [
+        f"Each run: robot starts stuck nose to the hallway wall; the learned skill is called ~{a.skill_at:.0f} s after the start;",
+        "the explorer starts at 45 s and the run ends at 150 s, then the next run starts (scenarios alternate)."]
+    extra = a.launch_args.split()
 
     def status():
         if not a.status:
             return
         now = datetime.datetime.now()
         lines = [
-            "Learned unstuck skill - live 2D twin demo (WSL, real navigation stack + unstuck_skill)",
+            a.title,
             f"Updated {now:%Y-%m-%d %H:%M:%S}; demo running since {started:%H:%M:%S}",
             "",
             f"Web app:  http://localhost:{a.web_port}   (password in {a.password_file.replace('/mnt/e/', 'E:/')})",
@@ -110,10 +118,7 @@ def main():
             f"ROS_DOMAIN_ID {a.domain} (WSL, localhost only)",
             "",
             f"Now: run {state['loop']} ({state['scenario']}): {state['phase']} (since {state['since']:%H:%M:%S})",
-            f"Each run: robot starts stuck nose to the hallway wall; the learned skill is called ~{a.skill_at:.0f} s after the start;",
-            "the explorer (origin/main) starts at 45 s and the run ends at 150 s, then the next run starts (scenarios alternate).",
-            "Note: main's explorer often stops at once with 'no reachable unmapped areas left' (the false finish the twinfix",
-            "branch fixes); the run then ends early (~90 s) and the next one starts.",
+            *about,
             "",
             "Stop: wsl -d Ubuntu-24.04 -u root -- bash /mnt/e/twin/learned/roomba-jetson-stack/twin/learned/twin2d_live_stop.sh",
             f"Loop PID (WSL): {os.getpid()}   logs: {a.out}",
@@ -149,12 +154,15 @@ def main():
         else:
             os.makedirs(out_dir, exist_ok=True)
         scen_path = os.path.join(HERE, "twin2d", scen + ".yaml")
+        if not os.path.exists(scen_path):
+            scen_path = os.path.join(a.ws, "src", "roomba_bringup", "config", "twin2d", scen + ".yaml")
         args = [os.path.join(a.ws, "scripts", "run_twin2d.sh"), f"scenario:={scen_path}", f"out_dir:={out_dir}", f"world:={a.world}",
                 f"web:={'true' if a.web_port else 'false'}", f"foxglove:={'true' if a.foxglove_port else 'false'}", "exit_on_finish:=true"]
         if a.web_port:
             args.append(f"web_port:={a.web_port}")
         if a.foxglove_port:
             args.append(f"foxglove_port:={a.foxglove_port}")
+        args += extra
         launch = subprocess.Popen(args, env=env, stdout=open(os.path.join(out_dir, "launch.log"), "w"), stderr=subprocess.STDOUT, start_new_session=True)
         call_log = os.path.join(out_dir, "unstuck_call.log")
 
@@ -167,13 +175,15 @@ def main():
             cmd = f"{setup}; exec ros2 action send_goal --feedback /unstuck_skill roomba_skills_msgs/action/Unstuck '{{time_limit_s: 15.0}}'"
             return subprocess.Popen(["bash", "-c", cmd], env=env, stdout=open(call_log, "a"), stderr=subprocess.STDOUT, start_new_session=True)
 
-        skill = start_skill(0)
+        skill = start_skill(0) if a.skill_at >= 0 else None
+        launch_log = os.path.join(out_dir, "launch.log")
+        last_note = 0.0
         t0 = time.time()
         call = None
         res = None
         restarts = 0
         fb_n, fb_t = 0, 0.0
-        phase("stack starting, robot stuck nose to the wall")
+        phase("stack starting, robot stuck nose to the wall" if a.skill_at >= 0 else "stack starting")
         while not STOP and launch.poll() is None:
             time.sleep(0.5)
             if a.password_file and not os.path.exists(os.path.join(webhome, "auth.json")) and os.path.exists(os.path.join(home_cfg, "auth.json")):
@@ -182,7 +192,18 @@ def main():
                 if os.path.exists(pw):
                     with open(a.password_file, "w", newline="\r\n") as f:
                         f.write(open(pw).read().strip() + "\n")
-            if call is None and time.time() - t0 >= a.skill_at:
+            if a.skill_at < 0 and time.time() - last_note > 10:
+                # explorer-driven runs: show what the explorer and the skill are doing
+                last_note = time.time()
+                try:
+                    log = open(launch_log, errors="replace").read()
+                except OSError:
+                    log = ""
+                calls, free = log.count("calling the unstuck skill"), log.count("Unstuck skill: free")
+                said = re.findall(r"\[explorer\]: (.*)", log)
+                note = f"exploring: {said[-1][:90]}" if said else "exploring"
+                phase(f"{note}  (unstuck skill calls {calls}, freed {free})")
+            if a.skill_at >= 0 and call is None and time.time() - t0 >= a.skill_at:
                 call = start_call()
                 call_t = time.time()
                 fb_n, fb_t = 0, time.time()
@@ -232,6 +253,13 @@ def main():
         if restarts:
             sk += f" after {restarts} node restart(s)"
         run_txt = "no result.json" if not r else f"{r.get('outcome')} after {r.get('sim_time_s', 0):.0f} s, coverage {cov or 0:.3f}, {r.get('distance_m', 0):.1f} m, bumps {bumps}"
+        if a.skill_at < 0:
+            try:
+                log = open(launch_log, errors="replace").read()
+            except OSError:
+                log = ""
+            fin = ((r.get("explorer") or {}).get("final_message") or "")[:80]
+            sk = f"unstuck skill calls {log.count('calling the unstuck skill')}, freed {log.count('Unstuck skill: free')}; {fin}"
         history.append(f"run {i:3d} {scen:<18s} {datetime.datetime.now():%H:%M}  {sk}; run: {run_txt}")
         json.dump(history, open(hist_path, "w"), indent=0)
         phase("run finished" if not STOP else "stopped")
