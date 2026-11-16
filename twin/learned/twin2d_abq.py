@@ -68,7 +68,8 @@ def run_row(cfg, scen, seed, d):
         "idle_s": st.get("idle_total_s", 0.0), "outcome": outcome(r),
         "unstuck_calls": len(re.findall(r"calling the unstuck skill", log)),
         "unstuck_free": len(re.findall(r"Unstuck skill: free", log)),
-        "watchdog_exits": len(re.findall(r"watchdog: no control step", log)),
+        "unstuck_timeouts": len(re.findall(r"The unstuck skill did not finish within", log)),
+        "watchdog_exits": len(re.findall(r"watchdog: no .* exiting to be respawned", log)),
     }
 
 
@@ -91,15 +92,19 @@ def summarise(out):
             v = r[k]
             cells.append(f"{100 * v:.0f}%" if k == "coverage" and v is not None else (f"{v:.0f}" if isinstance(v, float) else str(v)))
         lines.append("| " + " | ".join(cells) + " |")
-    lines += ["", "| config | runs | coverage | sim s | distance m | bumps | stuck episodes | longest stuck s | home | unstuck calls (free) |", "|---|---|---|---|---|---|---|---|---|---|"]
-    for cfg in CONFIGS:
-        rs = [r for r in rows if r["config"] == cfg and r["coverage"] is not None]
-        if not rs:
-            continue
-        mean = lambda k: sum(r[k] for r in rs) / len(rs)  # noqa: E731
-        lines.append(f"| {cfg} | {len(rs)} | {100 * mean('coverage'):.1f}% | {mean('sim_s'):.0f} | {mean('distance_m'):.1f} | "
-                     f"{sum(r['bumps'] for r in rs)} | {sum(r['stuck'] for r in rs)} | {max(r['stuck_longest_s'] for r in rs):.0f} | "
-                     f"{sum(r['outcome'] == 'home' for r in rs)}/{len(rs)} | {sum(r['unstuck_calls'] for r in rs)} ({sum(r['unstuck_free'] for r in rs)}) |")
+    lines += ["", "| world | config | runs | coverage | sim s | distance m | bumps | stuck episodes | longest stuck s | home | unstuck calls (free / no answer) | watchdog exits |",
+              "|---|---|---|---|---|---|---|---|---|---|---|---|"]
+    for world, plan in (("scenarios", False), ("plan", True)):
+        for cfg in CONFIGS:
+            rs = [r for r in rows if r["config"] == cfg and r["coverage"] is not None and r["scenario"].startswith("plan:") == plan]
+            if not rs:
+                continue
+            mean = lambda k: sum(r[k] for r in rs) / len(rs)  # noqa: E731
+            lines.append(f"| {world} | {cfg} | {len(rs)} | {100 * mean('coverage'):.1f}% | {mean('sim_s'):.0f} | {mean('distance_m'):.1f} | "
+                         f"{sum(r['bumps'] for r in rs)} | {sum(r['stuck'] for r in rs)} | {max(r['stuck_longest_s'] for r in rs):.0f} | "
+                         f"{sum(r['outcome'] == 'home' for r in rs)}/{len(rs)} | {sum(r['unstuck_calls'] for r in rs)} "
+                         f"({sum(r['unstuck_free'] for r in rs)} / {sum(r.get('unstuck_timeouts', 0) for r in rs)}) | "
+                         f"{sum(r.get('watchdog_exits', 0) for r in rs)} |")
     md = "\n".join(lines) + "\n"
     open(os.path.join(out, "abq_summary.md"), "w").write(md)
     return md
@@ -126,7 +131,8 @@ def main():
     scen_dir = os.path.join(a.ws, "src", "roomba_bringup", "config", "twin2d")
     names = a.scenarios.split(",") if a.scenarios else sorted(os.path.splitext(os.path.basename(p))[0] for p in glob.glob(os.path.join(scen_dir, "*.yaml")))
     items = []
-    for name in names + (["plan:explore_from_dock"] if a.plan_world and not a.scenarios else []):
+    # the long plan-world runs first, so they don't trail at the end
+    for name in (["plan:explore_from_dock"] if a.plan_world and not a.scenarios else []) + names:
         plan = name.startswith("plan:")
         stem = name.split(":", 1)[-1]
         for seed in [int(s) for s in a.seeds.split(",")]:
