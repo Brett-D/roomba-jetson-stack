@@ -237,8 +237,9 @@ driving and restarts the explorer (`operator.delay_s`, `max_interventions`).
 
 **Scenarios** (`src/roomba_bringup/config/twin2d/*.yaml`: explore_from_dock, door_closes,
 door_reopens, invisible_railing, sparse_railing, nose_to_wall, low_battery, person_walking, stairs,
-furniture; every key is optional, unknown keys are errors; see `src/roomba_rs/src/twin/scenario.rs`
-for all of them):
+furniture, people_bump (people walk into the robot), ring_of_marks (phantom bumps all around it at the
+dock), plan_stairwell (the floor-plan world with its stair opening as a drop-off); every key is
+optional, unknown keys are errors; see `src/roomba_rs/src/twin/scenario.rs` for all of them):
 
 ```yaml
 name: door_closes
@@ -251,23 +252,31 @@ explorer: {autostart_s: 15}    # negative: don't start it (drive from the web ap
 operator: {enabled: true, delay_s: 10, max_interventions: 3}
 battery: {soc: 0.95, capacity_ah: 4.0, drain_scale: 1}
 robot: {turn_efficiency: 1.0, stuck_bump_right: false}
-sensors: {depth_noise_a: 0.002, depth_noise_b: 0.003, depth_dropout: 0, depth_scale: 1.0}
+sensors: {depth_noise_a: 0.002, depth_noise_b: 0.003, depth_dropout: 0, depth_scale: 1.0,
+          person_rate_hz: 4, person_recall: 0.8, person_range_m: 5}   # simulated person detections
 odometry: {scale_error: 0, yaw_drift_deg_per_m: 0, correction_period_s: 1}
 doors:     [{name: d, segment: [[-1.6, -1.2], [-0.75, -1.2]], events: [{t: 60, state: closed}, {t: 420, state: open}]}]
 railings:  [{name: r, points: [[1.2, 1.3], [4.4, 1.3]], depth: none}]        # none | sparse | solid
 obstacles: [{name: o, polygon: [[...]], zmin: 0.4, zmax: 0.45, depth: solid}]  # or circle: [x, y, r], segment
-people:    [{name: p, path: [[1.8, -0.35], [1.8, 2.4]], speed_mps: 0.7, from_s: 18, until_s: 618}]
-cliffs:    [{name: stairs, polygon: [[2.0, 2.3], [3.4, 2.3], [3.4, 2.95], [2.0, 2.95]]}]
-events:    [{t: 240, battery_soc: 0.17}, {t: 300, tracking_lost_s: 10}, {t: 400, explorer: stop}]
+people:    [{name: p, path: [[1.8, -0.35], [1.8, 2.4]], speed_mps: 0.7, from_s: 18, until_s: 618,
+             walks_into_robot: false}]   # true: doesn't wait for the robot, bumps into it
+cliffs:    [{name: stairs, polygon: [[2.0, 2.3], [3.4, 2.3], [3.4, 2.95], [2.0, 2.95]], drop_m: 1.0}]  # how far down the camera sees
+events:    [{t: 240, battery_soc: 0.17}, {t: 300, tracking_lost_s: 10}, {t: 400, explorer: stop},
+            {t: 5, bump: left}]          # a 0.3 s bumper press with nothing there (left | right | both)
 ```
+
+People in view are reported on `/perception/person_detector/detections_3d` (as the person detector
+does, at `person_rate_hz`, each seen with probability `person_recall` within `person_range_m`).
 
 **Outputs** (in `out_dir`): `result.json` (outcome: explored / timeout / fell / stopped / ...,
 coverage of the true free floor and of the places the robot fits, over time; distance; every bump
 and contact with what was hit and where; stuck episodes - no 0.25 m of progress for 30 s while a Nav2
 goal is active - and idle waits (the explorer "exploring" without a goal); Nav2 goals sent / succeeded
 / aborted / canceled and "false successes" (success reported more than 0.5 m from the goal); Nav2
-recoveries; driver bump stops and back-ups; collision monitor stops; explorer status, goals skipped
-and bump marks; operator interventions; battery; and `frontiers_at_end`: every frontier left on Nav2's
+recoveries; driver bump stops and back-ups; collision monitor stops; explorer status, goals skipped,
+bump marks, bumps it left unmarked because a person was in front and marks it removed when they boxed
+it in; `railing`: the closest the robot's edge came to a railing and the seconds it spent within
+0.10 m of one; operator interventions; battery; and `frontiers_at_end`: every frontier left on Nav2's
 global costmap with the explorer's verdict on it, judged with its own functions - too small,
 usable, no clear spot, or not reachable with the cheapest crossing cost into it), `trajectory.png`
 (map against the true floor plan: mapped free white, true floor never mapped pink, path blue to

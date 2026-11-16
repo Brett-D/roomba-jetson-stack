@@ -1,0 +1,36 @@
+# People keep walking into the robot (their legs brush the bumper, as in the Isaac runs where
+# people's bodies don't collide): one along the hallway, one in the west corridor, one across the
+# south junction, 0.5 m/s, back and forth. The robot's person detector (simulated: in view, in range,
+# recall 0.8) sees them coming. Bump keep-out marks from these hits close hallways for as long as
+# they last; the explorer should not mark (or only briefly) what was a person.
+name: people_bump
+description: Three people walk into the robot along its routes (hallway, west corridor, south junction).
+seed: 1
+duration_s: 1800
+start: {x: 0.0, y: 0.0, yaw_deg: 0}
+dock: true
+people:
+  - name: hallway
+    path: [[1.0, 0.05], [5.5, 0.15]]
+    speed_mps: 0.5
+    pause_s: 2.0
+    mode: pingpong
+    walks_into_robot: true
+    from_s: 20
+    until_s: 900
+  - name: west_corridor
+    path: [[-1.6, 0.6], [-1.7, 4.5]]
+    speed_mps: 0.5
+    pause_s: 2.0
+    mode: pingpong
+    walks_into_robot: true
+    from_s: 30
+    until_s: 900
+  - name: south_junction
+    path: [[-1.3, -0.4], [-1.2, -3.0]]
+    speed_mps: 0.5
+    pause_s: 2.0
+    mode: pingpong
+    walks_into_robot: true
+    from_s: 40
+    until_s: 900

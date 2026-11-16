@@ -179,8 +179,9 @@ impl Camera {
                     if !world.cliffs.is_empty() {
                         let d = [a_cos[u], a_sin[u]];
                         let p = [o[0] + best * d[0], o[1] + best * d[1]];
-                        if world.cliffs.iter().any(|(_, s)| s.contains(p)) {
-                            best = (lens.z + CLIFF_DROP_M) / -slope;
+                        if let Some(k) = world.cliffs.iter().position(|(_, s)| s.contains(p)) {
+                            let drop = world.cliff_drops.get(k).copied().unwrap_or(CLIFF_DROP_M);
+                            best = (lens.z + drop) / -slope;
                         }
                     }
                 } else if slope > 0.0 {
@@ -384,6 +385,10 @@ mod tests {
         world.cliffs.push(("stairs".into(), Shape::Polygon(vec![[2.35, -1.0], [2.95, -1.0], [2.95, 1.0], [2.35, 1.0]])));
         let img = cam.render(&world, lens(), &RenderOpts::default(), &mut rng, None);
         assert!((at(&img, uc, v) as i32 - 3000).abs() <= 2, "{}", at(&img, uc, v));
+        // Treads 0.3 m down (drop_m): it sees them (0.13 + 0.3) / 0.13 x as far as the floor.
+        world.cliff_drops.push(0.3);
+        let img = cam.render(&world, lens(), &RenderOpts::default(), &mut rng, None);
+        assert!((at(&img, uc, v) as f64 - floor * 0.43 / 0.13).abs() <= 2.0, "{}", at(&img, uc, v));
     }
 
     #[test]

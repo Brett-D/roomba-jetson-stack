@@ -204,6 +204,12 @@ pub struct SensorCfg {
     pub gyro_bias: [f64; 3],
     /// Synthetic grayscale view on /camera/left/image_rect_mono for the web app (0 = off).
     pub preview_hz: f64,
+    /// Person detections on /perception/person_detector/detections_3d (people within the camera's
+    /// view, `person_range_m` and line of sight), as the robot's detector publishes them; 0 = off.
+    pub person_rate_hz: f64,
+    /// Chance a visible person is detected in a frame (run 9's detector: 0.87 below 1.5 m).
+    pub person_recall: f64,
+    pub person_range_m: f64,
 }
 
 impl Default for SensorCfg {
@@ -221,6 +227,9 @@ impl Default for SensorCfg {
             accel_noise: 0.017,
             gyro_bias: [-0.0013, 0.0007, 0.0006],
             preview_hz: 2.0,
+            person_rate_hz: 4.0,
+            person_recall: 0.8,
+            person_range_m: 5.0,
         }
     }
 }
@@ -468,6 +477,9 @@ pub struct PersonCfg {
     pub until_s: Option<f64>,
     /// Pause at each path point (s).
     pub pause_s: f64,
+    /// Walks on into the robot instead of waiting for it (a leg brushing the bumper, as in the
+    /// Isaac runs where people's bodies don't collide).
+    pub walks_into_robot: bool,
 }
 
 impl Default for PersonCfg {
@@ -482,6 +494,7 @@ impl Default for PersonCfg {
             from_s: 0.0,
             until_s: None,
             pause_s: 1.0,
+            walks_into_robot: false,
         }
     }
 }
@@ -491,6 +504,15 @@ impl Default for PersonCfg {
 pub struct CliffCfg {
     pub name: String,
     pub polygon: Vec<P2>,
+    /// How far below the floor the depth camera sees inside it (m). A stairwell's first treads are
+    /// a few tenths of a metre down, within the drop-off detection's range; 1 m (the default) is
+    /// only seen through steep rays the camera doesn't have, i.e. hardly ever.
+    #[serde(default = "default_cliff_drop")]
+    pub drop_m: f64,
+}
+
+fn default_cliff_drop() -> f64 {
+    super::depth::CLIFF_DROP_M
 }
 
 /// A timed event. Exactly one action per entry.
@@ -506,6 +528,9 @@ pub struct EventCfg {
     pub explorer: Option<String>,
     /// Move the robot (kidnap): {x, y, yaw_deg}.
     pub teleport: Option<Pose>,
+    /// Press the bumper for 0.3 s with nothing there ("left", "right" or "both"), as a leg
+    /// brushing past would.
+    pub bump: Option<String>,
     /// End the run.
     pub end: bool,
 }
@@ -568,9 +593,15 @@ impl Scenario {
                 + e.tracking_lost_s.is_some() as u8
                 + e.explorer.is_some() as u8
                 + e.teleport.is_some() as u8
+                + e.bump.is_some() as u8
                 + e.end as u8;
             if n != 1 {
-                bail!("event at t={}: needs exactly one of battery_soc, tracking_lost_s, explorer, teleport, end", e.t);
+                bail!("event at t={}: needs exactly one of battery_soc, tracking_lost_s, explorer, teleport, bump, end", e.t);
+            }
+            if let Some(b) = &e.bump {
+                if !matches!(b.as_str(), "left" | "right" | "both") {
+                    bail!("event at t={}: bump must be left, right or both, not '{b}'", e.t);
+                }
             }
         }
         Ok(())
@@ -706,6 +737,7 @@ impl Scenario {
         }
         for c in &self.cliffs {
             world.cliffs.push((c.name.clone(), Shape::Polygon(c.polygon.clone())));
+            world.cliff_drops.push(c.drop_m);
         }
         Ok((doors, people))
     }

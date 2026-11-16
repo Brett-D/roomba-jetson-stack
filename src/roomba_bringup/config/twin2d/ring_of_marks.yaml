@@ -1,0 +1,24 @@
+# Before it starts, the robot at the dock gets six bumper presses with nothing there, one every
+# 60 deg of heading (it is turned in place between them): the explorer marks each, and the marks
+# form a closed ring of keep-out around it (as people's legs and the railing did at the stair head
+# in Isaac run 9). Can it get out, explore, and get home?
+name: ring_of_marks
+description: Six phantom bumps at the dock, 60 deg apart, leave a ring of bump marks around the robot.
+seed: 1
+duration_s: 1800
+start: {x: 0.0, y: 0.0, yaw_deg: 0}
+dock: true
+explorer: {autostart_s: 32}
+events:
+  - {t: 12, bump: both}
+  - {t: 13, teleport: {x: 0.0, y: 0.0, yaw_deg: 60}}
+  - {t: 14.5, bump: both}
+  - {t: 15.5, teleport: {x: 0.0, y: 0.0, yaw_deg: 120}}
+  - {t: 17, bump: both}
+  - {t: 18, teleport: {x: 0.0, y: 0.0, yaw_deg: 180}}
+  - {t: 19.5, bump: both}
+  - {t: 20.5, teleport: {x: 0.0, y: 0.0, yaw_deg: 240}}
+  - {t: 22, bump: both}
+  - {t: 23, teleport: {x: 0.0, y: 0.0, yaw_deg: 300}}
+  - {t: 24.5, bump: both}
+  - {t: 25.5, teleport: {x: 0.0, y: 0.0, yaw_deg: 0}}

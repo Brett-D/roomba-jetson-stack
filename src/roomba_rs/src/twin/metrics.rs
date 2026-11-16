@@ -35,6 +35,10 @@ pub struct Metrics {
     /// True path, a point every ~2 cm.
     pub path: Vec<P2>,
     pub counts: BTreeMap<String, u64>,
+    /// Closest the robot's body came to a railing (m; None without railings), and how long it
+    /// was within 0.10 m of one (s).
+    pub railing_min_clearance: Option<f64>,
+    pub railing_close_s: f64,
 }
 
 /// Explorer states in which the robot is meant to be moving.
@@ -45,6 +49,14 @@ pub fn driving_state(s: &str) -> bool {
 impl Metrics {
     pub fn count(&mut self, key: &str) {
         *self.counts.entry(key.to_string()).or_default() += 1;
+    }
+
+    /// The body's clearance to the nearest railing this step (dt s).
+    pub fn railing(&mut self, clearance: f64, dt: f64) {
+        self.railing_min_clearance = Some(self.railing_min_clearance.map_or(clearance, |c| c.min(clearance)));
+        if clearance < 0.10 {
+            self.railing_close_s += dt;
+        }
     }
 
     pub fn event(&mut self, t: f64, kind: &str, pos: P2, detail: impl Into<String>) {

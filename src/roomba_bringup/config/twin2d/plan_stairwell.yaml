@@ -1,0 +1,22 @@
+# For the floor-plan world (tools/twin2d_plan.py from the upstairs plan; world:=.../plan.yaml): the
+# stair opening (stair_void of the plan; its top step is the open west side at x = -0.94), its
+# railings as the plan has them. The depth camera looks down into it (the first treads 0.3 m
+# below the floor, within the drop-off detection's 2 m when the robot is within ~0.5 m of the
+# edge) and RTAB-Map maps it as free, as in Isaac run 9. Does the robot stay out, stop choosing
+# frontiers inside it, and keep its distance from the railings?
+name: plan_stairwell
+description: Floor-plan world with the stair opening as a drop-off; explore from the dock.
+seed: 1
+duration_s: 1800
+start: {x: 0.0, y: 0.0, yaw_deg: 0}
+dock: true
+cliffs:
+  - name: stair_void
+    drop_m: 0.3
+    polygon: [[-0.95, 0.698], [-0.72, 0.471], [-0.295, 0.359], [0.245, 0.35], [0.826, 0.415], [2.47, 0.715],
+              [4.113, 1.014], [4.82, 2.019], [4.791, 2.472], [5.365, 2.577], [4.894, 5.159], [1.686, 4.574],
+              [1.133, 4.797], [0.92, 4.901], [0.694, 4.973], [0.463, 5.012], [0.225, 5.02], [-0.01, 4.993],
+              [-0.24, 4.935], [-0.458, 4.844], [-0.662, 4.723], [-0.848, 4.576], [-1.011, 4.406],
+              [-1.149, 4.214], [-1.259, 4.003], [-1.339, 3.781], [-1.386, 3.548], [-1.399, 3.312],
+              [-1.383, 3.075], [-1.33, 2.844], [-1.249, 2.622], [-1.136, 2.413], [-0.996, 2.223],
+              [-0.916, 2.136], [-0.934, 1.941]]

@@ -532,11 +532,13 @@ pub struct World {
     pub bodies: Vec<Body>,
     /// (name, area) where the floor drops away (stairs).
     pub cliffs: Vec<(String, Shape)>,
+    /// How far down the depth camera sees inside each cliff (m; missing: depth::CLIFF_DROP_M).
+    pub cliff_drops: Vec<f64>,
 }
 
 impl World {
     pub fn new(grid: Grid) -> Self {
-        World { grid: Arc::new(grid), bodies: Vec::new(), cliffs: Vec::new() }
+        World { grid: Arc::new(grid), bodies: Vec::new(), cliffs: Vec::new(), cliff_drops: Vec::new() }
     }
 
     fn touches_band(b: &Body, zlo: f64, zhi: f64) -> bool {

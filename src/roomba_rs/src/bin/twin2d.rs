@@ -31,7 +31,7 @@ use std::time::{Duration, Instant};
 use anyhow::{bail, Context as _, Result};
 use isaac_ros_visual_slam_interfaces::msg::VisualSlamStatus;
 use rclrs::*;
-use ros_env::{action_msgs, builtin_interfaces, geometry_msgs, nav2_msgs, nav_msgs, rcl_interfaces, roomba_msgs, sensor_msgs, std_msgs, tf2_msgs};
+use ros_env::{action_msgs, builtin_interfaces, geometry_msgs, nav2_msgs, nav_msgs, rcl_interfaces, roomba_msgs, sensor_msgs, std_msgs, tf2_msgs, vision_msgs};
 use serde_json::{json, Value};
 
 use roomba_rs::node_params::{block_signals, mono, on_signal, NodeParams};
@@ -218,6 +218,7 @@ struct Pubs {
     events: Publisher<std_msgs::msg::String>,
     explorer_cmd: Publisher<std_msgs::msg::String>,
     world: Publisher<nav_msgs::msg::OccupancyGrid>,
+    persons: Publisher<vision_msgs::msg::Detection3DArray>,
 }
 
 struct RenderPubs {
@@ -340,6 +341,8 @@ struct Sim {
     pty: Pty,
     loc: Localization,
     rng: Rng,
+    /// Person detections draw from their own stream (the depth noise stays as it was).
+    person_rng: Rng,
     mount: [f64; 3],
     q_bi: [f64; 4],
     pubs: Pubs,
@@ -374,6 +377,9 @@ struct Sim {
     battery_first: Option<f64>,
     battery_min: Option<f64>,
     last_bump: (bool, bool),
+    /// A pressed bumper with nothing there (scenario bump events) until this time.
+    forced_bump: (bool, bool),
+    forced_bump_until: f64,
     world_dirty: bool,
     wall_start: Instant,
 }
@@ -397,9 +403,10 @@ impl Sim {
     fn raw_packets(&mut self) -> [i32; 59] {
         let r = &self.robot;
         let mut v = [0i32; 59];
-        let bump_right = r.bump.1 || r.cfg.stuck_bump_right;
+        let bump_right = r.bump.1 || r.cfg.stuck_bump_right || self.forced_bump.1;
+        let bump_left = r.bump.0 || self.forced_bump.0;
         let drop = r.fallen as i32;
-        v[7] = bump_right as i32 | (r.bump.0 as i32) << 1 | drop << 2 | drop << 3;
+        v[7] = bump_right as i32 | (bump_left as i32) << 1 | drop << 2 | drop << 3;
         v[8] = (r.wall_signal > 40) as i32;
         for k in 0..4 {
             v[9 + k] = r.cliff[k] as i32;
@@ -505,8 +512,8 @@ impl Sim {
                 continue;
             }
             let target = person_position(p, t - p.from_s);
-            // People don't walk into the robot: they wait.
-            if (target[0] - pos[0]).hypot(target[1] - pos[1]) < r + p.radius_m + 0.05 {
+            // People don't walk into the robot: they wait (unless the scenario says they do).
+            if !p.walks_into_robot && (target[0] - pos[0]).hypot(target[1] - pos[1]) < r + p.radius_m + 0.05 {
                 continue;
             }
             self.world.bodies[id].shape = roomba_rs::twin::world::Shape::Circle { c: target, r: p.radius_m };
@@ -514,6 +521,9 @@ impl Sim {
                 self.world.bodies[id].active = true;
                 self.event(t, "person", target, format!("{} appeared", p.name));
             }
+        }
+        if t >= self.forced_bump_until {
+            self.forced_bump = (false, false);
         }
         for k in 0..self.scenario.events.len() {
             if self.event_done[k] || t < self.scenario.events[k].t {
@@ -535,6 +545,12 @@ impl Sim {
             if let Some(p) = e.teleport {
                 self.robot.teleport([p.x, p.y, p.yaw_deg.to_radians()]);
                 self.event(t, "teleport", [p.x, p.y], "robot moved (kidnapped)".into());
+            }
+            if let Some(side) = &e.bump {
+                self.forced_bump = (side != "right", side != "left");
+                self.forced_bump_until = t + 0.3;
+                self.metrics.count("phantom_bumps");
+                self.event(t, "phantom_bump", pos, format!("bumper ({side}) pressed with nothing there"));
             }
             if e.end {
                 self.finish(t, "ended", "the scenario's end event");
@@ -580,6 +596,17 @@ impl Sim {
         }
         self.pack.step(DT, self.robot.v, self.robot.stalled);
         self.metrics.track(self.pos());
+        let p = self.pos();
+        let near = self
+            .world
+            .bodies
+            .iter()
+            .filter(|b| b.active && matches!(b.kind, Kind::Railing | Kind::Post))
+            .map(|b| b.shape.nearest(p).0)
+            .fold(f64::INFINITY, f64::min);
+        if near.is_finite() {
+            self.metrics.railing(near - self.robot.cfg.radius_m, DT);
+        }
     }
 
     fn publish_imu(&mut self, stamp: i64) {
@@ -635,6 +662,45 @@ impl Sim {
 
     fn tracking_ok(&self, t: f64) -> bool {
         t >= self.tracking_lost_until
+    }
+
+    /// The people the robot's person detector would report now (in the camera's view, in range,
+    /// not behind a wall; each with person_recall), as detections_3d in base_link.
+    fn publish_persons(&mut self, stamp: i64) {
+        let s = &self.scenario.sensors;
+        let (recall, range, min) = (s.person_recall, s.person_range_m, s.depth_min_m);
+        let (x, y, th) = (self.robot.x, self.robot.y, self.robot.th);
+        let mut out = vision_msgs::msg::Detection3DArray { header: header(stamp, "base_link"), detections: Vec::new() };
+        for (n, &id) in self.people_ids.iter().enumerate() {
+            let b = &self.world.bodies[id];
+            let roomba_rs::twin::world::Shape::Circle { c, .. } = b.shape else { continue };
+            if !b.active {
+                continue;
+            }
+            let (dx, dy) = (c[0] - x, c[1] - y);
+            let d = dx.hypot(dy);
+            let bearing = wrap(dy.atan2(dx) - th);
+            if d < min || d > range || bearing.abs() > 0.7 {
+                continue;
+            }
+            if self.world.grid.ray([x, y], [dx / d, dy / d], d) < d - 0.25 {
+                continue; // a wall in between
+            }
+            if self.person_rng.uniform() >= recall {
+                continue;
+            }
+            let mut det = vision_msgs::msg::Detection3D { header: out.header.clone(), id: self.scenario.people[n].name.clone(), ..Default::default() };
+            det.bbox.center.position = geometry_msgs::msg::Point { x: d * bearing.cos(), y: d * bearing.sin(), z: 0.85 };
+            det.bbox.center.orientation.w = 1.0;
+            det.bbox.size = geometry_msgs::msg::Vector3 { x: 0.4, y: 0.4, z: 1.7 };
+            let mut h = vision_msgs::msg::ObjectHypothesisWithPose::default();
+            h.hypothesis.class_id = "person".into();
+            h.hypothesis.score = 0.8;
+            h.pose.pose.position = det.bbox.center.position.clone();
+            det.results.push(h);
+            out.detections.push(det);
+        }
+        self.pubs.persons.publish(out).ok();
     }
 
     fn publish_status(&mut self, stamp: i64, t: f64) {
@@ -752,8 +818,14 @@ impl Sim {
             if name == "planner_server" && level >= 30 && msg.to_lowercase().contains("plan") {
                 self.metrics.count("nav2_plan_failures");
             }
-            if name == "explorer" && msg.contains("Bumper hit at") {
+            if name == "explorer" && msg.contains(": marked bump_") {
                 self.metrics.count("explorer_bump_marks");
+            }
+            if name == "explorer" && msg.contains("with a person in front") {
+                self.metrics.count("explorer_person_bumps");
+            }
+            if name == "explorer" && msg.contains("Boxed in by its own bump marks (") {
+                self.metrics.count("explorer_trap_breaks");
             }
             if name == "explorer" && msg.contains("skipping it") {
                 self.metrics.count("explorer_goals_skipped");
@@ -949,6 +1021,10 @@ impl Sim {
                 "idle_total_s": round(idle.iter().map(|e| e.1 - e.0).sum::<f64>(), 0),
             },
             "frontiers_at_end": frontiers,
+            "railing": {
+                "min_clearance_m": self.metrics.railing_min_clearance.map(|c| round(c, 3)),
+                "within_0_10m_s": round(self.metrics.railing_close_s, 1),
+            },
             "nav2_goals": {
                 "sent": self.goal_counts[0],
                 "succeeded": self.goal_counts[1],
@@ -1006,7 +1082,8 @@ fn render_loop(
         dropout: s.depth_dropout,
     };
     let cliffs = scenario.cliffs.iter().map(|c| (c.name.clone(), roomba_rs::twin::world::Shape::Polygon(c.polygon.clone()))).collect();
-    let mut world = World { grid: Arc::clone(&grid), bodies: Vec::new(), cliffs };
+    let cliff_drops = scenario.cliffs.iter().map(|c| c.drop_m).collect();
+    let mut world = World { grid: Arc::clone(&grid), bodies: Vec::new(), cliffs, cliff_drops };
     let map_period = 1.0 / scenario.mapping.update_hz.max(0.01);
     let mut last_map = f64::NEG_INFINITY;
     let mut preview = Vec::new();
@@ -1186,6 +1263,7 @@ fn main() -> Result<()> {
         events: node.create_publisher("/twin/events".keep_last(100))?,
         explorer_cmd: node.create_publisher("/explorer/command".keep_last(10))?,
         world: node.create_publisher("/twin/world".qos(latched()))?,
+        persons: node.create_publisher("/perception/person_detector/detections_3d".keep_last(5))?,
     };
     let render_pubs = RenderPubs {
         depth: node.create_publisher("/camera/depth/image_rect_raw".keep_last(10))?,
@@ -1333,6 +1411,7 @@ fn main() -> Result<()> {
         pty,
         loc: Localization::new(start),
         rng: rng.fork(1),
+        person_rng: rng.fork(3),
         mount: p.mount,
         q_bi: depth::q_base_imu(0.0),
         pubs,
@@ -1365,6 +1444,8 @@ fn main() -> Result<()> {
         battery_first: None,
         battery_min: None,
         last_bump: (false, false),
+        forced_bump: (false, false),
+        forced_bump_until: f64::NEG_INFINITY,
         world_dirty: true,
         wall_start: Instant::now(),
         scenario,
@@ -1420,6 +1501,8 @@ fn sim_loop(sim: &mut Sim, stop: &AtomicBool) {
     let s = sim.scenario.clone();
     let depth_period = 1.0 / s.sensors.depth_rate_hz.max(0.1);
     let preview_period = if s.sensors.preview_hz > 0.0 { 1.0 / s.sensors.preview_hz } else { f64::INFINITY };
+    let person_period = if s.sensors.person_rate_hz > 0.0 && !s.people.is_empty() { 1.0 / s.sensors.person_rate_hz } else { f64::INFINITY };
+    let mut next_person = 0.0;
     let imu_every = (1.0 / s.sensors.imu_rate_hz.max(1.0) / DT).round().max(1.0) as u64;
     let sample_every = (s.metrics.sample_period_s / DT).round().max(1.0) as u64;
     let (mut next_depth, mut next_preview) = (0.0, 0.0);
@@ -1505,6 +1588,10 @@ fn sim_loop(sim: &mut Sim, stop: &AtomicBool) {
         }
         if k % 40 == 0 {
             sim.publish_status(stamp, t);
+        }
+        if t >= next_person {
+            next_person = t + person_period;
+            sim.publish_persons(stamp);
         }
         if k % 200 == 0 {
             sim.absorb(t);
