@@ -184,9 +184,64 @@ def main():
             pushes.append(b0[0])
     S['contacts'] = {'isaac_bumper_contacts': (max(bumps) - min(bumps)) if bumps else 0,
                      'pushed_by_person_sim_t': pushes,
+                     'pushes_undone_in_isaac': max([e.get('pushes_undone', 0) for e in isaac] or [0]),
                      'driver_bump_events': sum(1 for e in events if e['ev'] == 'bump'),
                      'cliff_events': sum(1 for e in events if e['ev'] == 'cliff'),
                      'oi_modes': [e['mode'] for e in events if e['ev'] == 'mode']}
+    # bumps against people (the bumper model feels legs) vs the house
+    ppl_rows = load_csv(os.path.join(mon, 'people.csv'))
+    if ppl_rows and rows:
+        tp = np.array([float(r['t']) for r in ppl_rows])
+        gt_rows = [r for r in rows if r.get('gt_x')]
+        tg = np.array([float(r['t']) for r in gt_rows])
+        near = 0
+        for e in events:
+            if e['ev'] != 'bump':
+                continue
+            j, k = int(np.argmin(np.abs(tp - e['t']))), int(np.argmin(np.abs(tg - e['t'])))
+            x, y = float(gt_rows[k]['gt_x']), float(gt_rows[k]['gt_y'])
+            if any(math.hypot(px - x, py - y) < 0.6 for px, py in json.loads(ppl_rows[j]['people'])):
+                near += 1
+        S['contacts']['driver_bumps_with_a_person_within_0.6m'] = near
+
+    # ---------------------------------------------------------------- stuck episodes, stairwell
+    G = [(float(r['t']), float(r['gt_x']), float(r['gt_y'])) for r in rows if r.get('gt_x')
+         and (t_start is None or float(r['t']) >= t_start) and (t_end is None or float(r['t']) <= t_end)]
+    stuck, i0 = [], 0
+    for i in range(len(G)):
+        while G[i][0] - G[i0][0] > 30.0:
+            i0 += 1
+        if G[i][0] - G[i0][0] >= 29.0 and max(math.hypot(g[1] - G[i0][1], g[2] - G[i0][2]) for g in G[i0:i + 1]) < 0.05:
+            if stuck and G[i0][0] <= stuck[-1][1] + 1.0:
+                stuck[-1][1] = G[i][0]
+            else:
+                stuck.append([G[i0][0], G[i][0]])
+    S['stuck_episodes'] = [{'from_sim_s': round(a_, 1), 'to_sim_s': round(b_, 1), 'duration_s': round(b_ - a_, 1)}
+                           for a_, b_ in stuck]
+
+    def seg_dist(px, py, a_, b_):
+        ax, ay = a_
+        bx, by = b_
+        dx, dy = bx - ax, by - ay
+        L2 = dx * dx + dy * dy or 1e-12
+        u = max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / L2))
+        return math.hypot(px - ax - u * dx, py - ay - u * dy)
+    rails = [r['polyline'] for r in fp.get('railings', []) if r.get('polyline')]
+    if rails and G:
+        dmin = [min(seg_dist(g[1], g[2], p[k], p[k + 1]) for p in rails for k in range(len(p) - 1)) for g in G]
+        void = np.array(fp['stair_void']['polygon'], np.float32)
+        inside = [cv2.pointPolygonTest(void, (float(g[1]), float(g[2])), False) > 0 for g in G]
+        bump_d = []
+        for e in events:
+            if e['ev'] == 'bump':
+                k = min(range(len(G)), key=lambda j: abs(G[j][0] - e['t']))
+                bump_d.append(round(dmin[k], 2))
+        dt_ = np.diff([g[0] for g in G], prepend=G[0][0])
+        S['stairwell'] = {'min_dist_center_to_railing_m': round(min(dmin), 3),
+                          'time_center_within_0.3m_of_railing_s': round(float(sum(d for d, m in zip(dt_, dmin) if m < 0.3)), 1),
+                          'entered_void': bool(any(inside)),
+                          'bumps_dist_to_railing_m': bump_d,
+                          'note': 'robot radius 0.17 m: centre < 0.17 m from the railing line = touching it'}
 
     # ---------------------------------------------------------------- map vs plan
     mp = os.path.join(mon, 'map_rtabmap.npz')

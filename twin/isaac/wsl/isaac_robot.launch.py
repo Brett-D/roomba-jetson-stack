@@ -1,7 +1,7 @@
 """robot.launch.py for the Isaac Sim closed loop, unchanged, plus one sim-side workaround (launch argument
-wall_timeout_scale, default 1 = off): the explorer measures its timeouts on the wall clock (CLOCK_MONOTONIC), so
-when the simulator runs at a real-time factor r < 1 a 60 s goal timeout fires after 60 * r s of simulated driving.
-wall_timeout_scale k multiplies the explorer's wall-clock timeouts by k (set it to ~1/r). Every other argument is
+wall_timeout_scale, default 1 = off) that multiplies the explorer's timeouts by k. Up to main 4650dca the explorer
+measured them on the wall clock, so at a real-time factor r < 1 a 60 s goal timeout fired after 60 * r s of simulated
+driving (k ~ 1/r fixed that). Since cd218c6 it uses the node clock (sim time): leave k = 1. Every other argument is
 passed through to robot.launch.py.
 
   ros2 launch /mnt/e/.../twin/isaac/wsl/isaac_robot.launch.py wall_timeout_scale:=4 <robot.launch.py arguments>
@@ -17,7 +17,7 @@ from launch_ros.actions import SetParameter
 
 # explorer parameters measured on the wall clock (src/roomba_rs/src/explorer.rs Params) and their defaults
 EXPLORER_WALL_TIMEOUTS = {'goal_timeout_s': 60.0, 'goal_response_timeout_s': 10.0, 'return_timeout_s': 300.0,
-                          'finish_confirm_s': 20.0}
+                          'finish_confirm_s': 20.0, 'look_around_timeout_s': 20.0, 'bump_mark_ttl_s': 600.0}
 
 
 def _scaled(context):

@@ -17,14 +17,17 @@ param(
     [string]$Engine = 'yolo11n_384x640_fp16.engine',
     [switch]$Record,
     [switch]$Headless,
-    # The explorer's goal/return timeouts are wall clock; the sim runs at ~0.25x real time, so scale them up.
-    [double]$WallTimeoutScale = 5,
-    # Skip the 360 deg look-around before exploring (it works around an explorer finding, see README)
-    [switch]$NoLookAround,
-    # No interventions: by default a robot stuck for 40 s sim is reversed 0.3 m (logged as an assist, see README)
-    [switch]$NoAssist,
-    # Don't add the stairwell keep-out zone (as drawn in the web app) before exploring: the stack then drives into the railing
-    [switch]$NoStairKeepout
+    # Multiplies the explorer's timeouts (isaac_robot.launch.py). Since main cd218c6 the explorer times goals on the
+    # node clock (sim time), so 1 = off; before that it used the wall clock and needed ~1 / real-time factor (5).
+    [double]$WallTimeoutScale = 1,
+    # Sim-side workarounds from before the navigation fixes (off by default; the stack now looks around and detects
+    # drop-offs itself): a 360 deg turn before exploring, the stairwell as a keep-out zone (as drawn in the web app),
+    # and logged interventions that reverse a robot stuck for 40 s of sim time by 0.3 m.
+    [switch]$LookAround,
+    [switch]$StairKeepout,
+    [switch]$Assist,
+    # Extra exposure for the GUI viewport and the recording only (robot cameras are mapped back; 1 = off)
+    [double]$ViewGain = 2.0
 )
 $ErrorActionPreference = 'Stop'
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -67,7 +70,7 @@ if ($alive) {
     Set-Control @{ ros = $true; drive = 'stop'; teleport = $dock; id = $Name; record = '' }
     Start-Sleep -Seconds 3
 }
-wsl -d Ubuntu-24.04 -u root -- env "WALL_TIMEOUT_SCALE=$WallTimeoutScale" "LOOK_AROUND=$(if ($NoLookAround) { 0 } else { 1 })" "ASSIST=$(if ($NoAssist) { 0 } else { 1 })" "STAIR_KEEPOUT=$(if ($NoStairKeepout) { 0 } else { 1 })" bash "$wslDir/closed_loop.sh" start $Name $Engine
+wsl -d Ubuntu-24.04 -u root -- env "WALL_TIMEOUT_SCALE=$WallTimeoutScale" "LOOK_AROUND=$([int][bool]$LookAround)" "ASSIST=$([int][bool]$Assist)" "STAIR_KEEPOUT=$([int][bool]$StairKeepout)" bash "$wslDir/closed_loop.sh" start $Name $Engine
 if ($alive) {
     Set-Control @{ ros = $true; drive = 'ros'; teleport = $dock; id = $Name; record = $rec }
 } else {
@@ -78,7 +81,7 @@ if ($alive) {
     $env:ZENOH_CONFIG_OVERRIDE = 'mode="client";connect/endpoints=["tcp/127.0.0.1:7447"]'
     $env:ROS_DOMAIN_ID = '60'
     Set-Control @{ ros = $true; drive = 'ros' }
-    $a = @("$here\scripts\run_closed_loop.py", '--drive', 'ros', '--ros', '--people', "$People", '--viewer', $(if ($Headless) { 'file' } else { 'kit' }))
+    $a = @("$here\scripts\run_closed_loop.py", '--drive', 'ros', '--ros', '--people', "$People", '--view-gain', "$ViewGain", '--viewer', $(if ($Headless) { 'file' } else { 'kit' }))
     if ($rec) { $a += @('--record', $rec) }
     $p = Start-Process -FilePath "$env:TWIN\isaacsim-env\Scripts\python.exe" -ArgumentList $a -WorkingDirectory "$here\scripts" `
         -RedirectStandardOutput "$run\isaac_kit.log" -RedirectStandardError "$run\isaac_kit.err" -PassThru -NoNewWindow

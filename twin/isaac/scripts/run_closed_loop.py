@@ -47,8 +47,13 @@ ap.add_argument('--aa', default='DLSS', choices=['DLSS', 'DLAA'],
                 help='DLSS renders at a lower internal resolution (much faster); DLAA at full resolution')
 ap.add_argument('--dlss-mode', type=int, default=1, help='0 performance, 1 balanced, 2 quality')
 ap.add_argument('--light-scale', type=float, default=2.5,
-                help='room/dome light multiplier for watching (the raw renders are ~3x darker than the real D1000 '
-                     'auto-exposed frames, so brighter is also closer for the stack; dataset generation is separate)')
+                help='room/dome light multiplier (the raw renders are ~3x darker than the real D1000 auto-exposed '
+                     'frames, so this is the robot-camera realism setting; dataset generation is separate)')
+ap.add_argument('--view-gain', type=float, default=2.0,
+                help='extra exposure for the GUI viewport and the recorded follow camera only (RTX film ISO x gain). '
+                     'RTX tonemapping is global (per-camera exposure and per-render-product overrides are ignored), '
+                     'so the robot cameras are mapped back to the --light-scale look with a per-channel LUT '
+                     'calibrated at start-up: what the stack sees does not change. 1 = off')
 ap.add_argument('--robot-view', type=int, default=1, help='Kit viewer: second viewport with the robot camera')
 ap.add_argument('--start', default='dock', help="'dock' (map origin, the recorded path's start) or x,y,yaw")
 args, _ = ap.parse_known_args()
@@ -171,6 +176,58 @@ ann_left['rgb'].attach(rp_left)
 ann_left['dep'].attach(rp_left)
 robot_rps = [rp_left]          # rendered only every CAM_EVERY-th update (RTF), see the main loop
 video = {'w': None}
+CAM_LUT = {'lut': None}
+
+
+def robot_rgb(a):
+    """A robot camera's RGB(A) as the stack must see it: the --view-gain exposure boost undone (see calibrate_lut)."""
+    img = np.asarray(a.get_data())
+    lut = CAM_LUT['lut']
+    if lut is None or img.ndim != 3 or img.size == 0:
+        return img
+    out = img.copy()
+    for c in range(3):
+        out[:, :, c] = lut[c][img[:, :, c]]
+    return out
+
+
+def calibrate_lut(n_settle=30):
+    """Render the left camera at the base film ISO and at ISO x view-gain from the same pose; per channel and
+    8-bit level of the bright image, the median base level -> LUT (monotone, gaps interpolated)."""
+    import carb.settings
+    st = carb.settings.get_settings()
+    key = '/rtx/post/tonemap/filmIso'
+    iso0 = float(st.get(key) or 100.0)
+
+    def grab(iso):
+        st.set(key, iso)
+        for _ in range(n_settle):
+            app_update(1)
+        return np.asarray(ann_left['rgb'].get_data())[:, :, :3].astype(np.int32)
+    base = grab(iso0)
+    bright = grab(iso0 * args.view_gain)
+    lut = np.zeros((3, 256), np.uint8)
+    xs = np.arange(256)
+    model = np.clip(xs * args.view_gain ** (-1 / 2.2), 0, 255)       # sRGB-like fallback outside the data
+    for c in range(3):
+        b, a = bright[:, :, c].ravel(), base[:, :, c].ravel()
+        known, vals = [0], [0.0]
+        for v in range(1, 256):
+            sel = a[b == v]
+            if sel.size >= 20:
+                known.append(v)
+                vals.append(float(np.median(sel)))
+        f = np.interp(xs, known, vals)
+        hi = known[-1]
+        if hi < 255:                                                   # above the brightest seen level
+            f[hi + 1:] = np.maximum(f[hi], model[hi + 1:] * (vals[-1] / max(model[hi], 1e-6)))
+        lut[c] = np.clip(np.maximum.accumulate(np.round(f)), 0, 255).astype(np.uint8)
+    comp = np.stack([lut[c][bright[:, :, c]] for c in range(3)], -1).astype(np.int32)
+    err = float(np.abs(comp - base).mean())
+    print(f'CAMERA_LUT view gain x{args.view_gain}: base mean {base.mean():.1f}, bright {bright.mean():.1f}, '
+          f'compensated {comp.mean():.1f}, mean abs error {err:.2f} levels', flush=True)
+    CAM_LUT['lut'] = lut
+    st.set(key, iso0 * args.view_gain)
 
 
 class Recorder:
@@ -197,7 +254,7 @@ class Recorder:
 
     def frame(self, t, p, yaw):
         img = np.asarray(self.ann.get_data())
-        rob = np.asarray(ann_left['rgb'].get_data())
+        rob = robot_rgb(ann_left['rgb'])
         if img.size == 0 or rob.size == 0:
             self.skipped += 1
             return
@@ -264,6 +321,26 @@ def people_xy():
         return out
     except Exception:  # noqa: BLE001
         return []
+
+
+def disable_people_colliders():
+    """The behaviour runtime gives each walking person a kinematic BodyCollider (created after play). Kinematic
+    bodies shove the dynamic Roomba: a person walking into it moved it 0.6-1 m and spun it (cl_run3, cl_run6), and
+    undoing those pushes every step (cl_run8) jolted the IMU and broke the VIO. So switch the body colliders off
+    (their avoidance triggers stay); the bumper model in sense() still feels people's legs. Returns how many."""
+    from pxr import Usd, UsdPhysics
+    n_ = 0
+    for pp in sc.people:
+        root = sc.stage.GetPrimAtPath(pp['skelroot'])
+        if not root:
+            continue
+        for q in Usd.PrimRange(root):
+            if q.GetName() == 'BodyCollider' and q.HasAPI(UsdPhysics.CollisionAPI):
+                attr = UsdPhysics.CollisionAPI(q).GetCollisionEnabledAttr()
+                if attr.Get() is not False:
+                    UsdPhysics.CollisionAPI(q).CreateCollisionEnabledAttr(False)
+                    n_ += 1
+    return n_
 
 
 # ---------------------------------------------------------------- bumper / light bumpers / cliffs
@@ -490,7 +567,7 @@ def enable_ros():
 def publish_images(t):
     import cv2
     a = R['ann']
-    rgb_l, rgb_r, dep = np.asarray(a['rgb_l'].get_data()), np.asarray(a['rgb_r'].get_data()), np.asarray(a['dep'].get_data())
+    rgb_l, rgb_r, dep = robot_rgb(a['rgb_l']), robot_rgb(a['rgb_r']), np.asarray(a['dep'].get_data())
     if rgb_l.size == 0 or rgb_r.size == 0 or dep.size == 0:
         return False
     bgr = np.ascontiguousarray(rgb_l[:, :, 2::-1])
@@ -566,7 +643,7 @@ def live_view(t, rtf):
     if img.size == 0:
         return
     frame = np.ascontiguousarray(img[:, :, 2::-1])
-    rob = np.asarray(ann_left['rgb'].get_data())
+    rob = robot_rgb(ann_left['rgb'])
     if rob.size:
         inset = cv2.resize(np.ascontiguousarray(rob[:, :, 2::-1]), (448, 252))
         frame[VH - 262:VH - 10, VW - 458:VW - 10] = inset
@@ -632,7 +709,7 @@ def make_panels():
 
 def update_panels():
     import cv2
-    rgb = np.asarray(ann_left['rgb'].get_data())
+    rgb = robot_rgb(ann_left['rgb'])
     dep = np.asarray(ann_left['dep'].get_data())
     if rgb.size:
         panels['rgb'].set(rgb[:, :, :4] if rgb.shape[2] == 4 else np.dstack([rgb, np.full(rgb.shape[:2], 255, np.uint8)]))
@@ -681,6 +758,11 @@ last_ctrl = 0.0
 last_state = 0.0
 wheel_dist = [0.0, 0.0]
 prev_jp = None
+if args.view_gain != 1.0:
+    try:
+        calibrate_lut()
+    except Exception as e:  # noqa: BLE001
+        print('CAMERA_LUT_FAILED', repr(e), flush=True)
 while app.is_running() and not S.get('quit'):
     now = time.monotonic()
     if now - last_ctrl > 1.0:
@@ -733,10 +815,9 @@ while app.is_running() and not S.get('quit'):
         print('SIM_T', n, round(t, 4), flush=True)
     p, q, yaw = pose()
     jp = npy(art.get_dof_positions())[0]
-    # People must not shove the robot. The walking characters (behaviour runtime) push it: in cl_run3/cl_run6 a person
-    # walking through the Roomba moved it
-    # 0.6-1 m and spun it 120-135 deg in under a second - a "kidnapped robot" the stack cannot know about. If the robot
-    # moved or turned clearly more than its wheels did while a person is close, put it back.
+    # Safety net for pushes by people (their body colliders are switched off, see disable_people_colliders): if the
+    # robot moved or turned clearly more than its wheels did while a person is close, put it back. Counted in the
+    # status as pushes_undone; it should stay 0 (cl_run8 undid 437 pushes before the colliders were switched off).
     if S.get('prev_pose') is not None and prev_jp is not None and S['drive'] == 'ros':
         pp_, pq_, pyaw_ = S['prev_pose']
         dl, dr = float(jp[LI] - prev_jp[LI]) * WR, float(jp[RI] - prev_jp[RI]) * WR
@@ -749,6 +830,11 @@ while app.is_running() and not S.get('quit'):
                 p, q, yaw = pp_, pq_, pyaw_
                 S['pushes_undone'] = S.get('pushes_undone', 0) + 1
     S['prev_pose'] = (np.array(p, np.float32), np.array(q, np.float32), yaw)
+    if sc.people and n % 60 == 0:
+        k_ = disable_people_colliders()
+        if k_:
+            S['people_colliders_off'] = S.get('people_colliders_off', 0) + k_
+            print('PEOPLE_COLLIDERS_OFF', k_, 'at update', n, flush=True)
     # follow camera: 1.7 m behind, 1.25 m up, pulled in front of walls
     boom['yaw'] += ((yaw - boom['yaw'] + math.pi) % (2 * math.pi) - math.pi) * 0.06
     by = boom['yaw']
@@ -825,7 +911,7 @@ while app.is_running() and not S.get('quit'):
               'y': round(float(p[1]), 3), 'yaw_deg': round(math.degrees(yaw), 1), 'path_idx': pp.i, 'teleports': S['teleports'],
               'bumps': S['bumps'], 'people': len(sc.people), 'wall_clock': time.strftime('%H:%M:%S'),
               'uptime_s': round(time.time() - T_START), 'ms_frame': S.get('ms_frame'), 'ms_update': S.get('ms_update'),
-              'pushes_undone': S.get('pushes_undone', 0)}
+              'pushes_undone': S.get('pushes_undone', 0), 'people_colliders_off': S.get('people_colliders_off', 0)}
         try:
             with open(args.state + '.tmp', 'w') as f:
                 json.dump(st, f)

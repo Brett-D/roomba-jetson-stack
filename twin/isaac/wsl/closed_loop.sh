@@ -57,11 +57,13 @@ EOF
       camera:=false driver:=true driver_params:='$run/roomba_driver_isaac.yaml' odometry:=cuvslam fusion:=ekf obstacles:=nvblox \
       mode:=mapping database_path:='$run/vslam_test.db' use_sim_time:=true web_port:=18098 foxglove:=false people:=true \
       > '$run/logs/robot_launch.log' 2>&1" < /dev/null
-  # Foxglove (ws://localhost:18766, layout twin/isaac/foxglove/closed_loop.json); the 2D-twin agent has 18765
+  # Foxglove (ws://localhost:18766; layouts src/roomba_bringup/config/foxglove/explorer_debug.json and
+  # twin/isaac/foxglove/closed_loop.json); the 2D-twin runs use 18765
   setsid -f bash -c "echo \$\$ >> '$run/pids'; exec ros2 run foxglove_bridge foxglove_bridge --ros-args -p port:=18766 \
       -p address:=0.0.0.0 -p use_sim_time:=true -p send_buffer_limit:=200000000 > '$run/logs/foxglove.log' 2>&1" < /dev/null
-  local la=""; [ "${LOOK_AROUND:-1}" = 1 ] && la="--look-around"; [ "${ASSIST:-1}" = 1 ] && la="$la --assist"
-  [ "${STAIR_KEEPOUT:-1}" = 1 ] && la="$la --keepout-plan ${PLAN_JSON:-/mnt/e/twin/assets/remodel/floorplan.json}"
+  # sim-side workarounds, off by default since the stack looks around and detects drop-offs itself
+  local la=""; [ "${LOOK_AROUND:-0}" = 1 ] && la="--look-around"; [ "${ASSIST:-0}" = 1 ] && la="$la --assist"
+  [ "${STAIR_KEEPOUT:-0}" = 1 ] && la="$la --keepout-plan ${PLAN_JSON:-/mnt/e/twin/assets/remodel/floorplan.json}"
   setsid -f bash -c "echo \$\$ >> '$run/pids'; exec python3 '$HERE/cl_monitor.py' --out '$run/monitor' $la --ros-args -p use_sim_time:=true > '$run/logs/monitor.log' 2>&1" < /dev/null
   # CPU of this run's processes only (the 2D-twin agent's stacks share the VM)
   setsid -f bash -c "exec python3 '$HERE/cl_cpu.py' '$run' --every 10 > /dev/null 2>&1" < /dev/null
