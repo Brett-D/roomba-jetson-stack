@@ -10,6 +10,19 @@ fn first_existing(candidates: &[PathBuf]) -> Option<PathBuf> {
 }
 
 fn main() {
+    // rclrs 0.8 adds a link path for each AMENT_PREFIX_PATH entry but reruns only when ROS_DISTRO
+    // changes, so an interface package added to the workspace later (roomba_skills_msgs) is missing
+    // from its cached list and linking fails. Repeat the paths here, refreshed when the prefix changes.
+    println!("cargo:rerun-if-env-changed=AMENT_PREFIX_PATH");
+    if let Some(prefixes) = std::env::var_os("AMENT_PREFIX_PATH") {
+        for prefix in std::env::split_paths(&prefixes) {
+            let lib = prefix.join("lib");
+            if lib.is_dir() {
+                println!("cargo:rustc-link-search=native={}", lib.display());
+            }
+        }
+    }
+
     println!("cargo:rerun-if-changed=src/web/codecs.c");
     cc::Build::new().file("src/web/codecs.c").opt_level(2).compile("roomba_web_codecs");
     println!("cargo:rustc-link-lib=jpeg");
