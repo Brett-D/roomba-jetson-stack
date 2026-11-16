@@ -244,22 +244,25 @@ fn load_params(node: &Node) -> Result<Params> {
     })
 }
 
-/// If the 10 Hz step stops running (a stuck executor), stop the robot and exit with an error so the
-/// launch file respawns the node; the caller's own timeout turns the lost goal into a failure.
-fn watchdog(heartbeat: Arc<AtomicU64>, running: Arc<AtomicBool>, cmd: Publisher<geometry_msgs::msg::Twist>, limit_s: f64) {
+/// If the 10 Hz step (the worker's wait set) or the node's own wait set (the action server's) stops
+/// running (a stuck executor), stop the robot and exit with an error so the launch file respawns the
+/// node; the caller's own timeout turns the lost goal into a failure.
+fn watchdog(beats: Vec<(&'static str, Arc<AtomicU64>)>, running: Arc<AtomicBool>, cmd: Publisher<geometry_msgs::msg::Twist>, limit_s: f64) {
     if limit_s <= 0.0 {
         return;
     }
     std::thread::spawn(move || loop {
         std::thread::sleep(Duration::from_millis(250));
-        let age = mono() - heartbeat.load(Ordering::Relaxed) as f64 / 1000.0;
-        if age > limit_s {
-            if running.load(Ordering::Relaxed) {
-                cmd.publish(geometry_msgs::msg::Twist::default()).ok();
+        for (what, beat) in &beats {
+            let age = mono() - beat.load(Ordering::Relaxed) as f64 / 1000.0;
+            if age > limit_s {
+                if running.load(Ordering::Relaxed) {
+                    cmd.publish(geometry_msgs::msg::Twist::default()).ok();
+                }
+                eprintln!("[unstuck_skill] watchdog: no {what} for {age:.1} s; exiting to be respawned");
+                std::thread::sleep(Duration::from_millis(100));
+                std::process::exit(3);
             }
-            eprintln!("[unstuck_skill] watchdog: no control step for {age:.1} s; exiting to be respawned");
-            std::thread::sleep(Duration::from_millis(100));
-            std::process::exit(3);
         }
     });
 }
@@ -268,7 +271,10 @@ fn main() -> Result<()> {
     roomba_rs::default_signals();
     let context = Context::default_from_env()?;
     let mut executor = context.create_basic_executor();
-    let node = executor.create_node("unstuck_skill")?;
+    // Steady node clock too: the action server's expired-goals timer runs on the node clock, and a
+    // ROS-time timer there can stop the node's own wait set on a clock step the same way (the action
+    // server would no longer see goals while the worker's step keeps running).
+    let node = executor.create_node("unstuck_skill".clock_type(ClockType::SteadyTime))?;
     let p = load_params(&node)?;
     let policy = match UnstuckPolicy::load(&p.model) {
         Ok(m) => Some(m),
@@ -343,7 +349,14 @@ fn main() -> Result<()> {
     // stops this worker's wait set for good: no more steps and no goal ever started (the "accepted,
     // then silent" hang). Same fix as the other Rust nodes (explorer, nav_coach, ...).
     let _timer = worker.create_timer_repeating(Duration::from_millis(100).steady_time(), |s: &mut State| s.step())?;
-    watchdog(heartbeat, running, stop_cmd, watchdog_s);
+    // Node-level timers share the action server's wait set: a beat from there shows the server still
+    // sees goals.
+    let server_beat = Arc::new(AtomicU64::new((mono() * 1000.0) as u64));
+    let beat = Arc::clone(&server_beat);
+    let _server_timer = node.create_timer_repeating(Duration::from_millis(250).steady_time(), move || {
+        beat.store((mono() * 1000.0) as u64, Ordering::Relaxed)
+    })?;
+    watchdog(vec![("control step", heartbeat), ("action-server heartbeat", server_beat)], running, stop_cmd, watchdog_s);
 
     let w = Arc::clone(&worker);
     let busy = Arc::new(Mutex::new(false));

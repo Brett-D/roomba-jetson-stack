@@ -297,9 +297,25 @@ more than the network). Model files:
   the system clock is stepped back (WSL resyncs it every ~30 s, NTP does on the robot) just as a wait
   for a ROS-time timer ends, `rcl_wait` reports a timeout and rclrs ends that worker's wait set for good;
   the action server lives on the node's own wait set, so goals were still accepted but the worker
-  (timer, goal start) never ran again. A **watchdog thread** (`watchdog_s`, default 2 s) now stops the
-  robot and exits the node if the step stops running anyway, so the launch file can respawn it;
-  callers time-limit the call and treat a missing result as a failure.
+  (timer, goal start) never ran again. Reproduced in WSL (whose clock was stepped by -32 to -36 ms
+  every 30 s): of 4 idle nodes with the old ROS-time timer all 4 stopped stepping at the first clock
+  step (17.6 s in); 4 nodes with the steady-clock timer ran the whole 300 s (10 steps).
+- The node's **own clock is steady** as well (`ClockType::SteadyTime`). The second half of the same
+  bug: rclrs gives the action server's expired-goals timer (armed once a goal has finished) the node
+  clock, and that timer lives on the node's own wait set, next to the action server. With ROS time a
+  clock step stops that wait set for good: the server no longer sees new goals, while the worker keeps
+  stepping (so a step watchdog does not notice). The first phase-2 A/B hit it: in the two runs on the
+  real floor plan with the skill on, 9 of 13 and 11 of 14 calls got no answer after the first few
+  succeeded (the explorer's call timeout handled each). Reproduced in WSL (`twin/learned/unstuck_hangtest.sh`:
+  idle nodes, one goal every ~13 s, clock stepped by -45 to -69 ms every 30 s): with the ROS-time node
+  clock all 4 nodes answered 5 goals and then none (deaf from the second clock step after the first
+  goal); with the steady node clock 4 of 4 answered all 10.
+- A **watchdog thread** (`watchdog_s`, default 2 s) watches two heartbeats: the 10 Hz step (the
+  worker's wait set) and a 4 Hz node-level timer (the action server's wait set). If either stops it
+  stops the robot and exits the node, so the launch file respawns it. Checked with a deliberately
+  broken build (ROS-time node clock + this watchdog): 1 of 4 nodes went deaf at a clock step and its
+  watchdog exited it 2 s later ("no action-server heartbeat"); the other 3 kept answering. Callers
+  time-limit the call and treat a missing result as a failure.
 
 ### Explorer option (`unstuck_skill`)
 
