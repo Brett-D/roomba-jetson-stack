@@ -411,6 +411,12 @@ def generate_launch_description():
                 '/perception/person_detector/markers',
                 '/perception/person_detector/detections_3d',
                 '/perception/ignore_zones/markers',
+                # for src/roomba_bringup/config/foxglove/explorer_debug.json (the bridge only sends
+                # what a panel subscribes to; the raw depth image is ~10 MB/s while shown)
+                '/global_costmap/costmap', '/local_costmap/costmap', '/keepout_filter_mask',
+                '/plan', '/local_plan', '/local_costmap/published_footprint', '/explorer/markers',
+                '/explorer/status', '/vslam_filter/status', '/perception/obstacles',
+                '/perception/floor_points', '/camera/depth/image_rect_raw',
             ],
         }],
         condition=IfCondition(LaunchConfiguration('foxglove')),

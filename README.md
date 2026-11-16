@@ -223,6 +223,12 @@ stacks at a time comfortably). Watch it in the web app at
 `http://<jetson>:18097` (password in `<out_dir>/home/.config/roomba_web/initial_password`; the real
 `~/.config/roomba_web` is never touched) or Foxglove (`foxglove:=true`, `ws://<jetson>:18765`:
 `/twin/world`, `/twin/ground_truth`, `/twin/state`, `/twin/events`, `/rtabmap/map`, costmaps, ...).
+To see how the explorer decides where to go, import the Foxglove layout
+`src/roomba_bringup/config/foxglove/explorer_debug.json` (twin, or the robot's bridge on port 8765):
+map, costmaps and keep-out mask, footprint, `/plan`, `/explorer/markers` (frontier groups, the spots
+it considered with distance and score or why it skipped them, the chosen goal with an arrow from
+where it was chosen, spots it can only look from, failed and visited spots, keep-out marks it sent,
+home; built only while someone subscribes), obstacle points, the depth image and the explorer status.
 The twin starts the explorer itself (`explorer.autostart_s`) and plays the operator: when the robot
 leaves Safe mode (cliff) and the explorer stops, it carries the robot back from the edge, re-enables
 driving and restarts the explorer (`operator.delay_s`, `max_interventions`).
