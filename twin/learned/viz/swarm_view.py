@@ -378,6 +378,7 @@ def main():
             "moving": torch.zeros(N, dtype=torch.bool, device=dev),
             "act": torch.zeros(N, device=dev),
             "trail": env.robot.data.root_pos_w.torch.clone().unsqueeze(1).repeat(1, K, 1),
+            "trail_t": env.t.clone(),  # episode time at the last trail sample
             "bursts": [],
             "t": 0.0,
         }
@@ -636,6 +637,7 @@ def main():
             state["bursts"].clear()
             state["bump_until"].zero_()
             state["trail"][:] = env.robot.data.root_pos_w.torch.unsqueeze(1)
+            state["trail_t"] = env.t.clone()
             n_end = n_free = n_drop = 0
             first = torch.zeros(N, dtype=torch.long, device=dev)  # outcome of each robot's first attempt (0 = running)
             first_t = torch.zeros(N, device=dev)
@@ -660,9 +662,12 @@ def main():
                 state["bump_until"] = torch.where(env.bump_new, torch.full_like(state["bump_until"], ts + 0.6), state["bump_until"])
                 if k_step % 2 == 0:
                     p = env.robot.data.root_pos_w.torch
-                    jump = (p[:, :2] - state["trail"][:, -2, :2]).norm(dim=-1) > 0.4  # reset to the start: restart the trail
+                    # the episode timer advances 2 steps between samples unless the robot was reset in
+                    # between (_real_reset zeroes it): then restart its trail at the new start
+                    reset = env.t < state["trail_t"] + 1.5 * env.step_dt
+                    state["trail_t"] = env.t.clone()
                     state["trail"] = torch.cat([state["trail"][:, 1:], p.unsqueeze(1)], 1)
-                    state["trail"][jump] = p[jump].unsqueeze(1)
+                    state["trail"][reset] = p[reset].unsqueeze(1)
                 if env.ended.any():
                     ids = env.ended.nonzero().squeeze(-1)
                     oc = env.end_outcome[ids]
@@ -749,7 +754,10 @@ def main():
                 break
         if rec["proc"] is not None:
             rec["proc"].stdin.close()
-            rec["proc"].wait()
+            rc = rec["proc"].wait()
+            if rc != 0:
+                env.close()
+                raise SystemExit(f"[swarm] ffmpeg failed (exit {rc}): {a.record} is incomplete")
             print(f"[swarm] wrote {a.record} ({rec['frames']} frames)", flush=True)
         env.close()
 
