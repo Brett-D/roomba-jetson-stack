@@ -289,7 +289,7 @@ import cv2  # noqa: E402
 drive_log = None
 if args.drive_log:
     os.makedirs(os.path.dirname(os.path.abspath(args.drive_log)), exist_ok=True)
-    drive_log = csv.writer(open(args.drive_log, 'w', newline=''))
+    drive_log = csv.writer(open(args.drive_log, 'w', newline='', buffering=1))
     drive_log.writerow(['t', 'x', 'y', 'yaw_deg', 'path_idx', 'v_cmd', 'w_cmd', 'moved_5s_m', 'stuck'])
 hist = []      # (t, x, y) for the stuck detector
 stuck_events = []
@@ -303,7 +303,7 @@ def teleport_ahead():
     x_, y_, yaw_ = path[j]
     art.set_world_poses(np.array([[x_, y_, float(p0[2])]], np.float32),
                         np.array([[math.cos(yaw_ / 2), 0, 0, math.sin(yaw_ / 2)]], np.float32))
-    art.set_velocities(np.zeros((1, 6), np.float32))
+    art.set_velocities(np.zeros((1, 3), np.float32), np.zeros((1, 3), np.float32))
     pp.i = j
     hist.clear()
     return j
@@ -330,10 +330,12 @@ while app.is_running():
     if drive_log is not None and n_upd % 60 == 0:      # 1 Hz drive log
         p1, _, yaw1 = pose()
         t1 = SimulationManager.get_simulation_time()
-        hist.append((t1, p1[0], p1[1]))
+        hist.append((t1, p1[0], p1[1], yaw1))
         old = [h for h in hist if t1 - h[0] >= 5.0]
         moved = math.hypot(p1[0] - old[-1][1], p1[1] - old[-1][2]) if old else float('nan')
-        stuck = int(bool(old) and moved < 0.05 and abs(v) > 0)
+        turned = abs((yaw1 - old[-1][3] + math.pi) % (2 * math.pi) - math.pi) if old else float('nan')
+        # stuck: no progress while driving, or no rotation while turning in place
+        stuck = int(bool(old) and ((moved < 0.05 and abs(v) > 0) or (abs(v) == 0 and abs(w) > 0.3 and turned < 0.1)))
         drive_log.writerow([f'{t1:.2f}', f'{p1[0]:.3f}', f'{p1[1]:.3f}', f'{math.degrees(yaw1):.1f}',
                             pp.i if pp else -1, f'{v:.2f}', f'{w:.2f}', f'{moved:.3f}', stuck])
         if n_upd % 600 == 0:

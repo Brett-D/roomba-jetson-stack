@@ -170,7 +170,7 @@ for i, r in enumerate(plan['rooms']):
         m &= ~np.any([rl.poly_mask(shape, q['poly']) for q in rooms_in], axis=0)
     if F1:                      # nested rooms (storage under the stair inside the entry): first listed wins
         m &= ~claimed
-        claimed |= m
+    claimed |= m
     fl = [rl.box(((x0 + x1) / 2, (y0 + y1) / 2, -0.125 - (0.03 if r.get('outdoor') else 0)), (x1 - x0, y1 - y0, 0.25),
                  0, f'floor_{i}', 'floor') for x0, y0, x1, y1 in rl.mask_rects_m(m, frame)]
     floor_meshes.append((f'R{i:02d}_{r["name"].replace(" ", "_")}', r, fl))
@@ -357,7 +357,36 @@ for r in rail_out:
         write_mesh(f'/Remodel/Railings/{r["name"]}_{mat}', [e for e in r['els'] if e['mat'] == mat], mat, 'railing', True)
 UsdGeom.Scope.Define(stage, '/Remodel/Floors')
 for name, r, fl in floor_meshes:
-    write_mesh(f'/Remodel/Floors/{name}', fl, fl[0]['mat'], 'floor', True)
+    write_mesh(f'/Remodel/Floors/{name}', fl, fl[0]['mat'], 'floor', False)
+
+
+def floor_collider(mask, step=2):
+    """One welded grid mesh of the walkable floor tops (z = 0). Stacked boxes leave internal vertical faces at
+    their seams that catch the caster (PhysX ghost contacts); a welded top surface has none."""
+    h, w = mask.shape
+    hh, ww = (h + step - 1) // step, (w + step - 1) // step
+    pad = np.zeros((hh * step, ww * step), bool)
+    pad[:h, :w] = mask
+    cells = pad.reshape(hh, step, ww, step).mean(axis=(1, 3)) >= 0.5
+    rr, cc = np.nonzero(cells)
+    corners = np.stack([np.stack([rr, cc], 1), np.stack([rr, cc + 1], 1), np.stack([rr + 1, cc + 1], 1),
+                        np.stack([rr + 1, cc], 1)], 1).reshape(-1, 2)
+    uniq, inv = np.unique(corners, axis=0, return_inverse=True)
+    quads = inv.reshape(-1, 4)
+    P = frame.m(np.stack([uniq[:, 1] * step, uniq[:, 0] * step], 1).astype(float))
+    pts = np.c_[P, np.zeros(len(P))].astype(np.float32)
+    m = UsdGeom.Mesh.Define(stage, '/Remodel/Floors/Collider')
+    m.CreatePointsAttr(Vt.Vec3fArray.FromNumpy(pts))
+    m.CreateFaceVertexCountsAttr(Vt.IntArray([4] * len(quads)))
+    m.CreateFaceVertexIndicesAttr(Vt.IntArray(quads[:, ::-1].ravel().tolist()))     # image y down -> counter-clockwise up
+    m.CreateExtentAttr([Gf.Vec3f(*pts.min(0).tolist()), Gf.Vec3f(*pts.max(0).tolist())])
+    m.CreateVisibilityAttr(UsdGeom.Tokens.invisible)
+    UsdPhysics.CollisionAPI.Apply(m.GetPrim())
+    UsdPhysics.MeshCollisionAPI.Apply(m.GetPrim()).CreateApproximationAttr('none')
+    return len(quads)
+
+
+n_floor_quads = floor_collider(claimed)
 
 # ---------------- doors ----------------
 UsdGeom.Scope.Define(stage, '/Remodel/Doors')
@@ -556,7 +585,7 @@ if not F1:
 svg.append('</svg>')
 open(os.path.join(args.plan_out, f'floorplan{OUT_TAG}.svg'), 'w').write('\n'.join(svg))
 
-stats = {'elements': len(els), 'merged_meshes': mesh_count, 'rooms': len(plan['rooms']), 'doors': len(door_specs),
+stats = {'elements': len(els), 'merged_meshes': mesh_count, 'floor_collider_quads': n_floor_quads, 'rooms': len(plan['rooms']), 'doors': len(door_specs),
          'windows': len(plan['windows']) + len(auto_windows), 'lights': nl + (0 if F1 else 1), 'grid_blobs': len(blobs),
          'furniture': {'grid': sum(1 for i in items if i['source'] == 'grid'),
                        'template': sum(1 for i in items if i['source'] == 'template'),

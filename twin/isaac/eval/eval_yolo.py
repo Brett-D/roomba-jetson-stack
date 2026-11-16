@@ -144,8 +144,9 @@ def eval_synthetic(model, root, out, min_h=10, image_list=None, tag='synthetic')
     return res
 
 
-def eval_real(model, folder, out, grid_n=24, tag='real'):
-    files = sorted(glob.glob(os.path.join(folder, '*.png')))
+def eval_real(model, folder, out, grid_n=24, tag='real', file_list=None):
+    files = ([ln.strip() for ln in open(file_list) if ln.strip()] if file_list
+             else sorted(glob.glob(os.path.join(folder, '*.png'))))
     counts, with_det, scores = [], [], []
     for f in files:
         bgr = cv2.imread(f)
@@ -184,6 +185,7 @@ def main():
     ap.add_argument('--conf', type=float, default=0.45)
     ap.add_argument('--list', help='evaluate only the images listed in this file (e.g. splits/val.txt)')
     ap.add_argument('--tag', default='', help='prefix for the output json names')
+    ap.add_argument('--real-list', help='evaluate only the real frames listed in this file (e.g. splits/real_heldout.txt)')
     args = ap.parse_args()
     os.makedirs(args.out, exist_ok=True)
     model = YoloOnnx(args.model, conf=args.conf)
@@ -193,7 +195,7 @@ def main():
         print('SYNTHETIC', json.dumps({k: v for k, v in r.items() if k != 'recall_by'}))
         print(json.dumps(r['recall_by'], indent=1))
     if args.real:
-        r = eval_real(model, args.real, args.out, tag=(args.tag or '') + 'real')
+        r = eval_real(model, args.real, args.out, tag=(args.tag or '') + 'real', file_list=args.real_list)
         print('REAL', json.dumps({k: v for k, v in r.items() if k != 'files_with_person'}))
 
 
