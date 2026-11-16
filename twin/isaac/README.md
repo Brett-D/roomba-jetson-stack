@@ -14,6 +14,9 @@ twin/isaac/
   remodel/                    floor-plan house: digitised floor plans, registration, USD build, validation
   scripts/                    Isaac Sim scripts (asset build, scene, ROS bridge, data generation)
   eval/                       detector baseline, sim-vs-real image statistics, fine-tune proof
+  run_closed_loop.ps1         closed loop: Isaac Sim (GUI) drives the robot's real stack in WSL (section 7)
+  wsl/                        WSL side of the closed loop: workspace setup, TensorRT engines, OI emulator, monitor
+  foxglove/                   Foxglove/Lichtblick layout for the closed loop (ws://localhost:18766)
 ```
 Big files stay out of git, under `E:\twin` (install, caches, assets, datasets, runs, screenshots).
 
@@ -232,6 +235,61 @@ dataset state and two runs exhausted the 150 GB commit limit.
 `yolo_onnx.py` reproduces the Jetson node exactly (letterbox 384x640 grey 114, BGR→RGB, class 0,
 conf 0.45, OpenCV NMS 0.5).
 
+## 7. Closed loop on the PC: Isaac Sim drives the robot's real stack in WSL
+
+```powershell
+# one-time (WSL Ubuntu-24.04, as root): own workspace from main + TensorRT engines from the ONNX copies
+wsl -d Ubuntu-24.04 -u root -- bash /mnt/e/twin/roomba-jetson-stack/twin/isaac/wsl/setup_ws.sh
+wsl -d Ubuntu-24.04 -u root -- bash /mnt/e/twin/roomba-jetson-stack/twin/isaac/wsl/build_engines.sh
+# start (WSL stack first, then the Isaac Sim window); again while it runs = new run from the dock
+powershell -ExecutionPolicy Bypass -File twin\isaac\run_closed_loop.ps1 -Name my_run [-Record] [-People 2]
+    [-Engine yolo11s_synth_384x640_fp16.engine] [-NoStairKeepout] [-NoAssist] [-NoLookAround] [-Headless]
+# stop (graceful: RTAB-Map saves its database; results copied to E:\twin\runs\closedloop\<run>)
+powershell -ExecutionPolicy Bypass -File twin\isaac\run_closed_loop.ps1 -Stop
+# score a run against ground truth and the floor plan
+E:\twin\isaacsim-env\Scripts\python.exe twin\isaac\scripts\analyze_closed_loop.py E:\twin\runs\closedloop\<run>
+```
+**Watch:** the Isaac Sim window (follow camera, docked "Robot camera (D1000 left)" and "Robot depth
+(turbo)" panels); the robot's web app at http://localhost:18098 (password in
+`E:\twin\isaac_watch_password.txt`); Foxglove at `ws://localhost:18766` with
+`twin/isaac/foxglove/closed_loop.json` (map + costmaps + nvblox, `/plan`, `/explorer/markers` once the
+explorer publishes them, obstacle points, left camera with detections, colourised depth, status). Use
+Lichtblick (open-source Foxglove Studio fork, no account) or Foxglove desktop (free sign-in).
+`E:\twin\isaac_NOW.txt` always has a one-line status.
+
+How it is wired:
+- **WSL** (`wsl/closed_loop.sh`, `ROS_DOMAIN_ID=60`, `rmw_zenoh_cpp`, own Zenoh router on
+  tcp/127.0.0.1:7447): `robot.launch.py` as on the robot via `wsl/isaac_robot.launch.py` (D1000 driver
+  off, odometry cuvslam + EKF fusion, nvblox pipeline B, RTAB-Map mapping into a test database under
+  `/root/isaacloop/runs/<run>`, Nav2, Rust nodes, explorer, person detector with a TensorRT engine
+  built in WSL, web app on :18098 with the run's own HOME), foxglove_bridge on :18766, the run
+  monitor (`wsl/cl_monitor.py`) and a CPU sampler for this run's processes (`wsl/cl_cpu.py`).
+- **The real roomba_driver** (Rust, robot config, only the port changed) talks the Roomba Open
+  Interface to `wsl/isaac_roomba.py` on a pty, which turns drive commands into wheel speeds for Isaac
+  and Isaac's state into OI sensor packets (encoders, bumpers, light bumpers, cliffs, wall, modes,
+  Safe→Passive on a cliff). So `/wheel/odom`, `/roomba/sensors`, `battery_state`, `roomba/mode`, the
+  bump reflex and the cmd_vel timeout are the driver's own. The stream is paced by sim time (one packet
+  per Isaac step), otherwise wheel velocities alias at < 1x real time.
+- **Isaac Sim** (`scripts/run_closed_loop.py`, bundled rclpy over Zenoh): `/clock`, the D1000 topics
+  (left colour + mono, right mono, depth 16UC1 mm 0.3–7 m registered to the left camera, three
+  camera_info, IMU 200 Hz, `/tf_static` as the real driver), ground truth `/ground_truth/odom`, people
+  positions, status. Only the cameras the stack needs are rendered, every 4th step (15 Hz sim time).
+  Lights are 2.5x brighter for the GUI/videos (`--light-scale`; the dataset generator is unchanged).
+  The Kit GUI needs the RTSS (MSI Afterburner / RivaTuner) Vulkan layer disabled for this process
+  only (`DISABLE_RTSS_LAYER=1` and the two Steam layers): it crashed the NVIDIA Vulkan driver (integer
+  divide by zero in nvoglv64.dll) while creating the swapchain.
+- **Run options** (all logged in `monitor/events.jsonl`): `--look-around` (default) turns 360° with
+  Nav2's Spin before exploring; the stairwell keep-out zone (default) is added through the zone editor
+  exactly as the web app does; `--assist` (default) reverses a robot that has not moved for 40 s of
+  sim time by 0.3 m through Isaac's teleop override and counts it as an intervention. `-NoStairKeepout
+  -NoAssist -NoLookAround` gives the stack's unaided behaviour. The explorer's wall-clock timeouts are
+  scaled by `-WallTimeoutScale` (default 5 ≈ 1 / real-time factor).
+
+Outputs per run: `monitor/poses.csv` (2 Hz: ground truth, RTAB-Map map pose, EKF odom, cuVSLAM,
+wheel odometry, cmd_vel), `events.jsonl`, `detections.csv`, `people.csv`, the last RTAB-Map grid and
+global costmap, `logs/` (launch, driver bridge, OI serial log, CPU), `analysis/` (summary.json,
+trajectory.png, map_vs_plan.png).
+
 ## Results (2026-11-15, see `E:\twin\eval`, `E:\twin\screens`)
 
 | | |
@@ -277,6 +335,78 @@ fresh_map8, which has no people in it):
   yolo11s = 12.9 GFLOPs, **5.35 ms** (5.68 ms). In production yolo11n takes ~9 ms under load, so
   yolo11s would be ~14 ms — well inside the 66 ms frame period at 15 Hz. Nothing was deployed.
 
+### Closed loop (2026-11-15, `E:\twin\runs\closedloop\<run>`, scored by `analyze_closed_loop.py`)
+
+All runs: upstairs floor-plan house, start at the dock (map origin), 2 walking people, yolo11n engine.
+Real-time factor 0.23-0.28 while the GPU was free; 0.05-0.15 from run 3 on, while an Isaac Lab training
+used ~95 % of the GPU (so no full exploration was possible; to be re-run after the navigation fixes).
+"Coverage" = RTAB-Map free cells on the plan's floor (99 m² excluding the stair void and furniture).
+
+| run | sim-side state | explored (sim s) | goals ok / failed | driven (GT) | EKF / map distance | ATE map pose | coverage | what happened |
+|---|---|---|---|---|---|---|---|---|
+| 1 `cl_test2` | OI stream paced by wall clock | 140 | 4 / 1 | 11.4 m | 59 % | 1.45 m | 11 % | frontier goal "timed out" after 11 s of sim (60 s wall); "no reachable unmapped areas" at 140 s; wedged nose-to-door-frame on the way home until the 300 s (wall) return timeout |
+| 2 `cl_run2` | same | 102 | 4 / 0 | 10.5 m | 64 % (wheels 98 %, cuVSLAM ~100 %) | 1.91 m | 12 % | map smeared by the short EKF, ghost obstacles around the robot, wedged at a bed/shelf (spin and back-up "Collision Ahead"); explorer still said "Paused: visual tracking is recovering" |
+| 3 `cl_run3` | OI stream paced by sim time | 207 | 8 / 2 | 25.5 m | 95 % | **0.17 m** until 328 s, 0.64 m overall | 25 % | "finished" at 20 % coverage (frontier behind the start never faced), found the west hallway only after driving home; a simulated person then shoved the robot 1 m / 135° → wedged at the railing (3219 "collision ahead") |
+| 4 `cl_run4` | + 360° look-around | 31 | 0 / 0 | 0.2 m | - | 0.10 m | 9 % | drove north into the balusters 3 s after the first goal (a frontier inside the stair void, as in run 5), bumped, wedged (1021 "collision ahead", 18 behaviours aborted) |
+| 5 `cl_run5` | + assist | 21 | 0 / 1 | 1.1 m | - | 0.52 m | 9 % | same railing crash; a person shoved it at 103 s |
+| 6, 7 | + stairwell keep-out | - | - | - | - | - | - | 6: shoved by a person before exploring (and the keep-out was sent to the wrong topic; fixed and checked against the zone node on its own since, not yet in a run); 7: stopped at 30 s sim (GPU busy) |
+
+Other measurements (run 3 unless noted): cuVSLAM drift 4.6 % of distance between resets (7 odometry resets,
+3 watchdog recoveries); wheel odometry ATE 0.15 m in run 2; bumper contacts 3 (1 driver bump event), no
+cliffs; person detector (yolo11n, frame level, person within ±40° and 0.3-7 m with a clear line of sight
+through the plan walls) recall 0.34 / precision 0.65 — 1.00 below 1.5 m, 0.19 at 1.5-3 m, 0.31 at
+3-7 m; the stack used ~1 CPU core in WSL (bt_navigator, controller, RTAB-Map, nvblox, person detector
+5-10 % of a core each), Isaac ~2-3 cores, GPU 80-94 % (shared). The 2D twin's `explore_from_dock` on the
+grid world reached 64-68 % coverage in 250-370 s with 14-20 goals and no bumps (run 3 here: 30 % of the same area); it does not model
+seeing through balusters, the 0.3 m depth blind zone, VIO failure or people. The optional run with the
+retrained yolo11s (person + railing) engine was not done (`build_engines.sh` builds it; the node needs a
+2-class `classes` override).
+
+**Stack findings** (evidence in the run folders' `logs/robot_launch.log`, `monitor/events.jsonl`,
+`analysis/`; screenshots `E:\twin\screens\closedloop_*.png`):
+1. *The stairwell reads as open floor.* The depth camera at 0.13 m looks through the balusters; the
+   void below never shows a floor, so RTAB-Map and the costmap ray-trace it as free and the thin
+   balusters are only partly marked. The explorer picked a frontier inside the void and Nav2 planned
+   through a gap in the railing; the robot hit the balusters within seconds (runs 4 and 5, like the
+   real crash; `closedloop_railing_run5.png`). Fix: treat "floor expected but not seen" as a drop-off
+   (negative obstacle) in floor_obstacles, or at least keep a keep-out zone around the stairwell.
+2. *A wedged robot can't move.* Once the footprint touches lethal cost (after a bump, at a door frame,
+   or because of a smeared map), RPP refuses every command ("detected collision ahead!" every
+   cycle) and the Spin/BackUp behaviours abort with "Collision Ahead"; only the driver's bump reflex
+   moves it (~1 cm). Runs 1, 2, 3, 4, 5. Fix: a recovery that reverses a short way without the
+   collision check when the rear is clear, or a nav_coach unstick manoeuvre.
+3. *The final heading is ignored, so the explorer never looks around.* It sends frontier goals that
+   face the unknown, but `yaw_goal_tolerance: 6.28` accepts any heading and the goal is then marked
+   visited; a frontier right behind the start was never seen and exploration "finished" at 20 %
+   (run 3). Fix: turn to the requested heading for explorer goals (own goal checker or a spin on
+   arrival), or only mark a frontier visited once it was in the camera's field of view.
+4. *Stale status.* "Paused: visual tracking is recovering" stays after tracking recovers while Nav2 is
+   driving again (run 2, from 46 s to the end); the web app shows the wrong state.
+5. *Wall-clock timeouts.* The explorer (goal 60 s, response 10 s, return 300 s, finish confirm 20 s),
+   nav_coach, vslam_watchdog and the driver's 0.5 s cmd_vel timeout use the monotonic clock, so they
+   fire early when the sim runs slower than real time (run 1). `isaac_robot.launch.py` scales the
+   explorer's timeouts as a workaround; using the node clock would fix it.
+6. Minor: with velocity-proportional wheel covariances the EKF favours low speed samples; noisy or
+   aliased wheel velocities bias it short (how the sim-time pacing bug showed up as -35 % distance).
+   cuVSLAM warns when two frames are > 80 ms apart (15 Hz camera with a dropped frame).
+
+**Workarounds and sim-side fixes** (flags of `run_closed_loop.ps1`): look-around before exploring
+(`-NoLookAround` to disable), stairwell keep-out zone (`-NoStairKeepout`), logged assists for a robot
+stuck 40 s (`-NoAssist`), explorer wall-clock timeouts x5 (`-WallTimeoutScale`), OI stream paced by sim
+time (fixes the EKF), pushes by simulated people undone (they walk through the robot instead of
+kidnapping it), lights x2.5 for viewing.
+
+**Videos** (`E:\twin\videos\web`, H.264 yuv420p +faststart + VP9 WebM + poster JPG; rendered from Isaac
+per sim step, so playback is smooth although the sim runs slower than real time):
+
+| file | length | MP4 / WebM | shows |
+|---|---|---|---|
+| `autonomous_hero_loop` | 12 s | 5.5 / 3.1 MB | run 3: the stack exploring on its own, follow camera + robot camera inset, cross-faded loop |
+| `autonomous_highlights` | 51 s | 24.8 / 9.9 MB | run 3 highlights, long stretches at 2-4x (labelled) |
+| `path_replay_hero_loop` | 12 s | 6.3 / 3.1 MB | recorded path replayed through the house with people (not autonomous) |
+| `path_replay_highlights` | 72 s | 34.5 / 13.7 MB | same, highlights |
+| `depth_heatmap_autonomous` | 25 s | 5.6 / 7.0 MB | follow camera + robot camera + depth heat map (turbo, black outside 0.3-7 m, legend) |
+
 ## Known limits / next steps
 - The scan mesh is noisy (IR depth from 0.13 m, Poisson surfaces with holes and shards); it is kept as
   `--look scan|clean`. The default is the floor-plan house; a dedicated capture (video walk-through,
@@ -286,6 +416,10 @@ fresh_map8, which has no people in it):
   the drawing; heights are assumptions (2.44 m / 2.65 m / 2.90 m floor to floor).
 - Dataset v2 was rendered before the stairwell correction (placeholder below the well); render v3 with
   the downstairs and the auto-exposure camera model built in (`gen_dataset.py` now applies it).
-- Real-time factor 0.4 with two cameras at 15 Hz, depth and IMU at 200 Hz.
+- Real-time factor 0.4 with two cameras at 15 Hz, depth and IMU at 200 Hz (ROS twin, headless); the
+  closed loop with the GUI window, three robot cameras and walking people reaches 0.23-0.28 on a free
+  GPU (the Kit update is CPU-bound, ~50-65 ms per step) and 0.05-0.15 while a training shares the GPU.
+- Closed loop on the PC: a full unaided exploration still has to be run once the navigation findings
+  above are fixed and the GPU is free; the stairwell keep-out via the zone editor is untested in a run.
 - Closed loop with the Jetson needs the network phase (Ethernet, firewall rule for DDS on the PC,
   same RMW/domain, or a Zenoh bridge).
