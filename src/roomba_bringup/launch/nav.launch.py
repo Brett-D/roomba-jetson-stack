@@ -97,6 +97,11 @@ def generate_launch_description():
              output='screen', parameters=[params]),
         Node(package='nav2_lifecycle_manager', executable='lifecycle_manager', name='lifecycle_manager_navigation',
              output='screen', parameters=[{'autostart': True, 'node_names': NAV_NODES, 'bond_timeout': 10.0}]),
+        # The lifecycle manager waits forever for each change_state answer; one lost answer (seen
+        # once in ~25 twin launches) left Nav2 inactive ("Navigation is not running"). The guard
+        # checks the servers' states after 30 s and brings up whatever isn't active.
+        Node(package='roomba_rs', executable='nav2_guard', name='nav2_guard', output='screen',
+             parameters=[{'node_names': NAV_NODES, 'startup_timeout_s': 30.0}]),
         # Rust port: the same instructions tick for tick (tools/ab_nav_coach_offline.py), ~1/6 of the CPU.
         Node(package=PythonExpression(["'roomba_rs' if '", LaunchConfiguration('rust_nodes'),
                                        "' == 'true' else 'roomba_perception'"]),

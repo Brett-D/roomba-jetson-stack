@@ -6,6 +6,7 @@ pub mod explorer;
 pub mod floor;
 pub mod gap_filler;
 pub mod geometry;
+pub mod nav2_guard;
 pub mod nav_coach;
 pub mod node_params;
 pub mod ocv;

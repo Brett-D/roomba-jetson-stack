@@ -52,6 +52,10 @@ path = "src/bin/person_detector.rs"
 name = "twin2d"
 path = "src/bin/twin2d.rs"
 
+[[bin]]
+name = "nav2_guard"
+path = "src/bin/nav2_guard.rs"
+
 [dependencies]
 anyhow = "1"
 # Generated bindings for NVIDIA's message package (its debs ship none), see vendor/.../regenerate.sh
