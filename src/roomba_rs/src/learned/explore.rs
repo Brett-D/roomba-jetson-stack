@@ -383,6 +383,13 @@ mod tests {
             }
             assert_eq!(l.len(), want.len());
         }
+        let c0 = &cases[0];
+        let (m0, g0, f0, k0) = (f(&c0["map"]), f(&c0["glob"]), f(&c0["feats"]), f(&c0["mask"]));
+        let t0 = std::time::Instant::now();
+        for _ in 0..50 {
+            r.logits(&m0, &g0, &f0, &k0).unwrap();
+        }
+        eprintln!("max |rust - pytorch| = {worst:e}, {:.3} ms per inference", t0.elapsed().as_secs_f64() * 1000.0 / 50.0);
         assert!(worst <= 1e-5, "max |rust - pytorch| = {worst}");
     }
 }

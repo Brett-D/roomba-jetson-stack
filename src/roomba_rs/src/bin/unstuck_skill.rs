@@ -10,7 +10,8 @@
 //! stay in the loop. It never publishes outside an active goal.
 //!
 //! It ends with SUCCEEDED once the local costmap shows >= 0.3 m around the robot for 0.5 s with
-//! the bumper free and the depth camera not blind (nose to a wall the costmap looks empty),
+//! the bumper and the light bumpers free and the depth camera not blind (nose to a wall the costmap
+//! looks empty),
 //! TIMED_OUT after min(time_limit_s, max_time_s), FAILED on a cliff / wheel drop /
 //! Roomba leaving Safe mode / missing data / model error, CANCELED on request; the robot is stopped
 //! in every case. On anything but SUCCEEDED the caller falls back to the classical recovery (Nav2's

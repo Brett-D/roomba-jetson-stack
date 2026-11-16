@@ -161,8 +161,8 @@ pub struct Tick<'a> {
     pub camera_blind: bool,
 }
 
-/// One run of the skill: time limit, success check (0.3 m clearance held 0.5 s, bumper free,
-/// camera not blind),
+/// One run of the skill: time limit, success check (0.3 m costmap clearance held 0.5 s, bumper
+/// free, no light bumper close, camera not blind),
 /// pose history for the motion features, and the previous action.
 pub struct Session {
     start: f64,
@@ -231,7 +231,8 @@ impl Session {
             self.bumps += 1;
         }
         self.was_bumped = bumped;
-        if t.clearance_m >= self.success_clearance && !bumped && !t.camera_blind {
+        let near = t.light.iter().any(|&p| p >= 0.2); // something within ~10 cm of the bumper
+        if t.clearance_m >= self.success_clearance && !bumped && !t.camera_blind && !near {
             let since = *self.free_since.get_or_insert(t.now);
             if t.now - since >= 0.5 {
                 return Err(Outcome::Succeeded);
@@ -295,6 +296,12 @@ mod tests {
                 worst = worst.max((a[k] - want.as_f64().unwrap() as f32).abs());
             }
         }
+        let x0: Vec<f32> = inputs[0].as_array().unwrap().iter().map(|a| a.as_f64().unwrap() as f32).collect();
+        let t0 = std::time::Instant::now();
+        for _ in 0..200 {
+            policy.act(&x0).unwrap();
+        }
+        eprintln!("max |rust - pytorch| = {worst:e}, {:.3} ms per inference", t0.elapsed().as_secs_f64() * 1000.0 / 200.0);
         assert!(worst <= 1e-5, "max |rust - pytorch| = {worst}");
     }
 
