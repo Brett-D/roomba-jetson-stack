@@ -4,8 +4,9 @@
 
   isaac_roomba.py --link /root/isaacloop/run/x/ttyROOMBA [--log serial.jsonl]
 
-Like tools/fake_roomba.py (whose OI tables and framing it reuses) the OI modes, the 15 ms sensor stream
-(opcode 148, whatever layout the driver asks for), pause/resume and queries behave as on the robot, but:
+Like roomba-serial-ros2's tools/fake_roomba.py (whose OI tables and framing it reuses) the OI modes, the
+15 ms sensor stream (opcode 148, whatever layout the driver asks for), pause/resume and queries behave as
+on the robot, but:
 - drive commands (137 drive, 145 drive direct, 146 drive PWM; Safe/Full mode only) become wheel speeds on
   /isaac/roomba/wheel_cmd (std_msgs/Float64MultiArray [left, right] m/s), re-sent every 100 ms;
 - the sensor values come from Isaac Sim's /isaac/roomba/state (Float64MultiArray):
@@ -33,7 +34,8 @@ import threading
 import time
 import tty
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', '..', 'tools'))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', '..',
+                                'src', 'roomba-serial-ros2', 'tools'))
 from fake_roomba import BOOT_TEXT, FMT, M_PER_COUNT, TICK, command_length, ids_of  # noqa: E402
 
 import rclpy  # noqa: E402

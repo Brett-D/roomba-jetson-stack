@@ -1,21 +1,15 @@
 //! Processing used by the Rust nodes, kept free of ROS types so it can be unit tested - except
-//! `roomba` (which owns the Roomba's serial port) and
 //! `tf_listener`, the /tf subscriptions feeding `tf_buffer` (tf2's BufferCore for rclrs nodes).
-pub mod battery;
 pub mod cv;
-pub mod driver;
 pub mod ekf;
 pub mod explorer;
 pub mod floor;
 pub mod gap_filler;
 pub mod geometry;
-pub mod kinematics;
 pub mod nav_coach;
 pub mod node_params;
 pub mod ocv;
-pub mod oi;
 pub mod person;
-pub mod roomba;
 pub mod scene_filter;
 pub mod static_tf;
 pub mod tf_buffer;
@@ -25,6 +19,10 @@ pub mod twin;
 pub mod watchdog;
 pub mod web;
 pub mod zones;
+
+/// The Roomba's Open Interface tables and the Li-ion curve come from the Rust driver's library
+/// (roomba_driver_rs in the roomba-serial-ros2 submodule): twin2d emulates the robot with them.
+pub use roomba_driver_rs::{battery, oi};
 
 /// Makes SIGINT and SIGTERM end the process at once with exit status 0, as an rclpy node exits on
 /// Ctrl-C (killed by the signal, launch reported every Rust node as "process has died" with an

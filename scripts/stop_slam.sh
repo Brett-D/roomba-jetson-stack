@@ -15,6 +15,7 @@ pkill -f 'mynteye_d1000_driver/d1000_node' 2>/dev/null
 pkill -f '/opt/ros/jazzy/lib/(robot_localization|nvblox_ros)/' 2>/dev/null
 pkill -f "roomba_perception/" 2>/dev/null
 pkill -f "lib/roomba_rs/" 2>/dev/null
+pkill -f "lib/roomba_driver_rs/" 2>/dev/null   # the Rust driver stops the robot on SIGTERM
 pkill -f "basalt_vio_ros/" 2>/dev/null
 pkill -f "roomba_web/" 2>/dev/null
 pkill -INT -f "lib/roomba_driver/roomba_driver" 2>/dev/null
@@ -23,7 +24,7 @@ sleep 5
 pkill -9 -f "/opt/ros/jazzy/lib/(rtabmap_|foxglove_bridge|imu_filter_madgwick|image_transport|rclcpp_components)" 2>/dev/null
 pkill -9 -f "mynteye_d1000_driver/d1000_node" 2>/dev/null
 pkill -9 -f '/opt/ros/jazzy/lib/(robot_localization|nvblox_ros)/' 2>/dev/null
-pkill -9 -f "roomba_(perception|web|driver|rs)/|basalt_vio_ros/|static_transform_publisher" 2>/dev/null
+pkill -9 -f "roomba_(perception|web|driver|driver_rs|rs)/|basalt_vio_ros/|static_transform_publisher" 2>/dev/null
 pkill -9 -f "/opt/ros/jazzy/lib/nav2_" 2>/dev/null
 sleep 1
 # Processes killed with -9 leave Fast DDS shared-memory files behind, which can hang the next

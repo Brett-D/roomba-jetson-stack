@@ -5,7 +5,8 @@ A **Jetson Orin Nano Super** rides on a 3D-printed platform with a **MYNT EYE D1
 and drives the Roomba through its Open Interface serial port.
 
 The serial driver lives in its own repository and is included here as a submodule:
-[Brett-D/roomba-serial-ros2](https://github.com/Brett-D/roomba-serial-ros2).
+[Brett-D/roomba-serial-ros2](https://github.com/Brett-D/roomba-serial-ros2). It has the Rust driver
+`roomba_driver_rs`, which the robot runs, and the original Python `roomba_driver` (`rust_nodes:=false`).
 
 ## What's in here
 
@@ -13,11 +14,11 @@ The serial driver lives in its own repository and is included here as a submodul
 |---|---|
 | `src/roomba_bringup` | Launch files (`robot.launch.py`, `vslam.launch.py`, `nav.launch.py`, `handheld_slam.launch.py`, `twin2d.launch.py`), Nav2 configs, robot driver config, digital-twin scenarios (`config/twin2d/`) |
 | `src/roomba_perception` | VSLAM watchdog/odometry filter with wheel bridging, EKF input conditioning (`ekf_inputs`), floor obstacle detection, explorer, ignore zones, nav coach, person detector, IMU calibration |
-| `src/roomba_rs` | Rust ports of the robot's ROS 2 nodes (rclrs): `floor_obstacles`, `ekf_inputs`, `vslam_watchdog`, `map_gap_filler`, `ignore_zones`, `roomba_driver`, `web_server`, `set_password`, `explorer`, `nav_coach` and `person_detector` (TensorRT and OpenCV through a small C++ shim in `native/`) (same topics, services, parameters, files and output as the Python nodes at a fraction of the CPU; `vendor/` holds generated Rust bindings for the Isaac ROS VSLAM interfaces). `tf_buffer`/`tf_listener` give rclrs nodes a tf2-equivalent TF buffer (bit-identical lookups). `rust_nodes:=false` switches back to the Python nodes. `twin2d` is the 2D digital twin (see [Digital twin (2D)](#digital-twin-2d)) |
+| `src/roomba_rs` | Rust ports of the robot's ROS 2 nodes (rclrs): `floor_obstacles`, `ekf_inputs`, `vslam_watchdog`, `map_gap_filler`, `ignore_zones`, `web_server`, `set_password`, `explorer`, `nav_coach` and `person_detector` (TensorRT and OpenCV through a small C++ shim in `native/`) (same topics, services, parameters, files and output as the Python nodes at a fraction of the CPU; `vendor/` holds generated Rust bindings for the Isaac ROS VSLAM interfaces). `tf_buffer`/`tf_listener` give rclrs nodes a tf2-equivalent TF buffer (bit-identical lookups). `rust_nodes:=false` switches back to the Python nodes (and the Python Roomba driver). `twin2d` is the 2D digital twin (see [Digital twin (2D)](#digital-twin-2d)); its simulated Roomba uses the Open Interface code of the Rust driver's library (`roomba_driver_rs`, a cargo path dependency on the submodule) |
 | `src/roomba_web` | Web app on port 8080: live map, robot status, drive pad, tap-to-go navigation, login (the page, and the Python server used with `rust_nodes:=false`) |
 | `src/mynteye_d1000_driver` | ROS 2 node for the MYNT EYE D1000 stereo/depth/IMU camera |
 | `src/basalt_vio_ros` | ROS 2 wrapper for Basalt visual-inertial odometry |
-| `src/roomba-serial-ros2` | Roomba Open Interface driver (submodule) |
+| `src/roomba-serial-ros2` | Roomba Open Interface driver (submodule): `roomba_driver_rs` (Rust, used with `rust_nodes:=true`), `roomba_driver` (Python), `roomba_msgs`, and in `tools/` the simulated Roomba (`fake_roomba.py`) and the driver A/B checks |
 | `scripts/` | `run_robot.sh`, `stop_slam.sh`, `graceful.py` (`ros2 launch` that SIGTERM / SIGINT stop cleanly), `record_run.sh` / `compare_pipelines.sh` (A vs B on a recorded drive), `run_twin2d.sh` (the 2D digital twin), mapping/replay helpers, setup scripts |
 | `tools/` | Probes and diagnostics (motion step test, costmap/obstacle probes, map render, TF/drift/CPU-GPU checks, comparison monitor/renderer, Python vs Rust A/B checks), `twin2d_world.py` / `twin2d_plan.py` / `twin2d_run.py` (digital twin floor plan from the map database or a vector plan, scenario runner); `tools/oi_tests/` holds early serial/OI bench scripts |
 | `docs/` | Wiring and power diagrams |
@@ -55,7 +56,7 @@ git clone --recurse-submodules https://github.com/Brett-D/roomba-jetson-stack.gi
 cd ~/roomba_ws
 source /opt/ros/jazzy/setup.bash
 rosdep install --from-paths src --ignore-src -y
-# Rust toolchain for src/roomba_rs (cargo fetches rclrs; message crates come from /opt/ros)
+# Rust toolchain for src/roomba_rs and roomba_driver_rs (cargo fetches rclrs; message crates come from /opt/ros)
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
 sudo apt install -y libclang-dev mold && source ~/.cargo/env   # mold: GNU ld takes 10+ min to link
 # roomba_rs also needs JetPack's TensorRT, CUDA and OpenCV dev files (libnvinfer-dev, cuda-toolkit, libopencv-dev)
@@ -73,12 +74,13 @@ records its grid and path; `tools/ab_map_gap_filler_offline.py` compares the fil
 cell and `tools/ab_ignore_zones_offline.py` the zone outputs (JSON, masks, markers, zones file) on
 scripted and random commands, clicks and bump marks; `tools/ab_scene_filter.py` checks the zone/line
 of sight helpers and `tools/ab_zones_gap_filler_cpu.sh` measures CPU and memory of both pairs.
-For the driver, `tools/fake_roomba.py` simulates the
+The driver's checks live with it in `src/roomba-serial-ros2/tools/`: `fake_roomba.py` simulates the
 Roomba on a pseudo-terminal (scripted sensors, bumps, cliffs, charging, bad checksums, stream
-dropouts, sleep, reset); `tools/ab_driver.sh` runs both drivers through the same scenario
-(`tools/ab_driver_harness.py`) and `tools/ab_driver_compare.py` compares the serial bytes, topics,
+dropouts, sleep, reset); `ab_driver.sh` runs both drivers through the same scenario
+(`ab_driver_harness.py`) and `ab_driver_compare.py` compares the serial bytes, topics,
 service responses, logs and shutdown bytes (`SCENARIO=lightbump` times the light-bumper stops);
-`tools/ab_driver_cpu.sh` measures CPU.
+`ab_driver_cpu.sh` measures CPU. With the robot's parameters:
+`CONFIG=src/roomba_bringup/config/roomba_driver_robot.yaml src/roomba-serial-ros2/tools/ab_driver.sh`.
 `tools/ab_web.sh` runs both web servers side by side on scripted topics and compares every HTTP
 response (all routes, methods and login states), websocket state, MJPEG frame and published command;
 `tools/ab_web_images.py` checks the camera preview JPEGs and map PNGs against OpenCV byte for byte
@@ -174,7 +176,7 @@ and the web app. The twin node replaces the hardware, the VIO/watchdog and RTAB-
   limit, optional turn scrub), collisions (it stops at what it hits, bumper pressed), bumper switches,
   the six light bumpers (IR ray casts; this unit's front-left is the sensitive one), wall and cliff
   sensors, falling down stairs, and the Ridgid pack's voltage under load. Its Open Interface on the
-  pty behaves like `tools/fake_roomba.py` and the robot: Off/Passive/Safe/Full (Safe drops to Passive
+  pty behaves like `fake_roomba.py` and the robot: Off/Passive/Safe/Full (Safe drops to Passive
   on a cliff or wheel drop), streams in both driver layouts every 15 ms, queries, pause/resume, reset.
 - *Camera*: 16UC1 depth registered to the left camera with the real intrinsics (640x360, 15 Hz,
   0.3-7 m, optional noise, dropout and the real camera's short scale), 2.5D ray casting against walls,

@@ -16,7 +16,7 @@ Frames: map (RTAB-Map) -> odom (vslam_watchdog: VIO, wheel-bridged; or the EKF) 
 on the floor, x forward) -> camera_link (static mount below) -> optical / IMU frames (camera driver).
 roomba_driver drives the wheels from /cmd_vel (Nav2's collision monitor, or the web app's drive pad)
 and publishes /wheel/odom, /battery_state and /roomba/sensors. rust_nodes:=false runs the original
-Python nodes (driver included) instead of their Rust ports in roomba_rs.
+Python nodes (driver included) instead of their Rust ports in roomba_rs and roomba_driver_rs.
 
 Camera mount defaults: centred, facing forward, level, lens 0.153 m ahead of the Roomba's centre
 (1.7 cm behind the front bumper edge) and 0.13 m above the floor (tape measure). In the depth
@@ -84,8 +84,9 @@ def generate_launch_description():
         DeclareLaunchArgument('nav', default_value='true', description='Run Nav2'),
         DeclareLaunchArgument('driver', default_value='true', description='Run the Roomba base driver'),
         DeclareLaunchArgument('rust_nodes', default_value='true',
-                              description='Use the Rust ports (package roomba_rs) of nodes that have one, the '
-                                          'Roomba driver included; false = the original Python nodes'),
+                              description='Use the Rust ports (package roomba_rs) of nodes that have one, and the '
+                                          'Rust Roomba driver (roomba_driver_rs); false = the original '
+                                          'Python nodes'),
         DeclareLaunchArgument('driver_params', default_value=PathJoinSubstitution(
             [bringup, 'config', 'roomba_driver_robot.yaml'])),
         DeclareLaunchArgument('nav_params', default_value=PythonExpression([
@@ -119,9 +120,10 @@ def generate_launch_description():
         ],
     )
 
-    # Rust port (roomba_rs): same topics, services, parameters and serial bytes, ~1/10 of the CPU.
+    # Rust driver (roomba_driver_rs, in the roomba-serial-ros2 submodule): same topics, services,
+    # parameters and serial bytes as the Python roomba_driver, ~1/10 of the CPU.
     driver = Node(
-        package=PythonExpression(["'roomba_rs' if '", lc('rust_nodes'), "' == 'true' else 'roomba_driver'"]),
+        package=PythonExpression(["'roomba_driver_rs' if '", lc('rust_nodes'), "' == 'true' else 'roomba_driver'"]),
         executable='roomba_driver', name='roomba_driver', output='screen',
         parameters=[lc('driver_params')],
         condition=IfCondition(lc('driver')),

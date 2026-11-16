@@ -71,13 +71,16 @@ colcon build --packages-up-to roomba_bringup roomba_rs roomba_web --packages-ign
 
 ## Verified
 
+(Before the Rust driver moved from roomba_rs to `roomba_driver_rs` in the driver submodule, whose
+`tools/` now holds `fake_roomba.py` and the driver A/B scripts.)
+
 - `cargo test --lib` in `src/roomba_rs`: 135 passed. `colcon test --packages-select roomba_rs roomba_driver`:
   40 tests, 0 failures (one earlier run had `roomba::tests::stream_frames_reach_callbacks_and_waiters` fail
   once under load: `deliver()` wakes `wait_for_frame` before the callbacks run, so the test races; 0/65
   failures when repeated).
 - `ros2 pkg executables roomba_rs`: all 11 nodes, `person_detector` linked against TensorRT 10.16, CUDA 13.2
   and OpenCV 4.6.
-- `tools/ab_driver.sh` (Python vs Rust driver on `tools/fake_roomba.py`): serial commands, shutdown bytes,
+- `ab_driver.sh` (Python vs Rust driver on `fake_roomba.py`): serial commands, shutdown bytes,
   services, `/roomba/mode`, odometry and logs identical. Only the 5 Hz `/roomba/sensors` sampled two extra
   short `oi_mode` flips for the Python driver (sampling phase).
 - Smoke stack (`tools/pc_wsl/run_stack.sh`): the robot's Nav2 (`nav.launch.py` in robot mode with
@@ -94,10 +97,10 @@ WSL2's clock on this PC runs ~0.3 % fast and its time sync steps `CLOCK_REALTIME
 30 s (`tools/pc_wsl/clockwatch.py`). Jazzy's `rcl_wait` then returns `RCL_RET_TIMEOUT` for a wait that
 ended for a ROS-time timer that is not due yet; rclrs 0.8 treats that as an error and stops spinning, so
 the Rust nodes exited (`Error: Timeout occurred (RCL_RET_TIMEOUT)`). The roomba_driver died 25-100 s
-after start in every run. `node_params::spin` / `spin_until` now spin again when only timeouts were
-reported: three fixed drivers ran 200 s through 7 clock steps and still stop cleanly on SIGTERM. The same
-can happen on the Jetson whenever NTP steps the clock back. (Sim-time runs are not affected: timers on
-an overridden ROS clock don't set the wait timeout.)
+after start in every run. `node_params::spin` / `spin_until` (and the driver's own `spin_until`) now spin
+again when only timeouts were reported: three fixed drivers ran 200 s through 7 clock steps and still stop
+cleanly on SIGTERM. The same can happen on the Jetson whenever NTP steps the clock back. (Sim-time runs are
+not affected: timers on an overridden ROS clock don't set the wait timeout.)
 
 ## Parallel scenarios
 

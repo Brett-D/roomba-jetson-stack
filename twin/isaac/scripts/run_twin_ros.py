@@ -244,7 +244,7 @@ def odom_msg(frame, t, x, y, z, qwxyz, v, w):
 
 
 def wheel_targets(v, w):
-    """roomba_rs kinematics::twist_to_wheel_speeds, then m/s -> rad/s."""
+    """roomba_driver_rs kinematics::twist_to_wheel_speeds, then m/s -> rad/s."""
     b, vmax, r = tc.DRIVE['wheel_base_m'], tc.DRIVE['max_wheel_speed_m_s'], tc.DRIVE['wheel_radius_m']
     left, right = v - w * b / 2, v + w * b / 2
     peak = max(abs(left), abs(right))

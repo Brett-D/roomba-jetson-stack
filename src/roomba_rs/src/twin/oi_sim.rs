@@ -1,5 +1,5 @@
 //! The Roomba's Open Interface as the driver sees it on the serial port (the twin's side of the
-//! pty). Behaves like tools/fake_roomba.py and the robot: Start/Safe/Full/Stop/Reset and the
+//! pty). Behaves like fake_roomba.py (driver repo) and the robot: Start/Safe/Full/Stop/Reset and the
 //! cleaning behaviours change the OI mode (Safe drops to Passive on a cliff or wheel drop, motors
 //! off), opcode 148 streams frames [19][n][id][data]...[checksum] every 15 ms with whatever layout
 //! was asked for last (the driver alternates its primary and secondary layouts), 150 pauses and

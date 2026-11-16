@@ -22,4 +22,4 @@ echo "== $N stacks: startup/idle (15 s)"; tail -1 "$OUT/idle_startup.txt"
 echo "== $N stacks: navigating (30 s)"; cat "$OUT/navigating.txt"
 for i in $(seq $N); do echo "-- p$i: $(grep -c SUCCEEDED $OUT/check_p$i.txt) goals succeeded; $(grep -E 'SMOKE|wheel' $OUT/check_p$i.txt | tr '\n' ' ')"; grep -hE 'ABORTED|timeout|rejected' "$OUT/check_p$i.txt"; done
 echo "deaths before stop: $(wc -l < $OUT/died_before_stop.txt)"; cat "$OUT/died_before_stop.txt"
-pgrep -f 'roomba_rs|nav2_|fake_roomba|kinsim|ros2 launch' | wc -l
+pgrep -f 'roomba_rs|roomba_driver_rs|nav2_|fake_roomba|kinsim|ros2 launch' | wc -l

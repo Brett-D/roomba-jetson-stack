@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Runs a roomba_driver binary against tools/fake_roomba.py (steady scenario) for SECS seconds and
+# Runs a roomba_driver binary against fake_roomba.py (steady scenario) for SECS seconds and
 # reports whether it survived and its /wheel/odom rate.  driver_soak.sh <binary> <name> <domain> <secs>
 BIN=$1; NAME=$2; DOMAIN=$3; SECS=${4:-120}
 S=$(cd "$(dirname "$0")" && pwd); WS=$(cd "$S/../.." && pwd)
@@ -14,7 +14,7 @@ d = yaml.safe_load(open(src))
 d['roomba_driver']['ros__parameters']['port'] = port
 yaml.safe_dump(d, open(out, 'w'))
 EOF
-python3 $WS/tools/fake_roomba.py --link "$W/tty" --log "$W/serial.jsonl" --t0-file "$W/t0.json" --scenario steady &
+python3 $WS/src/roomba-serial-ros2/tools/fake_roomba.py --link "$W/tty" --log "$W/serial.jsonl" --t0-file "$W/t0.json" --scenario steady &
 FAKE=$!
 for _ in $(seq 50); do [ -e "$W/tty" ] && break; sleep 0.1; done
 # the robot YAML's port is the real adapter; -p would lose against the params file (rclrs)

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # PC smoke-test stack runner. One stack = Nav2 (robot config) + Rust nodes + kinsim + optionally the
-# Rust roomba_driver on tools/fake_roomba.py, isolated by ROS_DOMAIN_ID (localhost discovery only).
+# Rust roomba_driver on fake_roomba.py, isolated by ROS_DOMAIN_ID (localhost discovery only).
 #   run_stack.sh start <name> <domain> [driver]   -> ~/pc_wsl_smoke/<name>/{launch.log,pgid}
 #   run_stack.sh stop <name>
 set -e
@@ -62,7 +62,7 @@ yaml.safe_dump(d, open(out, 'w'))
 EOF
   grep -q "port: $W/tty" "$W/driver.yaml"
   EXTRA="driver_params:=$W/driver.yaml"
-  FAKE="python3 $WS/tools/fake_roomba.py --link $W/tty --log $W/serial.jsonl --t0-file $W/t0.json --scenario steady &"
+  FAKE="python3 $WS/src/roomba-serial-ros2/tools/fake_roomba.py --link $W/tty --log $W/serial.jsonl --t0-file $W/t0.json --scenario steady &"
 fi
 setsid bash -c "echo \$\$ > $W/pgid; $FAKE sleep 1; exec ros2 launch $SMOKE/smoke.launch.py work:=$W $EXTRA $NAVP" > "$W/launch.log" 2>&1 < /dev/null &
 for _ in $(seq 50); do [ -s "$W/pgid" ] && break; sleep 0.1; done

@@ -10,7 +10,7 @@ if [ ! -d "$WS/.git" ]; then
 fi
 cd "$WS"
 git fetch -q origin "$BRANCH" && git checkout -q "origin/$BRANCH" 2>/dev/null || true
-# roomba-serial-ros2 (roomba_msgs, roomba_driver): take it from ~/roomba_ws if it has the pinned commit
+# roomba-serial-ros2 (roomba_msgs, roomba_driver, roomba_driver_rs): take it from ~/roomba_ws if it has the pinned commit
 SUB=src/roomba-serial-ros2
 PIN=$(git ls-tree HEAD "$SUB" | awk '{print $3}')
 if [ -z "$(ls -A "$SUB" 2>/dev/null)" ]; then

@@ -29,10 +29,6 @@ name = "ignore_zones"
 path = "src/bin/ignore_zones.rs"
 
 [[bin]]
-name = "roomba_driver"
-path = "src/bin/roomba_driver.rs"
-
-[[bin]]
 name = "web_server"
 path = "src/bin/web_server.rs"
 
@@ -58,11 +54,11 @@ path = "src/bin/twin2d.rs"
 
 [dependencies]
 anyhow = "1"
-# Async service callbacks hand requests to the driver's service thread (rclrs uses futures 0.3 too).
-futures = "0.3"
 # Generated bindings for NVIDIA's message package (its debs ship none), see vendor/.../regenerate.sh
 isaac_ros_visual_slam_interfaces = { path = "vendor/isaac_ros_visual_slam_interfaces" }
 libc = "0.2"
+# The Roomba driver's library (Open Interface, battery curve) for twin2d's simulated Roomba
+roomba_driver_rs = { path = "../roomba-serial-ros2/ros2/roomba_driver_rs" }
 rclrs = "0.8"
 ros-env = "0.3"
 # preserve_order: zones keep their key order like Python dicts; float_roundtrip: exact floats

@@ -1,6 +1,6 @@
 """PC smoke-test stack: the robot's Nav2 (nav.launch.py, robot mode, nav2_robot.yaml, Rust nodes)
 on a static map, ignore_zones for the keep-out filter, a kinematic base stand-in (kinsim.py) and
-optionally the Rust roomba_driver on tools/fake_roomba.py (driver_params:=<generated yaml>)."""
+optionally the Rust roomba_driver on fake_roomba.py (driver_params:=<generated yaml>)."""
 import os
 
 from ament_index_python.packages import get_package_share_directory
@@ -33,7 +33,7 @@ def generate_launch_description():
         Node(package='roomba_rs', executable='ignore_zones', name='ignore_zones', namespace='perception',
              parameters=[{'zones_file': PythonExpression(["'", work, "' + '/zones.json'"]), 'clear_on_start': True}]),
         ExecuteProcess(cmd=['python3', os.path.join(HERE, 'kinsim.py')], name='kinsim'),
-        Node(package='roomba_rs', executable='roomba_driver', name='roomba_driver', output='screen',
+        Node(package='roomba_driver_rs', executable='roomba_driver', name='roomba_driver', output='screen',
              parameters=[LaunchConfiguration('driver_params')],
              condition=IfCondition(PythonExpression(["'", LaunchConfiguration('driver_params'), "' != ''"]))),
         IncludeLaunchDescription(

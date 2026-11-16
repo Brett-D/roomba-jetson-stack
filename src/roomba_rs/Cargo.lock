@@ -966,6 +966,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "roomba_driver_rs"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "futures",
+ "libc",
+ "rclrs",
+ "ros-env",
+]
+
+[[package]]
 name = "roomba_rs"
 version = "0.1.0"
 dependencies = [
@@ -973,7 +984,6 @@ dependencies = [
  "base64",
  "bytes",
  "cc",
- "futures",
  "futures-util",
  "getrandom",
  "http-body-util",
@@ -984,6 +994,7 @@ dependencies = [
  "libc",
  "multer",
  "rclrs",
+ "roomba_driver_rs",
  "ros-env",
  "scrypt",
  "serde",

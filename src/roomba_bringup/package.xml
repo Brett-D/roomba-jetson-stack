@@ -18,6 +18,7 @@
   <exec_depend>roomba_perception</exec_depend>
   <exec_depend>roomba_web</exec_depend>
   <exec_depend>roomba_driver</exec_depend>
+  <exec_depend>roomba_driver_rs</exec_depend>
   <exec_depend>tf2_ros</exec_depend>
   <exec_depend>spatio_temporal_voxel_layer</exec_depend>
   <exec_depend>navigation2</exec_depend>

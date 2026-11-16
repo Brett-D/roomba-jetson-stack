@@ -101,7 +101,7 @@ def _setup(context):
              parameters=[{'zones_file': os.path.join(out_dir, 'zones.json'), 'clear_on_start': True}]),
     ]
     if lc('driver') == 'true':
-        actions.append(Node(package='roomba_rs' if rust else 'roomba_driver', executable='roomba_driver',
+        actions.append(Node(package='roomba_driver_rs' if rust else 'roomba_driver', executable='roomba_driver',
                             name='roomba_driver', output='screen', parameters=[driver_params]))
     if lc('nav') == 'true':
         # Experiments only (e.g. explorer_params:='{passable_cost_max: 252}'): parameter overrides for
