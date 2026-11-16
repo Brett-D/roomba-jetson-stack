@@ -915,6 +915,7 @@ class Explorer(Node):
         grid = np.asarray(self.grid.data, dtype=np.int16).reshape(info.height, info.width)
         res, ox, oy = info.resolution, info.origin.position.x, info.origin.position.y
         robot_rc = (int((pose[1] - oy) / res), int((pose[0] - ox) / res))
+        raw = grid       # failed spots reopen on the costmap as Nav2 sees it (no drop band)
         # Drop-offs it was told about stay out of bounds even where the map shows floor.
         drops = self._drop_cells() if self.drop_clear > 0 else []
         if drops:
@@ -940,7 +941,7 @@ class Explorer(Node):
             self.message = 'Looking around…'
             self._look_step()
             return
-        self._reopen(grid, res, ox, oy)
+        self._reopen(raw, res, ox, oy)
         best = None
         candidates = 0
         options = []                    # for ~/markers: (x, y, kind, label)

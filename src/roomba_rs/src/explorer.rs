@@ -2085,7 +2085,7 @@ impl Explorer {
     }
 
     /// Failed spots where the map has opened up since (a door opened, a person walked away): try
-    /// them again.
+    /// them again. Looks at the costmap as Nav2 sees it (self.grid, without the drop band).
     fn reopen(&mut self, io: &mut impl Io) {
         if self.p.reopen_cells <= 0 {
             return;

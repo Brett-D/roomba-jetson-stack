@@ -1428,6 +1428,29 @@ def sc_look_pause(h):
     return sc_explore_house(h)
 
 
+def sc_reopen_drop_band(h):
+    """door_reopens with a step down just inside door B, reported (drop points along the door's
+    south side) only while the door is shut: the drop band covers the doorway. When the door opens
+    the costmap around the failed spot opens up - inside the band - and the spot is tried again
+    (reopening looks at the costmap as Nav2 sees it; only the goal search keeps out of the band)."""
+    until = sc_door_closed(h, reopen=40.0)
+
+    def drops():
+        if not (h.world.truth[98:100, 30:46] == 100).all():
+            return
+        x0, y0, yaw = h.world.pose
+        c, s = math.cos(yaw), math.sin(yaw)
+        pts = []
+        for col in range(30, 46):
+            mx, my = h.world.xy(96, col)
+            dx, dy = mx - x0, my - y0
+            pts.append((dx * c + dy * s, -dx * s + dy * c, 0.1))
+        h.dispatch('DR', ('base_link', pts))
+    h.inp(0.0, 'CALL', lambda: [h.inp(t, 'CALL', drops) for t in np.arange(1.7, until, 2.0)])
+    h.checks = [lambda h: check_logs_any(h, 'The map opened up around an area that failed earlier')]
+    return until
+
+
 SCENARIOS = {name[3:]: fn for name, fn in globals().items() if name.startswith('sc_')}
 
 
