@@ -1,0 +1,291 @@
+{
+ "configById": {
+  "3D!map": {
+   "cameraState": {
+    "distance": 12,
+    "perspective": false,
+    "phi": 0.01,
+    "thetaOffset": 90,
+    "targetOffset": [
+     0,
+     0,
+     0
+    ],
+    "target": [
+     0,
+     0,
+     0
+    ],
+    "targetOrientation": [
+     0,
+     0,
+     0,
+     1
+    ],
+    "fovy": 45,
+    "near": 0.5,
+    "far": 5000
+   },
+   "followMode": "follow-position",
+   "followTf": "base_link",
+   "scene": {
+    "enableStats": false,
+    "backgroundColor": "#15181c"
+   },
+   "transforms": {
+    "showLabel": false,
+    "axisScale": 0.5,
+    "editable": false
+   },
+   "topics": {
+    "/rtabmap/map": {
+     "visible": true,
+     "colorMode": "map",
+     "alpha": 0.9
+    },
+    "/rtabmap/map_filled": {
+     "visible": false
+    },
+    "/global_costmap/costmap": {
+     "visible": true,
+     "colorMode": "costmap",
+     "alpha": 0.45
+    },
+    "/local_costmap/costmap": {
+     "visible": true,
+     "colorMode": "costmap",
+     "alpha": 0.6
+    },
+    "/plan": {
+     "visible": true,
+     "type": "line",
+     "lineWidth": 0.05,
+     "gradient": [
+      "#00e5ffff",
+      "#00e5ffff"
+     ]
+    },
+    "/local_plan": {
+     "visible": true,
+     "type": "line",
+     "lineWidth": 0.04,
+     "gradient": [
+      "#ffd400ff",
+      "#ffd400ff"
+     ]
+    },
+    "/explorer/markers": {
+     "visible": true
+    },
+    "/perception/obstacles": {
+     "visible": true,
+     "pointSize": 4,
+     "colorMode": "flat",
+     "flatColor": "#ff3b30ff"
+    },
+    "/perception/floor_points": {
+     "visible": false
+    },
+    "/perception/person_detector/markers": {
+     "visible": true
+    },
+    "/perception/ignore_zones/markers": {
+     "visible": true
+    },
+    "/nvblox_node/static_esdf_pointcloud": {
+     "visible": true,
+     "pointSize": 3,
+     "colorMode": "colormap",
+     "colorMap": "turbo",
+     "colorField": "intensity"
+    },
+    "/ground_truth/odom": {
+     "visible": false
+    }
+   },
+   "layers": {
+    "grid": {
+     "layerId": "foxglove.Grid",
+     "visible": true,
+     "frameId": "map",
+     "size": 30,
+     "divisions": 30,
+     "lineWidth": 1,
+     "color": "#ffffff1a",
+     "position": [
+      0,
+      0,
+      0
+     ],
+     "rotation": [
+      0,
+      0,
+      0
+     ]
+    }
+   },
+   "publish": {
+    "type": "pose",
+    "poseTopic": "/goal_pose",
+    "poseEstimateTopic": "/initialpose"
+   },
+   "imageMode": {}
+  },
+  "Image!dets": {
+   "cameraState": {
+    "distance": 12,
+    "perspective": false,
+    "phi": 0.01,
+    "thetaOffset": 90,
+    "targetOffset": [
+     0,
+     0,
+     0
+    ],
+    "target": [
+     0,
+     0,
+     0
+    ],
+    "targetOrientation": [
+     0,
+     0,
+     0,
+     1
+    ],
+    "fovy": 45,
+    "near": 0.5,
+    "far": 5000
+   },
+   "imageMode": {
+    "imageTopic": "/perception/person_detector/annotated/compressed"
+   },
+   "foregroundColor": "#ffffff"
+  },
+  "Image!depth": {
+   "cameraState": {
+    "distance": 12,
+    "perspective": false,
+    "phi": 0.01,
+    "thetaOffset": 90,
+    "targetOffset": [
+     0,
+     0,
+     0
+    ],
+    "target": [
+     0,
+     0,
+     0
+    ],
+    "targetOrientation": [
+     0,
+     0,
+     0,
+     1
+    ],
+    "fovy": 45,
+    "near": 0.5,
+    "far": 5000
+   },
+   "imageMode": {
+    "imageTopic": "/camera/depth/image_rect_raw",
+    "colorMode": "colormap",
+    "colorMap": "turbo",
+    "minValue": 300,
+    "maxValue": 7000
+   }
+  },
+  "Image!left": {
+   "cameraState": {
+    "distance": 12,
+    "perspective": false,
+    "phi": 0.01,
+    "thetaOffset": 90,
+    "targetOffset": [
+     0,
+     0,
+     0
+    ],
+    "target": [
+     0,
+     0,
+     0
+    ],
+    "targetOrientation": [
+     0,
+     0,
+     0,
+     1
+    ],
+    "fovy": 45,
+    "near": 0.5,
+    "far": 5000
+   },
+   "imageMode": {
+    "imageTopic": "/camera/left/image_rect_color"
+   }
+  },
+  "RawMessages!explorer": {
+   "topicPath": "/explorer/status.data",
+   "diffEnabled": false,
+   "expansion": "all"
+  },
+  "RawMessages!vslam": {
+   "topicPath": "/vslam_filter/status.data",
+   "diffEnabled": false,
+   "expansion": "all"
+  },
+  "RawMessages!isaac": {
+   "topicPath": "/isaac/status.data",
+   "diffEnabled": false,
+   "expansion": "all"
+  },
+  "RawMessages!mode": {
+   "topicPath": "/roomba/mode.data",
+   "diffEnabled": false,
+   "expansion": "all"
+  }
+ },
+ "globalVariables": {},
+ "userNodes": {},
+ "playbackConfig": {
+  "speed": 1
+ },
+ "layout": {
+  "direction": "row",
+  "splitPercentage": 55,
+  "first": "3D!map",
+  "second": {
+   "direction": "column",
+   "splitPercentage": 66,
+   "first": {
+    "direction": "column",
+    "splitPercentage": 50,
+    "first": {
+     "direction": "row",
+     "splitPercentage": 50,
+     "first": "Image!dets",
+     "second": "Image!depth"
+    },
+    "second": "Image!left"
+   },
+   "second": {
+    "direction": "row",
+    "splitPercentage": 40,
+    "first": "RawMessages!explorer",
+    "second": {
+     "direction": "row",
+     "splitPercentage": 50,
+     "first": "RawMessages!vslam",
+     "second": {
+      "direction": "column",
+      "splitPercentage": 70,
+      "first": "RawMessages!isaac",
+      "second": "RawMessages!mode"
+     }
+    }
+   }
+  }
+ }
+}
