@@ -266,7 +266,8 @@ events:    [{t: 240, battery_soc: 0.17}, {t: 300, tracking_lost_s: 10}, {t: 400,
 ```
 
 People in view are reported on `/perception/person_detector/detections_3d` (as the person detector
-does, at `person_rate_hz`, each seen with probability `person_recall` within `person_range_m`).
+does, at `person_rate_hz`, each seen with probability `person_recall` within `person_range_m`;
+not through walls, closed doors, furniture or other people in the line of sight).
 
 **Outputs** (in `out_dir`): `result.json` (outcome: explored / timeout / fell / stopped / ...,
 coverage of the true free floor and of the places the robot fits, over time; distance; every bump

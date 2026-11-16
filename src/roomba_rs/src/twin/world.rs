@@ -7,6 +7,8 @@ use std::sync::Arc;
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 
+use super::rng::Rng;
+
 pub type P2 = [f64; 2];
 
 /// Height of the walls and the ceiling the depth camera sees (m).
@@ -587,6 +589,39 @@ impl World {
         self.cliffs.iter().position(|(_, s)| s.contains(p))
     }
 
+    /// Whether the line of sight from `eye` to `target` (x, y, height) passes through an active
+    /// body other than `skip` that the camera can't see through where the line crosses its height
+    /// range: solid ones always, sparse ones with their probability (from `rng`), invisible never.
+    pub fn sight_blocked(&self, eye: [f64; 3], target: [f64; 3], skip: usize, rng: &mut Rng) -> bool {
+        let (dx, dy) = (target[0] - eye[0], target[1] - eye[1]);
+        let dist = dx.hypot(dy);
+        if dist < 1e-9 {
+            return false;
+        }
+        let d = [dx / dist, dy / dist];
+        let slope = (target[2] - eye[2]) / dist;
+        for (k, b) in self.bodies.iter().enumerate() {
+            if k == skip || !b.active || b.depth == DepthVis::Invisible {
+                continue;
+            }
+            let Some((s0, s1)) = b.shape.ray([eye[0], eye[1]], d) else { continue };
+            if s0 >= dist {
+                continue;
+            }
+            let (z0, z1) = (eye[2] + slope * s0, eye[2] + slope * s1.min(dist));
+            if z0.max(z1) < b.zmin || z0.min(z1) > b.zmax {
+                continue;
+            }
+            if match b.depth {
+                DepthVis::Sparse(p) => rng.uniform() < p,
+                _ => true,
+            } {
+                return true;
+            }
+        }
+        false
+    }
+
     pub fn what_name(&self, w: What) -> String {
         match w {
             What::Wall => "wall".into(),
@@ -682,5 +717,43 @@ mod tests {
         w.cliffs.push(("stairs".into(), Shape::Polygon(vec![[0.2, 0.2], [0.6, 0.2], [0.6, 0.6], [0.2, 0.6]])));
         assert_eq!(w.cliff_at([0.3, 0.3]), Some(0));
         assert_eq!(w.cliff_at([1.0, 1.0]), None);
+    }
+
+    #[test]
+    fn sight_is_blocked_by_opaque_bodies_in_its_height_range() {
+        let mut w = World::new(room());
+        let mut rng = Rng::new(1);
+        let body = |c, zmin, zmax, depth| Body {
+            name: "b".into(),
+            kind: Kind::Obstacle,
+            shape: Shape::Circle { c, r: 0.1 },
+            zmin,
+            zmax,
+            depth,
+            ir: true,
+            blocks: true,
+            active: true,
+        };
+        // A camera 0.13 m up looks at a person's middle (0.85 m) 1.4 m away.
+        let (eye, target) = ([0.2, 1.0, 0.13], [1.6, 1.0, 0.85]);
+        w.bodies.push(body([1.6, 1.0], 0.0, 1.7, DepthVis::Solid)); // the person: skipped
+        w.bodies.push(body([0.5, 1.0], 0.0, 0.3, DepthVis::Solid)); // a low box near the robot
+        assert!(w.sight_blocked(eye, target, 0, &mut rng));
+        w.bodies[1].shape = Shape::Circle { c: [1.3, 1.0], r: 0.1 }; // the line is 0.65 m up there
+        assert!(!w.sight_blocked(eye, target, 0, &mut rng));
+        w.bodies.push(body([0.9, 1.0], 0.0, 2.0, DepthVis::Solid)); // a closed door
+        assert!(w.sight_blocked(eye, target, 0, &mut rng));
+        w.bodies[2].active = false; // opened
+        assert!(!w.sight_blocked(eye, target, 0, &mut rng));
+        w.bodies[2].active = true;
+        w.bodies[2].depth = DepthVis::Invisible; // glass
+        assert!(!w.sight_blocked(eye, target, 0, &mut rng));
+        w.bodies[2].depth = DepthVis::Sparse(0.5);
+        let n = (0..1000).filter(|_| w.sight_blocked(eye, target, 0, &mut rng)).count();
+        assert!((400..600).contains(&n), "{n}");
+        // Bodies behind the target don't count.
+        w.bodies[2].depth = DepthVis::Solid;
+        w.bodies[2].shape = Shape::Circle { c: [1.85, 1.0], r: 0.1 };
+        assert!(!w.sight_blocked(eye, target, 0, &mut rng));
     }
 }

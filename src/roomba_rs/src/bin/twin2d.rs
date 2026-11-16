@@ -665,7 +665,8 @@ impl Sim {
     }
 
     /// The people the robot's person detector would report now (in the camera's view, in range,
-    /// not behind a wall; each with person_recall), as detections_3d in base_link.
+    /// not behind a wall, a closed door or another opaque body; each with person_recall), as
+    /// detections_3d in base_link.
     fn publish_persons(&mut self, stamp: i64) {
         let s = &self.scenario.sensors;
         let (recall, range, min) = (s.person_recall, s.person_range_m, s.depth_min_m);
@@ -685,6 +686,11 @@ impl Sim {
             }
             if self.world.grid.ray([x, y], [dx / d, dy / d], d) < d - 0.25 {
                 continue; // a wall in between
+            }
+            let lens = depth::lens_pose([x, y, th], self.mount);
+            let middle = [c[0], c[1], 0.5 * (b.zmin + b.zmax)];
+            if self.world.sight_blocked([lens.x, lens.y, lens.z], middle, id, &mut self.person_rng) {
+                continue; // a closed door, furniture or another person in between
             }
             if self.person_rng.uniform() >= recall {
                 continue;
