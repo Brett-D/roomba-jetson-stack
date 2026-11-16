@@ -113,8 +113,15 @@ def generate_launch_description():
              # The driver estimates the Ridgid pack's charge from its voltage (battery_gauge: voltage).
              # Bump marks: wider (this robot's right bumper switch is masked, so hits on the right
              # read as left), and also on the front light bumpers, which see railing posts first.
+             # Marks leave the robot's footprint + 0.1 m free (a cell diagonal: the mask and costmap
+             # grids don't line up; a mark over the robot trapped it); it looks around (4 x 90 deg)
+             # at the first spot it reaches (not on the dock) and before giving up. Frontiers longer
+             # than 2 m get a goal spot per 2 m piece (a spot behind a stair railing doesn't drop a
+             # whole side of the house).
              parameters=[{'base_frame': LaunchConfiguration('base_frame'), 'low_battery_fraction': 0.2,
-                          'bump_mark_width_m': 0.5, 'bump_light_signal': 200}],
+                          'bump_mark_width_m': 0.5, 'bump_light_signal': 200, 'mark_clear_radius_m': 0.28,
+                          'mark_soft_band_m': 0.22, 'look_around_steps': 4, 'look_around_step_deg': 90.0,
+                          'frontier_split_m': 2.0}],
              condition=IfCondition(LaunchConfiguration('robot_mode'))),
     ]
     return LaunchDescription(args + nodes)

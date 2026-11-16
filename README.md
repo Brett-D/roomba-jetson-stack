@@ -192,11 +192,11 @@ and the web app. The twin node replaces the hardware, the VIO/watchdog and RTAB-
 Real time only, by design. The whole stack in the twin uses about 1.2 of the Jetson's 6 cores
 (twin2d itself about 0.2: 200 Hz physics and IMU, the 15 ms OI stream, depth frames rendered in
 5-9 ms at 15 Hz), so the CPU would allow roughly 3-4x. But the real nodes keep wall-clock time: the
-driver's safety logic, bump reflex and serial stream (`mono()`), the explorer's goal, response and
-finish timeouts (`mono()`), floor_obstacles' 6 Hz frame limit (`Instant`), nav_coach and the web app.
-On an accelerated `/clock` the driver would have to be replaced by an emulation, the explorer would
-wait 3x longer in simulated time and floor_obstacles would see a third of the frames: the timing
-being tested would no longer be the robot's.
+driver's safety logic, bump reflex and serial stream (`mono()`), floor_obstacles' 6 Hz frame limit
+(`Instant`), nav_coach and the web app (the explorer's timeouts follow the node clock, so they hold
+under a slower `/clock`, e.g. Isaac).
+On an accelerated `/clock` the driver would have to be replaced by an emulation and floor_obstacles
+would see a third of the frames: the timing being tested would no longer be the robot's.
 
 **Run it.**
 

@@ -382,6 +382,9 @@ pub fn explorer_frontier_params(res: f64, overrides: &serde_json::Map<String, Va
         min_cells: f("min_frontier_cells", 10.0) as i64,
         standoff_cells: f("goal_standoff_m", 0.3) / res,
         search_cells: f("goal_search_radius_m", 0.8) / res,
+        cost_weight: f("goal_cost_weight", 0.05),
+        peek_cells: f("peek_search_m", 3.0) / res,
+        split_cells: f("frontier_split_m", 2.0) / res,
     }
 }
 
@@ -397,7 +400,7 @@ pub fn frontier_report(cm: &CostGrid, robot: P2, overrides: &serde_json::Map<Str
     }
     let fp = explorer_frontier_params(res, overrides);
     let rc = (((robot[1] - cm.origin[1]) / res) as i64, ((robot[0] - cm.origin[0]) / res) as i64);
-    let (goals, seed) = frontier_goals(&cm.data, w, h, rc, &fp);
+    let (goals, seed, peeks) = frontier_goals(&cm.data, w, h, rc, &fp);
     // The robot's reachable component, as frontier_goals computes it.
     let passable: Vec<bool> = cm.data.iter().map(|&g| g >= 0 && (g as i64) <= fp.pass_max).collect();
     let mut reach = vec![false; w * h];
@@ -498,7 +501,7 @@ pub fn frontier_report(cm: &CostGrid, robot: P2, overrides: &serde_json::Map<Str
         let reachable = cells.iter().any(|&k| reach[k]);
         let entry = cells.iter().map(|&k| bottleneck[k]).min().unwrap_or(i32::MAX);
         let p = xy(centroid.0, centroid.1);
-        let goal = goals.iter().find(|g| g.centroid == centroid);
+        let goal = goals.iter().find(|g| g.group == centroid);
         let (code, verdict) = if (n as i64) < fp.min_cells {
             ('S', format!("too small (< {} cells)", fp.min_cells))
         } else if !reachable {
@@ -507,15 +510,23 @@ pub fn frontier_report(cm: &CostGrid, robot: P2, overrides: &serde_json::Map<Str
             } else {
                 format!("the cheapest way in crosses cost {entry}; the explorer only uses cells <= {}", fp.pass_max)
             };
-            ('R', format!("not reachable: {how}"))
+            let peek = match peeks.iter().find(|g| g.group == centroid) {
+                Some(g) => {
+                    let gp = xy(g.goal.0 as f64, g.goal.1 as f64);
+                    format!("; closer look from ({:.2}, {:.2})", gp[0], gp[1])
+                }
+                None => String::new(),
+            };
+            ('R', format!("not reachable: {how}{peek}"))
         } else if let Some(g) = goal {
             let gp = xy(g.goal.0 as f64, g.goal.1 as f64);
             ('U', format!("usable: goal ({:.2}, {:.2}), {:.1} m from the robot", gp[0], gp[1], (gp[0] - robot[0]).hypot(gp[1] - robot[1])))
         } else {
             ('C', format!(
-                "no clear spot to look from (cost <= {}, {:.2} m from unknown) within {:.2} m",
+                "no spot to look from (cost <= {}, {:.2} m from unknown; or cost <= {}) within {:.2} m",
                 fp.clear_max,
                 fp.standoff_cells * res,
+                fp.pass_max,
                 fp.search_cells * res
             ))
         };

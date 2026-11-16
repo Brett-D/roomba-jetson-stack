@@ -3,8 +3,8 @@
 //! and tie-breaking (OpenCV's connected-component order, numpy's argmin/argwhere order, its
 //! float32 distance transform and float rounding), the same state machine (blacklist, visited
 //! spots, bump and cliff keep-out marks, retries, return home, finish checks, giving up on Nav2
-//! answers that never come), status JSON, log lines and Nav2 / parameter-service requests. Checked
-//! by tools/ab_explorer_offline.py.
+//! answers that never come), status JSON, ~/markers, log lines and Nav2 / parameter-service
+//! requests. Checked by tools/ab_explorer_offline.py.
 //!
 //! ROS-free: [`Explorer`] reacts to inputs and talks to the outside through [`Io`] (the node in
 //! src/bin/explorer.rs, or the replay in examples/explorer_replay.rs).
@@ -14,13 +14,16 @@ use std::collections::VecDeque;
 use serde_json::{Map, Value};
 
 use crate::watchdog::{Level, ParamSource};
-use crate::zones::{py_json, py_round};
+use crate::zones::{py_json, py_round, MarkerSpec, ADD, LINE_STRIP, SPHERE_LIST, TEXT_VIEW_FACING};
 
 pub const ROTATE_PARAM: &str = "FollowPath.rotate_to_heading_angular_vel";
 /// rcl_interfaces/ParameterType PARAMETER_DOUBLE.
 pub const PARAMETER_DOUBLE: u8 = 3;
 /// action_msgs/GoalStatus STATUS_SUCCEEDED.
 pub const STATUS_SUCCEEDED: i8 = 4;
+const PAUSED: &str = "Paused: visual tracking is recovering";
+/// Look-around turns Nav2 may reject in a row (its behaviours still inactive) before it gives up.
+const LOOK_REJECTS: i64 = 30;
 /// Cliff sensors (SensorState fields) and their direction on the Roomba (rad, left positive).
 pub const CLIFF_ANGLES: [(&str, f64); 4] =
     [("cliff_left", 1.05), ("cliff_front_left", 0.35), ("cliff_front_right", -0.35), ("cliff_right", -1.05)];
@@ -307,9 +310,8 @@ pub struct Frontier {
     pub reachable: bool,
 }
 
-/// explorer.py find_frontiers: free cells next to unknown ones (outside the grid counts as unknown),
-/// grouped 8-connected in OpenCV's label order; groups of at least `min_cells`.
-pub fn find_frontiers(grid: &[i8], w: usize, h: usize, free_max: i64, min_cells: i64, reach: &[bool]) -> Vec<Frontier> {
+/// Frontier cells (1): free cells next to unknown ones; outside the grid counts as unknown.
+fn frontier_mask(grid: &[i8], w: usize, h: usize, free_max: i64) -> Vec<u8> {
     let unknown = |r: isize, c: isize| r < 0 || c < 0 || r >= h as isize || c >= w as isize || grid[r as usize * w + c as usize] < 0;
     let mut frontier = vec![0u8; w * h];
     for r in 0..h {
@@ -324,6 +326,29 @@ pub fn find_frontiers(grid: &[i8], w: usize, h: usize, free_max: i64, min_cells:
             }
         }
     }
+    frontier
+}
+
+/// explorer.py find_frontiers' groups as cell lists ((row, col), np.argwhere order), groups of at
+/// least `min_cells` in OpenCV's label order.
+pub fn frontier_cells(grid: &[i8], w: usize, h: usize, free_max: i64, min_cells: i64) -> Vec<Vec<(usize, usize)>> {
+    let (labels, count) = labels8(&frontier_mask(grid, w, h, free_max), w, h);
+    let mut groups = vec![Vec::new(); count + 1];
+    for r in 0..h {
+        for c in 0..w {
+            let l = labels[r * w + c] as usize;
+            if l > 0 {
+                groups[l].push((r, c));
+            }
+        }
+    }
+    groups.into_iter().skip(1).filter(|g| g.len() as i64 >= min_cells).collect()
+}
+
+/// explorer.py find_frontiers: free cells next to unknown ones (outside the grid counts as unknown),
+/// grouped 8-connected in OpenCV's label order; groups of at least `min_cells`.
+pub fn find_frontiers(grid: &[i8], w: usize, h: usize, free_max: i64, min_cells: i64, reach: &[bool]) -> Vec<Frontier> {
+    let frontier = frontier_mask(grid, w, h, free_max);
     let (labels, count) = labels8(&frontier, w, h);
     let mut stats = vec![(0usize, 0u64, 0u64, false); count + 1];
     for r in 0..h {
@@ -350,9 +375,12 @@ pub fn find_frontiers(grid: &[i8], w: usize, h: usize, free_max: i64, min_cells:
 pub struct FrontierGoal {
     /// Goal cell (row, col): clear, known space near the frontier.
     pub goal: (usize, usize),
-    /// Frontier centroid (row, col).
+    /// Centroid (row, col) of the frontier piece it looks at.
     pub centroid: (f64, f64),
+    /// Cells in the whole frontier group.
     pub size: usize,
+    /// Centroid of the whole frontier group (not in explorer.py's tuples; for the twin's report).
+    pub group: (f64, f64),
 }
 
 #[derive(Clone, Debug)]
@@ -363,11 +391,82 @@ pub struct FrontierParams {
     pub min_cells: i64,
     pub standoff_cells: f64,
     pub search_cells: f64,
+    /// Fallback goal spots (no clear spot near a frontier): cells per cost unit; 0 = none.
+    pub cost_weight: f64,
+    /// Spots to look at unreachable frontiers from, within this; 0 = none.
+    pub peek_cells: f64,
+    /// Longer frontier groups are cut into pieces about this long, a goal spot each; 0 = never.
+    pub split_cells: f64,
 }
 
-/// explorer.py frontier_goals: reachable frontier groups with a goal cell parked in clear, known
-/// space next to each, and the robot's seed cell (None if it isn't next to passable space).
-pub fn frontier_goals(grid: &[i8], w: usize, h: usize, robot: (i64, i64), p: &FrontierParams) -> (Vec<FrontierGoal>, Option<(usize, usize)>) {
+/// explorer.py frontier_pieces: a frontier group's cells (np.argwhere order) cut into
+/// ceil(extent / split) pieces of equal count along its longer side.
+pub fn frontier_pieces(cells: &[(usize, usize)], split: f64) -> Vec<Vec<(usize, usize)>> {
+    let n = cells.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let (mut r0, mut r1, mut c0, mut c1) = (usize::MAX, 0usize, usize::MAX, 0usize);
+    for &(r, c) in cells {
+        (r0, r1, c0, c1) = (r0.min(r), r1.max(r), c0.min(c), c1.max(c));
+    }
+    let (span_r, span_c) = (r1 - r0, c1 - c0);
+    let ext = span_r.max(span_c) + 1;
+    if split <= 0.0 || ext as f64 <= split {
+        return vec![cells.to_vec()];
+    }
+    let k = ((ext as f64 / split).ceil() as usize).min(n);
+    let mut sorted = cells.to_vec();
+    if span_r > span_c {
+        sorted.sort_unstable();
+    } else {
+        sorted.sort_unstable_by_key(|&(r, c)| (c, r));
+    }
+    (0..k).map(|j| sorted[j * n / k..(j + 1) * n / k].to_vec()).collect()
+}
+
+/// Index of the cell nearest to (cy, cx) (numpy argmin: first of equals), None beyond `limit`.
+fn nearest(cells: &[(usize, usize)], cy: f64, cx: f64, limit: f64) -> Option<usize> {
+    let mut best = (f64::INFINITY, 0usize);
+    for (i, &(rr, cc)) in cells.iter().enumerate() {
+        let (a, b) = (rr as f64 - cy, cc as f64 - cx);
+        let d2 = a * a + b * b;
+        if d2 < best.0 || i == 0 {
+            best = (d2, i);
+        }
+    }
+    // Python float ** 2 (libm pow, as CPython calls it).
+    (!cells.is_empty() && best.0 <= limit.powf(std::hint::black_box(2.0))).then_some(best.1)
+}
+
+/// Index of the cell with the lowest distance (cells) to (cy, cx) + its penalty within `limit`.
+fn best_spot(cells: &[(usize, usize)], penalty: &[f64], cy: f64, cx: f64, limit: f64) -> Option<usize> {
+    let l2 = limit.powf(std::hint::black_box(2.0));
+    let mut best: Option<(f64, usize)> = None;
+    for (i, &(rr, cc)) in cells.iter().enumerate() {
+        let (a, b) = (rr as f64 - cy, cc as f64 - cx);
+        let d2 = a * a + b * b;
+        if d2 <= l2 {
+            let score = d2.sqrt() + penalty[i];
+            if best.is_none_or(|b| score < b.0) {
+                best = Some((score, i));
+            }
+        }
+    }
+    best.map(|b| b.1)
+}
+
+/// explorer.py frontier_goals: reachable frontier groups (long ones in pieces) with a goal cell
+/// parked in clear, known space next to each (or, in narrow places, the best reachable cell below
+/// inscribed), the robot's seed cell (None if it isn't next to passable space), and spots to look
+/// at the frontier groups it can't reach from.
+pub fn frontier_goals(
+    grid: &[i8],
+    w: usize,
+    h: usize,
+    robot: (i64, i64),
+    p: &FrontierParams,
+) -> (Vec<FrontierGoal>, Option<(usize, usize)>, Vec<FrontierGoal>) {
     let passable: Vec<bool> = grid.iter().map(|&g| g >= 0 && (g as i64) <= p.pass_max).collect();
     let (r, c) = robot;
     let mut seed = None;
@@ -394,7 +493,7 @@ pub fn frontier_goals(grid: &[i8], w: usize, h: usize, robot: (i64, i64), p: &Fr
             break;
         }
     }
-    let Some(seed) = seed else { return (Vec::new(), None) };
+    let Some(seed) = seed else { return (Vec::new(), None, Vec::new()) };
     // The seed's 8-connected passable component.
     let mut reach = vec![false; w * h];
     let mut queue = VecDeque::from([seed]);
@@ -425,40 +524,52 @@ pub fn frontier_goals(grid: &[i8], w: usize, h: usize, robot: (i64, i64), p: &Fr
     let d_unknown = distance_l2_3x3(&known, w2, h2);
     // numpy compares the float32 distances with the threshold cast to float32.
     let standoff = p.standoff_cells as f32;
+    let half_standoff = (p.standoff_cells / 2.0) as f32;
     let mut clear = Vec::new();
+    let (mut spots, mut penalty) = (Vec::new(), Vec::new());
     for rr in 0..h {
         for cc in 0..w {
             let k = rr * w + cc;
             let g = grid[k] as i64;
-            if reach[k] && g >= 0 && g <= p.clear_max && d_unknown[(rr + 1) * w2 + cc + 1] >= standoff {
+            if !reach[k] || g < 0 {
+                continue;
+            }
+            let d = d_unknown[(rr + 1) * w2 + cc + 1];
+            if g <= p.clear_max && d >= standoff {
                 clear.push((rr, cc));
             }
-        }
-    }
-    let mut goals = Vec::new();
-    if clear.is_empty() {
-        return (goals, Some(seed));
-    }
-    for f in find_frontiers(grid, w, h, p.free_max, p.min_cells, &reach) {
-        if !f.reachable {
-            continue; // only seen through a gap the robot can't drive through
-        }
-        let (cy, cx) = f.centroid;
-        let mut best = (f64::INFINITY, 0usize);
-        for (i, &(rr, cc)) in clear.iter().enumerate() {
-            let (a, b) = (rr as f64 - cy, cc as f64 - cx);
-            let d2 = a * a + b * b;
-            if d2 < best.0 || i == 0 {
-                best = (d2, i);
+            if p.cost_weight > 0.0 && g <= p.pass_max && d >= half_standoff {
+                spots.push((rr, cc));
+                penalty.push(g as f64 * p.cost_weight);
             }
         }
-        // Python float ** 2 (libm pow, as CPython calls it).
-        if best.0 > p.search_cells.powf(std::hint::black_box(2.0)) {
-            continue; // no clear spot near it to look from
-        }
-        goals.push(FrontierGoal { goal: clear[best.1], centroid: (cy, cx), size: f.size });
     }
-    (goals, Some(seed))
+    let (mut goals, mut peeks) = (Vec::new(), Vec::new());
+    let mean = |cells: &[(usize, usize)]| {
+        let (sr, sc) = cells.iter().fold((0u64, 0u64), |a, &(r, c)| (a.0 + r as u64, a.1 + c as u64));
+        (sr as f64 / cells.len() as f64, sc as f64 / cells.len() as f64)
+    };
+    for cells in frontier_cells(grid, w, h, p.free_max, p.min_cells) {
+        let group = mean(&cells);
+        // A long frontier (a room's far side seen from the doorway) gets a spot per piece: one
+        // spot failing (a railing the camera misses in the way) doesn't drop all of it.
+        for piece in frontier_pieces(&cells, p.split_cells) {
+            let (out, limit) = if piece.iter().any(|&(r, c)| reach[r * w + c]) {
+                (&mut goals, p.search_cells)
+            } else if p.peek_cells > 0.0 {
+                (&mut peeks, p.peek_cells) // only seen through a gap the robot can't drive through
+            } else {
+                continue;
+            };
+            let (cy, cx) = mean(&piece);
+            let spot =
+                nearest(&clear, cy, cx, limit).map(|i| clear[i]).or_else(|| best_spot(&spots, &penalty, cy, cx, limit).map(|i| spots[i]));
+            if let Some(goal) = spot {
+                out.push(FrontierGoal { goal, centroid: (cy, cx), size: cells.len(), group });
+            } // else: no spot near it to look from
+        }
+    }
+    (goals, Some(seed), peeks)
 }
 
 // ---- the node's state machine ----
@@ -498,6 +609,9 @@ pub struct Params {
     pub clear_max: i64,
     pub standoff: f64,
     pub goal_search: f64,
+    pub cost_weight: f64,
+    pub peek_search: f64,
+    pub frontier_split: f64,
     pub min_goal_dist: f64,
     pub blacklist_radius: f64,
     pub visited_radius: f64,
@@ -508,13 +622,22 @@ pub struct Params {
     pub rotate_speed: f64,
     pub return_home: bool,
     pub home_tolerance: f64,
+    pub home_attempts: i64,
     pub finish_confirm: f64,
+    pub look_steps: i64,
+    /// Radians.
+    pub look_step: f64,
+    pub look_timeout: f64,
+    pub face_turn_min: f64,
+    pub reopen_cells: i64,
     pub auto_keepout: bool,
     pub bump_marks: bool,
     pub bump_mark_ttl: f64,
     pub bump_mark_margin: f64,
     pub bump_mark_spacing: f64,
     pub bump_mark_width: f64,
+    pub mark_clear: f64,
+    pub mark_soft: f64,
     pub bump_light_min: i64,
     pub bumps_per_goal: i64,
     pub retry_failed: bool,
@@ -532,6 +655,13 @@ impl Params {
             clear_max: p.int("goal_cost_max", 15)?,
             standoff: p.float("goal_standoff_m", 0.3)?,
             goal_search: p.float("goal_search_radius_m", 0.8)?,
+            // No clear spot near a frontier (narrow passage): the reachable cell below inscribed
+            // with the lowest distance + cost x this (cells per cost unit; 0 = skip it).
+            cost_weight: p.float("goal_cost_weight", 0.05)?,
+            // Frontiers it can't reach get one look from the nearest reachable spot within this.
+            peek_search: p.float("peek_search_m", 3.0)?,
+            // Frontier groups longer than this get a goal spot per piece of about this length.
+            frontier_split: p.float("frontier_split_m", 2.0)?,
             min_goal_dist: p.float("min_goal_distance_m", 0.4)?,
             blacklist_radius: p.float("blacklist_radius_m", 0.75)?,
             visited_radius: p.float("visited_radius_m", 0.6)?,
@@ -544,13 +674,34 @@ impl Params {
             rotate_speed: p.float("rotate_speed_rps", 0.7)?,
             return_home: p.boolean("return_home", true)?,
             home_tolerance: p.float("home_tolerance_m", 0.5)?,
+            // Trips home when nothing is left: a failed one (a TF hiccup, a bump mark in the way) is
+            // tried again, up to this many in all, before it says it could not drive back.
+            home_attempts: p.int("return_home_attempts", 3)?.max(1),
             finish_confirm: p.float("finish_confirm_s", 20.0)?,
+            // Look around (Nav2 spin, in steps) at the first spot reached (not on the dock: the
+            // light bumpers see it while turning) and before deciding nothing is left (0 = never).
+            look_steps: p.int("look_around_steps", 4)?,
+            look_step: p.float("look_around_step_deg", 90.0)?.to_radians(),
+            look_timeout: p.float("look_around_timeout_s", 20.0)?,
+            // Nav2's goal checker ignores the final heading here (yaw_goal_tolerance 6.28), so at a
+            // spot it reached it turns to face the unknown it came to see when it is off by more
+            // than this (0 = never).
+            face_turn_min: p.float("face_frontier_min_deg", 45.0)?.to_radians(),
+            // Failed spots are skipped until the map around them opens up by this many cells (a
+            // door or a person: 100+; one flickering railing post with its inflation: ~37).
+            reopen_cells: p.int("blacklist_reopen_cells", 40)?,
             auto_keepout: p.boolean("auto_keepout", true)?,
             bump_marks: p.boolean("bump_marks", true)?,
             bump_mark_ttl: p.float("bump_mark_ttl_s", 600.0)?,
             bump_mark_margin: p.float("bump_mark_margin_m", 0.15)?,
             bump_mark_spacing: p.float("bump_mark_spacing_m", 0.15)?,
             bump_mark_width: p.float("bump_mark_width_m", 0.3)?,
+            // Bump and cliff marks leave the robot's footprint (plus clearance) free: footprint
+            // 0.18 m + a mask/costmap cell diagonal (the grids don't line up) + slack ...
+            mark_clear: p.float("mark_clear_radius_m", 0.28)?,
+            // ... and carry an "avoid" band this wide beyond their margin (keep-out cells aren't
+            // inflated: paths along their edge made the controller see "collision ahead").
+            mark_soft: p.float("mark_soft_band_m", 0.22)?,
             bump_light_min: p.int("bump_light_signal", 0)?,
             bumps_per_goal: p.int("bumps_per_goal", 2)?,
             retry_failed: p.boolean("retry_failed_before_finish", true)?,
@@ -595,8 +746,9 @@ pub struct GoalRequest {
 
 /// The explorer's connection to ROS (or to a replay).
 pub trait Io {
-    /// time.monotonic()
-    fn mono(&mut self) -> f64;
+    /// The node clock in seconds: ROS time (sim time under use_sim_time), so timeouts about the
+    /// robot's progress don't fire early when a simulation runs slower than real time.
+    fn now(&mut self) -> f64;
     /// Latest transform `source` -> `target` (translation, quaternion xyzw); None on a TF error.
     fn lookup(&mut self, target: &str, source: &str) -> Option<([f64; 3], [f64; 4])>;
     fn nav_ready(&mut self) -> bool;
@@ -619,6 +771,67 @@ pub trait Io {
     fn local_hms(&mut self) -> String;
     /// A one-shot 0.6 s timer (node clock) calling [`Explorer::cliff_check`].
     fn start_cliff_timer(&mut self);
+    /// Whether the spin action server is available.
+    fn spin_ready(&mut self) -> bool;
+    /// Send a Spin goal (target_yaw, time_allowance); answer with [`Explorer::on_spin_response`]
+    /// and, if accepted, [`Explorer::on_spin_result`].
+    fn send_spin(&mut self, seq: u64, target_yaw: f32, sec: i32, nanosec: u32);
+    /// Cancel the accepted Spin goal `seq`.
+    fn cancel_spin(&mut self, seq: u64);
+    /// Whether anyone listens to ~/markers (they are only built then).
+    fn markers_wanted(&mut self) -> bool;
+    /// ~/markers: a DELETEALL then `markers`, in `frame`, stamped by the node.
+    fn markers(&mut self, frame: &str, markers: &[MarkerSpec]);
+}
+
+/// What the last frontier search saw, for ~/markers.
+#[derive(Clone, Debug)]
+struct Viz {
+    res: f64,
+    frontiers: Vec<Vec<[f64; 3]>>,
+    /// Spots considered: (x, y, colour, label).
+    options: Vec<(f64, f64, [f32; 4], String)>,
+    /// Spots to look at frontiers it can't reach from.
+    peeks: Vec<(f64, f64)>,
+}
+
+/// A keep-out mark it sent: kind ("bump" | "cliff"), name, points, monotonic time, ttl s (0 = none).
+#[derive(Clone, Debug)]
+struct SentMark {
+    bump: bool,
+    name: String,
+    points: Vec<[f64; 2]>,
+    sent: f64,
+    ttl: f64,
+}
+
+// ~/markers colours (exact in f32), as in explorer.py.
+const GREEN: [f32; 4] = [0.0, 1.0, 0.0, 1.0];
+const BLUE: [f32; 4] = [0.0, 0.5, 1.0, 1.0];
+const GREY: [f32; 4] = [0.5, 0.5, 0.5, 0.75];
+const PURPLE: [f32; 4] = [0.75, 0.0, 1.0, 1.0];
+const ORANGE: [f32; 4] = [1.0, 0.5, 0.0, 0.75];
+const RED_AREA: [f32; 4] = [1.0, 0.0, 0.0, 0.25];
+const CYAN: [f32; 4] = [0.0, 1.0, 1.0, 0.75];
+const YELLOW: [f32; 4] = [1.0, 1.0, 0.0, 1.0];
+const RED: [f32; 4] = [1.0, 0.0, 0.0, 1.0];
+const WHITE: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
+// visualization_msgs/Marker types.
+const ARROW: i32 = 0;
+const SPHERE: i32 = 2;
+const CYLINDER: i32 = 3;
+const CUBE_LIST: i32 = 6;
+
+fn spec(ns: &str, id: usize, kind: i32, position: [f64; 3], scale: [f64; 3], color: [f32; 4], points: Vec<[f64; 3]>, text: String) -> MarkerSpec {
+    MarkerSpec { ns: ns.into(), id: id as i32, kind, action: ADD, position, orientation_w: 1.0, scale, color, points, text }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GoalKind {
+    Frontier,
+    /// A closer look at a frontier it can't reach.
+    Peek,
+    Home,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -628,6 +841,18 @@ struct Goal {
     sent: f64,
     /// A frontier goal (numpy float64 coordinates in Python, which round() differently).
     numpy: bool,
+    kind: GoalKind,
+    /// The heading asked for (Nav2's goal checker here ignores it).
+    yaw: f64,
+}
+
+/// A spot where a goal failed: skipped until the map around it opens up.
+#[derive(Clone, Debug)]
+struct Failed {
+    x: f64,
+    y: f64,
+    /// Passable cells around it when it failed ((2k + 1)^2, row-major), if there was a costmap.
+    patch: Option<Vec<bool>>,
 }
 
 pub struct Explorer {
@@ -649,8 +874,9 @@ pub struct Explorer {
     goal: Option<Goal>,
     goal_handle: Option<u64>,
     goal_seq: u64,
-    blacklist: Vec<(f64, f64)>,
+    blacklist: Vec<Failed>,
     visited: Vec<(f64, f64)>,
+    peeked: Vec<(f64, f64)>,
     reached: i64,
     failed: i64,
     frontier_count: i64,
@@ -659,7 +885,29 @@ pub struct Explorer {
     sending: Option<(u64, f64)>,
     no_frontier_since: Option<f64>,
     resume_after_home: bool,
-    final_check: bool,
+    /// The last trip home failed and no frontier was reached since.
+    home_failures: i64,
+    /// (steps left, stop as soon as a frontier shows up) while looking around.
+    look: Option<(i64, bool)>,
+    looked_here: bool,
+    /// Look around once the first spot is reached.
+    look_pending: bool,
+    /// Turn (rad) to face the unknown at the spot just reached.
+    turn: Option<f64>,
+    /// Look-around turns rejected in a row.
+    look_rejects: i64,
+    /// What it said when it sent the goal (shown again after a pause).
+    goal_message: String,
+    /// (seq, sent monotonic, accepted) of the look-around turn in progress.
+    spin: Option<(u64, f64, bool)>,
+    spin_handle: Option<u64>,
+    spin_seq: u64,
+    // ~/markers: the last frontier search, where the goal was chosen from, the marks sent and the
+    // markers last published.
+    viz: Option<Viz>,
+    goal_from: Option<(f64, f64)>,
+    marks_sent: Vec<SentMark>,
+    markers_last: Option<Vec<MarkerSpec>>,
 }
 
 const WHEEL_DROP: usize = 4;
@@ -686,6 +934,7 @@ impl Explorer {
             goal_seq: 0,
             blacklist: Vec::new(),
             visited: Vec::new(),
+            peeked: Vec::new(),
             reached: 0,
             failed: 0,
             frontier_count: 0,
@@ -693,7 +942,20 @@ impl Explorer {
             sending: None,
             no_frontier_since: None,
             resume_after_home: false,
-            final_check: false,
+            home_failures: 0,
+            look: None,
+            looked_here: false,
+            look_pending: false,
+            turn: None,
+            look_rejects: 0,
+            goal_message: String::new(),
+            spin: None,
+            spin_handle: None,
+            spin_seq: 0,
+            viz: None,
+            goal_from: None,
+            marks_sent: Vec::new(),
+            markers_last: None,
         };
         e.publish_status(io);
         e
@@ -730,7 +992,7 @@ impl Explorer {
     }
 
     pub fn on_sensors(&mut self, s: &Sensors, io: &mut impl Io) {
-        let now = io.mono();
+        let now = io.now();
         for (i, &fired) in s.cliff.iter().enumerate() {
             if fired {
                 self.cliff_seen[i] = Some(now);
@@ -766,10 +1028,21 @@ impl Explorer {
                 Level::Warn,
                 format!("Bumped {} times on the way to a frontier (railing or glass?): skipping it", self.goal_bumps),
             );
-            self.blacklist.push((goal.x, goal.y));
+            self.blacklist(goal.x, goal.y, false);
             self.failed += 1;
             self.cancel_goal(io);
             self.message = "Kept bumping into something the camera can't see: trying another area".into();
+        }
+    }
+
+    /// Keep-out command: leave the robot's footprint free (it is standing there), and keep planned
+    /// paths a robot radius away from the mark (a soft band beyond its margin).
+    fn clear_robot(&self, cmd: &mut Map<String, Value>, x: f64, y: f64) {
+        if self.p.mark_clear > 0.0 {
+            cmd.insert("clear".into(), Value::from(vec![py_round(x, 3), py_round(y, 3), self.p.mark_clear]));
+        }
+        if self.p.mark_soft > 0.0 {
+            cmd.insert("soft".into(), Value::from(self.p.mark_soft));
         }
     }
 
@@ -788,17 +1061,26 @@ impl Explorer {
         let mut cmd = zone_add(&name, &points);
         cmd.insert("margin".into(), Value::from(self.p.bump_mark_margin));
         cmd.insert("ttl_s".into(), Value::from(self.p.bump_mark_ttl));
+        self.clear_robot(&mut cmd, x, y);
         io.zone_command(py_json(&Value::Object(cmd), None));
+        self.sent_mark(true, &name, points, now, self.p.bump_mark_ttl);
         io.log(
             Level::Info,
             format!("Bumper hit at {:+.0} deg: marked {name} for {:.0} min", bearing.to_degrees(), self.p.bump_mark_ttl / 60.0),
         );
     }
 
+    fn sent_mark(&mut self, bump: bool, name: &str, points: Vec<[f64; 2]>, sent: f64, ttl: f64) {
+        self.marks_sent.push(SentMark { bump, name: name.into(), points, sent, ttl });
+        if self.marks_sent.len() > 50 {
+            self.marks_sent.remove(0);
+        }
+    }
+
     /// The one-shot timer after the Roomba left safe/full mode: if a cliff sensor fired, keep out
     /// of that spot.
     pub fn cliff_check(&mut self, io: &mut impl Io) {
-        let now = io.mono();
+        let now = io.now();
         let since = |t: Option<f64>| now - t.unwrap_or(-1e9);
         if since(self.cliff_seen[WHEEL_DROP]) < 3.0 {
             return; // lifted or a wheel dropped: every cliff sensor reads a drop, not a place to avoid
@@ -816,7 +1098,10 @@ impl Explorer {
             .atan2(py_sum(fired.iter().map(|&i| CLIFF_ANGLES[i].1.cos())));
         let points = cliff_zone(x, y, yaw, bearing);
         let name = format!("cliff_{}", io.local_hms());
-        io.zone_command(py_json(&Value::Object(zone_add(&name, &points)), None));
+        let mut cmd = zone_add(&name, &points);
+        self.clear_robot(&mut cmd, x, y);
+        io.zone_command(py_json(&Value::Object(cmd), None));
+        self.sent_mark(false, &name, points, now, 0.0);
         io.log(Level::Info, format!("Cliff ({names}): added keep-out zone {name}"));
         self.message = format!("Cliff sensor stop: added keep-out zone {name}");
     }
@@ -884,13 +1169,19 @@ impl Explorer {
             self.home = Some((pose.0, pose.1));
             self.blacklist.clear();
             self.visited.clear();
+            self.peeked.clear();
             self.reached = 0;
             self.failed = 0;
             self.reached_at_retry = -1;
         }
         self.no_frontier_since = None;
         self.resume_after_home = false;
-        self.final_check = false;
+        self.home_failures = 0;
+        self.looked_here = false;
+        // Look around once at the first spot reached, not here: it may be on the dock.
+        self.look_pending = self.p.look_steps > 0;
+        self.look = None;
+        self.turn = None;
         self.slow_turns(true, io);
         self.set(State::Exploring, "Looking for unmapped areas…".into(), io);
         io.log(Level::Info, format!("Exploration started; home at ({:.2}, {:.2})", pose.0, pose.1));
@@ -898,8 +1189,8 @@ impl Explorer {
 
     fn stop(&mut self, why: String, io: &mut impl Io) {
         self.resume_after_home = false;
-        self.final_check = false;
         self.cancel_goal(io);
+        self.cancel_spin(io);
         self.slow_turns(false, io);
         self.set(State::Stopped, why.clone(), io);
         io.log(Level::Info, why);
@@ -907,16 +1198,18 @@ impl Explorer {
 
     fn go_home(&mut self, why: String, resume: bool, io: &mut impl Io) {
         self.resume_after_home = resume;
+        self.cancel_spin(io);
         let Some(home) = self.home.filter(|_| self.p.return_home) else {
             self.finish("Exploration finished".into(), io);
             return;
         };
         self.cancel_goal(io);
         self.set(State::Returning, why, io);
-        self.send_goal(home.0, home.1, None, false, io);
+        self.send_goal(home.0, home.1, None, GoalKind::Home, io);
     }
 
     fn finish(&mut self, why: String, io: &mut impl Io) {
+        self.cancel_spin(io);
         self.slow_turns(false, io);
         self.set(State::Done, why.clone(), io);
         io.log(Level::Info, why);
@@ -932,21 +1225,39 @@ impl Explorer {
 
     /// The 1 s timer.
     pub fn tick(&mut self, io: &mut impl Io) {
-        let now = io.mono();
+        let now = io.now();
+        let spin_overdue = self.spin.is_some_and(|(_, sent, accepted)| {
+            now - sent > if accepted { self.p.look_timeout + 5.0 } else { self.p.response_timeout }
+        });
         if self.sending.is_some_and(|(_, sent)| now - sent > self.p.response_timeout) {
             self.no_response(io);
+        } else if spin_overdue {
+            let accepted = self.spin.is_some_and(|s| s.2);
+            io.log(
+                Level::Warn,
+                if accepted {
+                    "Looking around: the turn did not finish".into()
+                } else {
+                    "Looking around: navigation did not answer the turn request".into()
+                },
+            );
+            self.cancel_spin(io);
+            self.look_done();
         } else if self.state == State::Exploring {
             let timeout = self.p.goal_timeout;
             if let Some(b) = self.battery.filter(|&b| b < self.p.low_battery) {
                 self.go_home(format!("Battery at {:.0}%: returning to the start point", b * 100.0), false, io);
             } else if !self.tracking_ok {
-                self.message = "Paused: visual tracking is recovering".into();
+                self.message = PAUSED.into();
+            } else if self.message == PAUSED {
+                // Tracking is back: say what it is doing again (it kept the goal meanwhile).
+                self.message = if self.goal.is_some() { self.goal_message.clone() } else { "Looking for unmapped areas…".into() };
             } else if let Some(goal) = self.goal.filter(|g| now - g.sent > timeout) {
                 io.log(Level::Warn, "Frontier goal timed out; skipping it".into());
-                self.blacklist.push((goal.x, goal.y));
+                self.blacklist(goal.x, goal.y, true);
                 self.failed += 1;
                 self.cancel_goal(io);
-            } else if self.goal.is_none() && self.sending.is_none() {
+            } else if self.goal.is_none() && self.sending.is_none() && self.spin.is_none() {
                 self.next_frontier(io);
             }
         } else if self.state == State::Returning
@@ -961,6 +1272,7 @@ impl Explorer {
             self.returned(false, io);
         }
         self.publish_status(io);
+        self.publish_markers(io);
     }
 
     fn next_frontier(&mut self, io: &mut impl Io) {
@@ -989,73 +1301,335 @@ impl Explorer {
             min_cells: self.p.min_cells,
             standoff_cells: self.p.standoff / res,
             search_cells: self.p.goal_search / res,
+            cost_weight: self.p.cost_weight,
+            peek_cells: self.p.peek_search / res,
+            split_cells: self.p.frontier_split / res,
         };
-        let (goals, seed) = frontier_goals(&grid.data, w, h, robot, &fp);
+        let (goals, seed, peeks) = frontier_goals(&grid.data, w, h, robot, &fp);
         if seed.is_none() {
             self.message = "Robot is not in free space on the costmap; waiting…".into();
             return;
         }
+        if let Some(turn) = self.turn.take() {
+            self.message = "Turning to face the unmapped area…".into();
+            self.send_spin(turn, io);
+            return;
+        }
+        if self.look.is_some_and(|l| !l.1) {
+            self.message = "Looking around…".into();
+            self.look_step(io);
+            return;
+        }
+        let groups = if io.markers_wanted() { Some(frontier_cells(&grid.data, w, h, self.p.free_max, self.p.min_cells)) } else { None };
+        self.reopen(io);
         let mut best: Option<(f64, f64, f64, f64)> = None;
         let mut candidates = 0;
+        let mut options = Vec::new(); // for ~/markers
+        let mut chosen = 0;
         for g in &goals {
             let (gy, gx) = (g.goal.0 as f64, g.goal.1 as f64);
             let (cy, cx) = g.centroid;
             let (x, y) = (ox + (gx + 0.5) * res, oy + (gy + 0.5) * res);
             let (fx, fy) = (ox + (cx + 0.5) * res, oy + (cy + 0.5) * res);
             if self.blacklisted(x, y) || self.is_visited(x, y) {
+                let why = if self.blacklisted(x, y) { "failed earlier" } else { "looked from here" };
+                options.push((x, y, GREY, why.to_string()));
                 continue;
             }
             let d = py_hypot(x - pose.0, y - pose.1);
             if d < self.p.min_goal_dist {
                 // Already standing here and the camera still can't fill it in: don't come back.
                 self.visited.push((x, y));
+                options.push((x, y, GREY, "here already".to_string()));
                 continue;
             }
             candidates += 1;
             // Prefer near frontiers, but let bigger ones win over slightly nearer small ones.
             let score = d - 0.01 * g.size as f64;
+            options.push((x, y, BLUE, format!("{d:.1} m, score {score:.2}")));
             if best.is_none_or(|b| score < b.0) {
                 best = Some((score, x, y, (fy - y).atan2(fx - x))); // look at the unknown
+                chosen = options.len() - 1;
             }
         }
-        self.frontier_count = candidates;
-        let Some((_, x, y, yaw)) = best else {
-            let now = io.mono();
-            let since = *self.no_frontier_since.get_or_insert(now);
-            if now - since < self.p.finish_confirm {
-                self.message = "No reachable unmapped areas right now; checking again…".into();
-                return;
+        if let Some(groups) = groups {
+            if best.is_some() {
+                let o = &mut options[chosen];
+                o.2 = GREEN;
+                o.3 = format!("chosen: {}", o.3);
             }
+            let cell = |r: usize, c: usize| [ox + (c as f64 + 0.5) * res, oy + (r as f64 + 0.5) * res, 0.0];
+            let frontiers = groups.iter().map(|g| g.iter().map(|&(r, c)| cell(r, c)).collect()).collect();
+            let peeks = peeks.iter().map(|g| (ox + (g.goal.1 as f64 + 0.5) * res, oy + (g.goal.0 as f64 + 0.5) * res)).collect();
+            self.viz = Some(Viz { res, frontiers, options, peeks });
+        }
+        self.frontier_count = candidates;
+        if let Some((_, x, y, yaw)) = best {
+            self.look = None;
             self.no_frontier_since = None;
-            if self.p.retry_failed && !self.blacklist.is_empty() && self.reached != self.reached_at_retry {
-                self.reached_at_retry = self.reached;
+            self.message = format!("Heading to an unmapped area {:.1} m away", py_hypot(x - pose.0, y - pose.1));
+            self.send_goal(x, y, Some(yaw), GoalKind::Frontier, io);
+            return;
+        }
+        let now = io.now();
+        let since = *self.no_frontier_since.get_or_insert(now);
+        if self.look.is_none() && !self.looked_here && self.p.look_steps > 0 {
+            self.look = Some((self.p.look_steps, true));
+            self.message = "No unmapped areas in view: looking around…".into();
+        }
+        if self.look.is_some() {
+            self.look_step(io);
+            return;
+        }
+        if let Some((d, x, y, yaw)) = self.peek(&peeks, pose, res, ox, oy) {
+            self.no_frontier_since = None;
+            self.message = format!("Taking a closer look at an area it can't reach yet, {d:.1} m away");
+            self.send_goal(x, y, Some(yaw), GoalKind::Peek, io);
+            return;
+        }
+        if now - since < self.p.finish_confirm {
+            self.message = "No reachable unmapped areas right now; checking again…".into();
+            return;
+        }
+        self.no_frontier_since = None;
+        let marks = self.bump_marks(now, true);
+        if self.p.retry_failed && (!self.blacklist.is_empty() || !marks.is_empty()) && self.reached != self.reached_at_retry {
+            self.reached_at_retry = self.reached;
+            if !self.blacklist.is_empty() {
                 io.log(
                     Level::Info,
-                    format!(
-                        "No unmapped areas left except {} that failed earlier: trying those again",
-                        self.blacklist.len()
-                    ),
+                    format!("No unmapped areas left except {} that failed earlier: trying those again", self.blacklist.len()),
                 );
-                self.message = "Retrying areas that failed earlier…".into();
-                self.blacklist.clear();
-                return;
             }
-            if self.final_check {
-                self.final_check = false;
-                let near = if self.near_home(io) { " - back at the start point" } else { "" };
-                self.finish(format!("Exploration finished: no reachable unmapped areas left{near}"), io);
-                return;
+            self.drop_bump_marks(&marks, io);
+            self.message = "Retrying areas that failed earlier…".into();
+            self.blacklist.clear();
+            return;
+        }
+        // Finish at the start point: go back there and check once more (the map looks different
+        // from there), unless already there; a failed trip there is tried again up to
+        // return_home_attempts in all: without the isolated bump marks (a person's; marks in a row
+        // are a railing or glass the camera misses, and route the trip around it), and before the
+        // last trip without any (people walking into it in a hallway leave rows too).
+        let why = "Exploration finished: no reachable unmapped areas left";
+        if self.near_home(io) {
+            self.finish(format!("{why} - back at the start point"), io);
+        } else if self.home_failures >= self.p.home_attempts {
+            self.finish(format!("{why} - could not drive back to the start point"), io);
+        } else {
+            if self.home_failures > 0 {
+                let marks = self.bump_marks(now, self.home_failures < self.p.home_attempts - 1);
+                self.drop_bump_marks(&marks, io);
             }
-            self.go_home("Exploration finished: no reachable unmapped areas left".into(), true, io);
+            self.go_home(why.into(), true, io);
+        }
+    }
+
+    /// Indexes (in marks_sent) of the bump marks still in force; isolated: only those with no
+    /// other one within twice the mark width (a railing or glass wall gets bumped and marked along
+    /// its length; someone walking into the robot leaves single marks).
+    fn bump_marks(&self, now: f64, isolated: bool) -> Vec<usize> {
+        let marks: Vec<usize> =
+            (0..self.marks_sent.len()).filter(|&i| self.marks_sent[i].bump && (self.marks_sent[i].ttl <= 0.0 || now - self.marks_sent[i].sent < self.marks_sent[i].ttl)).collect();
+        if !isolated {
+            return marks;
+        }
+        let centres: Vec<(f64, f64)> = marks
+            .iter()
+            .map(|&i| {
+                let ps = &self.marks_sent[i].points;
+                let n = ps.len() as f64;
+                (py_sum(ps.iter().map(|p| p[0])) / n, py_sum(ps.iter().map(|p| p[1])) / n)
+            })
+            .collect();
+        let near = 2.0 * self.p.bump_mark_width;
+        (0..marks.len())
+            .filter(|&k| !centres.iter().enumerate().any(|(j, c)| j != k && py_hypot(centres[k].0 - c.0, centres[k].1 - c.1) < near))
+            .map(|k| marks[k])
+            .collect()
+    }
+
+    /// Delete these bump marks (indexes in marks_sent): someone walking into the robot leaves them
+    /// too, and they can close a hallway for bump_mark_ttl_s (what is really there gets bumped and
+    /// marked again). Before finishing only isolated ones; before trying the trip home again
+    /// isolated ones, and all of them before the last trip.
+    fn drop_bump_marks(&mut self, marks: &[usize], io: &mut impl Io) {
+        if marks.is_empty() {
+            return;
+        }
+        for &i in marks {
+            let mut cmd = Map::new();
+            cmd.insert("op".into(), "delete".into());
+            cmd.insert("name".into(), self.marks_sent[i].name.clone().into());
+            io.zone_command(py_json(&Value::Object(cmd), None));
+        }
+        let mut k = 0;
+        self.marks_sent.retain(|_| {
+            k += 1;
+            !marks.contains(&(k - 1))
+        });
+        self.bump_points.clear();
+        io.log(
+            Level::Info,
+            format!("Removed {} bump mark(s) (a person walking into the robot leaves them too): checking again", marks.len()),
+        );
+    }
+
+    /// The nearest spot to take a closer look at a frontier it can't reach, not tried yet:
+    /// (distance, x, y, yaw).
+    fn peek(&mut self, peeks: &[FrontierGoal], pose: (f64, f64, f64), res: f64, ox: f64, oy: f64) -> Option<(f64, f64, f64, f64)> {
+        let mut best: Option<(f64, f64, f64, f64)> = None;
+        for g in peeks {
+            let (gy, gx) = (g.goal.0 as f64, g.goal.1 as f64);
+            let (cy, cx) = g.centroid;
+            let (x, y) = (ox + (gx + 0.5) * res, oy + (gy + 0.5) * res);
+            let (fx, fy) = (ox + (cx + 0.5) * res, oy + (cy + 0.5) * res);
+            if self.blacklisted(x, y) || self.peeked.iter().any(|&(px, py)| py_hypot(x - px, y - py) < self.p.visited_radius) {
+                continue;
+            }
+            let d = py_hypot(x - pose.0, y - pose.1);
+            if d < self.p.min_goal_dist {
+                self.peeked.push((x, y)); // looking from here already (looked around)
+                continue;
+            }
+            if best.is_none_or(|b| d < b.0) {
+                best = Some((d, x, y, (fy - y).atan2(fx - x)));
+            }
+        }
+        if let Some(b) = best {
+            self.peeked.push((b.1, b.2));
+        }
+        best
+    }
+
+    /// The next turn of the look-around, or its end.
+    fn look_step(&mut self, io: &mut impl Io) {
+        let Some((left, early)) = self.look else { return };
+        if left <= 0 || !io.spin_ready() {
+            self.look_done();
+            return;
+        }
+        self.look = Some((left - 1, early));
+        self.send_spin(self.p.look_step, io);
+    }
+
+    /// A turn in place by ngle (rad, + = left) with Nav2's spin behaviour.
+    fn send_spin(&mut self, angle: f64, io: &mut impl Io) {
+        if !io.spin_ready() {
+            return;
+        }
+        self.spin_seq += 1;
+        let seq = self.spin_seq;
+        self.spin = Some((seq, io.now(), false));
+        let t = self.p.look_timeout;
+        io.send_spin(seq, angle as f32, t as i32, ((t - (t as i32) as f64) * 1e9) as u32);
+    }
+
+    fn look_done(&mut self) {
+        self.look = None;
+        self.looked_here = true;
+    }
+
+    /// Nav2's answer to the look-around turn `seq`.
+    pub fn on_spin_response(&mut self, seq: u64, accepted: bool, io: &mut impl Io) {
+        let Some((current, sent, _)) = self.spin.filter(|s| s.0 == seq) else {
+            // given up on or cancelled meanwhile
+            if accepted {
+                io.cancel_spin(seq);
+            }
             return;
         };
-        self.no_frontier_since = None;
-        self.message = format!("Heading to an unmapped area {:.1} m away", py_hypot(x - pose.0, y - pose.1));
-        self.send_goal(x, y, Some(yaw), true, io);
+        if !accepted {
+            self.spin = None;
+            self.look_rejects += 1;
+            if self.look_rejects == 1 {
+                io.log(Level::Warn, "Looking around: navigation rejected the turn".into());
+            }
+            if let Some((left, early)) = self.look {
+                if self.look_rejects >= LOOK_REJECTS {
+                    self.look_done();
+                } else {
+                    self.look = Some((left + 1, early)); // Nav2 still starting? that turn again next tick
+                }
+            }
+            return;
+        }
+        self.look_rejects = 0;
+        self.spin = Some((current, sent, true));
+        self.spin_handle = Some(seq);
+    }
+
+    /// The final status of the accepted look-around turn `seq`.
+    pub fn on_spin_result(&mut self, seq: u64, status: i8, io: &mut impl Io) {
+        if !self.spin.is_some_and(|s| s.0 == seq) {
+            return;
+        }
+        self.spin = None;
+        self.spin_handle = None;
+        if status != STATUS_SUCCEEDED {
+            io.log(Level::Warn, "Looking around: the turn stopped early (obstacle?)".into());
+            if self.look.is_some() {
+                self.look_done();
+            }
+        }
+    }
+
+    fn cancel_spin(&mut self, io: &mut impl Io) {
+        self.look = None;
+        self.turn = None;
+        let handle = self.spin_handle.take();
+        self.spin = None;
+        if let Some(seq) = handle {
+            io.cancel_spin(seq);
+        }
+    }
+
+    /// Skip this spot until the map around it opens up (see [`Explorer::reopen`]); `reopen`
+    /// false: only the retry before finishing (the camera can't see what was in the way).
+    fn blacklist(&mut self, x: f64, y: f64, reopen: bool) {
+        let patch = match &self.grid {
+            Some(g) if reopen && self.p.reopen_cells > 0 && g.data.len() == g.width as usize * g.height as usize => {
+                Some(passable_patch(g, self.p.blacklist_radius, self.p.pass_max, x, y))
+            }
+            _ => None,
+        };
+        self.blacklist.push(Failed { x, y, patch });
+    }
+
+    /// Failed spots where the map has opened up since (a door opened, a person walked away): try
+    /// them again.
+    fn reopen(&mut self, io: &mut impl Io) {
+        if self.p.reopen_cells <= 0 {
+            return;
+        }
+        let Some(grid) = &self.grid else { return };
+        let (radius, pass_max, min) = (self.p.blacklist_radius, self.p.pass_max, self.p.reopen_cells);
+        let opened: Vec<bool> = self
+            .blacklist
+            .iter()
+            .map(|f| {
+                f.patch.as_ref().is_some_and(|old| {
+                    let now = passable_patch(grid, radius, pass_max, f.x, f.y);
+                    now.len() == old.len() && now.iter().zip(old).filter(|&(&n, &o)| n && !o).count() as i64 >= min
+                })
+            })
+            .collect();
+        let mut kept = Vec::with_capacity(self.blacklist.len());
+        for (f, open) in std::mem::take(&mut self.blacklist).into_iter().zip(opened) {
+            if open {
+                io.log(
+                    Level::Info,
+                    format!("The map opened up around an area that failed earlier ({:.1}, {:.1}): trying it again", f.x, f.y),
+                );
+            } else {
+                kept.push(f);
+            }
+        }
+        self.blacklist = kept;
     }
 
     fn blacklisted(&self, x: f64, y: f64) -> bool {
-        self.blacklist.iter().any(|&(bx, by)| py_hypot(x - bx, y - by) < self.p.blacklist_radius)
+        self.blacklist.iter().any(|f| py_hypot(x - f.x, y - f.y) < self.p.blacklist_radius)
     }
 
     fn is_visited(&self, x: f64, y: f64) -> bool {
@@ -1064,15 +1638,18 @@ impl Explorer {
 
     // ---- navigation ----
 
-    fn send_goal(&mut self, x: f64, y: f64, yaw: Option<f64>, numpy: bool, io: &mut impl Io) {
+    fn send_goal(&mut self, x: f64, y: f64, yaw: Option<f64>, kind: GoalKind, io: &mut impl Io) {
+        let pose = self.pose(io);
         let yaw = match yaw {
             Some(yaw) => yaw,
-            None => self.pose(io).map_or(0.0, |p| p.2),
+            None => pose.map_or(0.0, |p| p.2),
         };
         self.goal_seq += 1;
         let seq = self.goal_seq;
-        let sent = io.mono();
-        self.goal = Some(Goal { x, y, sent, numpy });
+        let sent = io.now();
+        self.goal = Some(Goal { x, y, sent, numpy: kind != GoalKind::Home, kind, yaw });
+        self.goal_message = self.message.clone();
+        self.goal_from = pose.map(|p| (p.0, p.1));
         self.goal_bumps = 0;
         self.sending = Some((seq, sent));
         io.send_goal(GoalRequest {
@@ -1125,7 +1702,7 @@ impl Explorer {
         if self.state == State::Returning {
             self.returned(false, io);
         } else if let Some(g) = goal {
-            self.blacklist.push((g.x, g.y));
+            self.blacklist(g.x, g.y, true);
         }
     }
 
@@ -1146,16 +1723,34 @@ impl Explorer {
         if self.state != State::Exploring {
             return;
         }
+        let peek = goal.is_some_and(|g| g.kind == GoalKind::Peek);
         if status == STATUS_SUCCEEDED {
+            self.looked_here = false; // somewhere new: look around here before giving up
+            if self.look_pending {
+                self.look_pending = false;
+                self.look = Some((self.p.look_steps, false));
+            } else if let Some(g) = goal.filter(|_| self.p.face_turn_min > 0.0) {
+                if let Some((_, _, yaw)) = self.pose(io) {
+                    let d = g.yaw - yaw;
+                    let d = d.sin().atan2(d.cos());
+                    if d.abs() > self.p.face_turn_min {
+                        self.turn = Some(d); // face the unknown it came to see
+                    }
+                }
+            }
+            if peek {
+                return;
+            }
             self.reached += 1;
+            self.home_failures = 0;
             if let Some(g) = goal {
                 // Looked from here once; if the camera couldn't fill it in, don't come back.
                 self.visited.push((g.x, g.y));
             }
-        } else if let Some(g) = goal {
-            // Unreachable or no progress: don't try this spot again.
+        } else if let Some(g) = goal.filter(|_| !peek) {
+            // Unreachable or no progress: skip this spot (until the map around it opens up).
             self.failed += 1;
-            self.blacklist.push((g.x, g.y));
+            self.blacklist(g.x, g.y, true);
         }
     }
 
@@ -1163,9 +1758,11 @@ impl Explorer {
     fn returned(&mut self, home: bool, io: &mut impl Io) {
         let why = self.message.clone(); // why it went home (finished, low battery, request)
         if self.resume_after_home {
-            // The map looks different from elsewhere: check once more before finishing.
+            // The map looks different from here: check once more before finishing.
             self.resume_after_home = false;
-            self.final_check = true;
+            self.home_failures = if home { 0 } else { self.home_failures + 1 };
+            self.looked_here = false;
+            self.no_frontier_since = None;
             let msg = if home {
                 "Back at the start point; checking for unmapped areas again…"
             } else {
@@ -1191,9 +1788,11 @@ impl Explorer {
         }
     }
 
-    /// On shutdown: cancel the goal being driven to, as the Python node does on Ctrl-C.
+    /// On shutdown: cancel what the robot is doing for the explorer (goal, look-around turn), as the
+    /// Python node does on Ctrl-C.
     pub fn shutdown(&mut self, io: &mut impl Io) {
         self.cancel_goal(io);
+        self.cancel_spin(io);
     }
 
     fn near_home(&self, io: &mut impl Io) -> bool {
@@ -1257,6 +1856,100 @@ impl Explorer {
         );
         io.status(py_json(&Value::Object(m), None));
     }
+
+    /// How it decides where to go, for ~/markers (explorer.py _marker_specs): the frontier groups
+    /// of its last search, the spots it considered there (distance and score, the one it chose, or
+    /// why it skipped them), spots to look at frontiers it can't reach from, failed spots (and when
+    /// they are retried), visited spots, the keep-out marks it sent, home, and the goal with an
+    /// arrow from where it was chosen.
+    fn marker_specs(&self, now: f64) -> Vec<MarkerSpec> {
+        let mut specs = Vec::new();
+        let mut labels: Vec<(f64, f64, String)> = Vec::new();
+        if let Some(v) = &self.viz {
+            for (k, points) in v.frontiers.iter().enumerate() {
+                specs.push(spec("frontiers", k, CUBE_LIST, [0.0; 3], [v.res, v.res, 0.01], ORANGE, points.clone(), String::new()));
+            }
+            for (k, (x, y, color, text)) in v.options.iter().enumerate() {
+                specs.push(spec("options", k, SPHERE, [*x, *y, 0.05], [0.12; 3], *color, Vec::new(), String::new()));
+                labels.push((*x, *y, text.clone()));
+            }
+            for (k, &(x, y)) in v.peeks.iter().enumerate() {
+                specs.push(spec("peeks", k, SPHERE, [x, y, 0.05], [0.12; 3], PURPLE, Vec::new(), String::new()));
+                labels.push((x, y, "can't reach: look from here".into()));
+            }
+        }
+        let d = 2.0 * self.p.blacklist_radius;
+        for (k, f) in self.blacklist.iter().enumerate() {
+            specs.push(spec("failed", k, CYLINDER, [f.x, f.y, 0.01], [d, d, 0.02], RED_AREA, Vec::new(), String::new()));
+            let when = if f.patch.is_some() { "failed: retry if the map opens up" } else { "failed: retry before finishing" };
+            labels.push((f.x, f.y, when.into()));
+        }
+        if !self.visited.is_empty() {
+            let points = self.visited.iter().map(|&(x, y)| [x, y, 0.05]).collect();
+            specs.push(spec("visited", 0, SPHERE_LIST, [0.0; 3], [0.08; 3], GREY, points, String::new()));
+        }
+        let marks = self.marks_sent.iter().filter(|m| m.ttl <= 0.0 || now - m.sent < m.ttl);
+        for (k, m) in marks.enumerate() {
+            let points = m.points.iter().chain(m.points.first()).map(|p| [p[0], p[1], 0.03]).collect();
+            specs.push(spec("marks", k, LINE_STRIP, [0.0; 3], [0.03, 0.0, 0.0], if m.bump { YELLOW } else { RED }, points, String::new()));
+            labels.push((m.points[0][0], m.points[0][1], m.name.clone()));
+        }
+        if let Some((hx, hy)) = self.home {
+            specs.push(spec("home", 0, CYLINDER, [hx, hy, 0.02], [0.3, 0.3, 0.04], CYAN, Vec::new(), String::new()));
+            labels.push((hx, hy, "home".into()));
+        }
+        if let Some(g) = self.goal {
+            if let Some((fx, fy)) = self.goal_from {
+                specs.push(spec("goal", 0, ARROW, [0.0; 3], [0.03, 0.08, 0.1], GREEN, vec![[fx, fy, 0.1], [g.x, g.y, 0.1]], String::new()));
+            } else {
+                specs.push(spec("goal", 0, SPHERE, [g.x, g.y, 0.1], [0.2; 3], GREEN, Vec::new(), String::new()));
+            }
+            let text = match g.kind {
+                GoalKind::Frontier => "goal: unmapped area",
+                GoalKind::Peek => "goal: closer look",
+                GoalKind::Home => "goal: start point",
+            };
+            labels.push((g.x, g.y, text.into()));
+        }
+        for (k, (x, y, text)) in labels.into_iter().enumerate() {
+            specs.push(spec("labels", k, TEXT_VIEW_FACING, [x, y, 0.3], [0.0, 0.0, 0.1], WHITE, Vec::new(), text));
+        }
+        specs
+    }
+
+    /// ~/markers, when they changed and someone listens.
+    fn publish_markers(&mut self, io: &mut impl Io) {
+        if !io.markers_wanted() {
+            self.markers_last = None;
+            return;
+        }
+        let specs = self.marker_specs(io.now());
+        if self.markers_last.as_ref() != Some(&specs) {
+            io.markers(&self.p.map_frame, &specs);
+            self.markers_last = Some(specs);
+        }
+    }
+}
+
+/// Passable cells (cost 0..=pass_max) in the square of `radius` around (x, y), row-major; outside
+/// the grid: not passable (explorer.py _patch).
+fn passable_patch(g: &Grid, radius: f64, pass_max: i64, x: f64, y: f64) -> Vec<bool> {
+    let res = g.resolution as f64;
+    let k = (radius / res) as i64;
+    let (w, h) = (g.width as i64, g.height as i64);
+    let (r0, c0) = (((y - g.origin_y) / res) as i64 - k, ((x - g.origin_x) / res) as i64 - k);
+    let n = 2 * k + 1;
+    let mut out = vec![false; (n * n) as usize];
+    for i in 0..n {
+        for j in 0..n {
+            let (r, c) = (r0 + i, c0 + j);
+            if r >= 0 && c >= 0 && r < h && c < w {
+                let v = g.data[(r * w + c) as usize] as i64;
+                out[(i * n + j) as usize] = v >= 0 && v <= pass_max;
+            }
+        }
+    }
+    out
 }
 
 fn zone_add(name: &str, points: &[[f64; 2]]) -> Map<String, Value> {
@@ -1377,14 +2070,129 @@ mod tests {
                 };
             }
         }
-        let p = FrontierParams { free_max: 40, pass_max: 98, clear_max: 15, min_cells: 10, standoff_cells: 3.0, search_cells: 16.0 };
-        let (goals, seed) = frontier_goals(&grid, w, h, (10, 3), &p);
+        let p = FrontierParams {
+            free_max: 40,
+            pass_max: 98,
+            clear_max: 15,
+            min_cells: 10,
+            standoff_cells: 3.0,
+            search_cells: 16.0,
+            cost_weight: 0.05,
+            peek_cells: 30.0,
+            split_cells: 0.0,
+        };
+        let (goals, seed, peeks) = frontier_goals(&grid, w, h, (10, 3), &p);
         assert_eq!(seed, Some((10, 3)));
         assert_eq!(goals.len(), 1);
+        assert!(peeks.is_empty());
         assert_eq!(goals[0].size, 18);
         assert_eq!(goals[0].centroid, (9.5, 12.0));
         // Clear cells end at column 9 (4 chamfer steps from the unknown); rows 9 and 10 tie: first wins.
         assert_eq!(goals[0].goal, (9, 9));
+    }
+
+    /// A 40 x 20 grid: a room (columns 1-14), a 5-cell passage (rows 8-12) through a wall at
+    /// columns 15-16 into a second room that is known free up to column 30 (unknown beyond).
+    fn two_rooms(passage_cost: i8) -> (Vec<i8>, usize, usize) {
+        let (w, h) = (40usize, 20usize);
+        let mut grid = vec![0i8; w * h];
+        for r in 0..h {
+            for c in 0..w {
+                let wall = r == 0 || r == h - 1 || c == 0 || ((15..=16).contains(&c) && !(8..=12).contains(&r));
+                grid[r * w + c] = if c > 30 {
+                    -1
+                } else if wall {
+                    100
+                } else if (13..=18).contains(&c) {
+                    passage_cost // the passage and its surroundings: inflated
+                } else {
+                    0
+                };
+            }
+        }
+        (grid, w, h)
+    }
+
+    #[test]
+    fn frontier_beyond_a_narrow_passage() {
+        let p = |cost_weight: f64, peek_cells: f64| FrontierParams {
+            free_max: 40,
+            pass_max: 98,
+            clear_max: 15,
+            min_cells: 10,
+            standoff_cells: 3.0,
+            search_cells: 16.0,
+            cost_weight,
+            peek_cells,
+            split_cells: 0.0,
+        };
+        // Passable (cost 80): reachable; the clear cells in the second room are near enough.
+        let (grid, w, h) = two_rooms(80);
+        let (goals, _, _) = frontier_goals(&grid, w, h, (10, 5), &p(0.05, 0.0));
+        assert_eq!(goals.len(), 1);
+        // Without clear cells near the frontier (the second room inflated too), the old rule
+        // dropped it; the fallback picks the best cell below inscribed.
+        let mut inflated = grid.clone();
+        for r in 1..h - 1 {
+            for c in 19..=29 {
+                inflated[r * w + c] = 60;
+            }
+        }
+        assert!(frontier_goals(&inflated, w, h, (10, 5), &p(0.0, 0.0)).0.is_empty());
+        let (goals, _, _) = frontier_goals(&inflated, w, h, (10, 5), &p(0.05, 0.0));
+        assert_eq!(goals.len(), 1);
+        let g = goals[0].goal;
+        assert!(inflated[g.0 * w + g.1] <= 98 && g.1 >= 19, "{g:?}");
+        // Passage inscribed (cost 99): not reachable - no goal, but a spot to look at it from.
+        let (grid, w, h) = two_rooms(99);
+        let (goals, _, peeks) = frontier_goals(&grid, w, h, (10, 5), &p(0.05, 30.0));
+        assert!(goals.is_empty());
+        assert_eq!(peeks.len(), 1);
+        assert!(peeks[0].goal.1 <= 12, "the spot is on the robot's side: {:?}", peeks[0].goal);
+    }
+
+    #[test]
+    fn long_frontier_gets_a_spot_per_piece() {
+        // A 100 x 20 room known up to row 12, unknown beyond: one frontier group 98 cells long.
+        let (w, h) = (100usize, 20usize);
+        let mut grid = vec![0i8; w * h];
+        for r in 0..h {
+            for c in 0..w {
+                grid[r * w + c] = if r > 12 {
+                    -1
+                } else if r == 0 || c == 0 || c == w - 1 {
+                    100
+                } else {
+                    0
+                };
+            }
+        }
+        let p = |split_cells: f64| FrontierParams {
+            free_max: 40,
+            pass_max: 98,
+            clear_max: 15,
+            min_cells: 10,
+            standoff_cells: 3.0,
+            search_cells: 16.0,
+            cost_weight: 0.05,
+            peek_cells: 0.0,
+            split_cells,
+        };
+        let (one, _, _) = frontier_goals(&grid, w, h, (5, 50), &p(0.0));
+        assert_eq!(one.len(), 1);
+        assert_eq!(one[0].centroid, (12.0, 49.5));
+        let (goals, _, _) = frontier_goals(&grid, w, h, (5, 50), &p(40.0));
+        // 98 cells / 40 -> 3 pieces of 32-33 cells, west to east; each keeps the group's size.
+        assert_eq!(goals.len(), 3);
+        assert_eq!(goals.iter().map(|g| g.centroid).collect::<Vec<_>>(), vec![(12.0, 16.5), (12.0, 49.0), (12.0, 82.0)]);
+        assert!(goals.iter().all(|g| g.size == 98 && g.group == (12.0, 49.5)));
+        assert!(goals[0].goal.1 < 30 && goals[2].goal.1 > 70, "{goals:?}");
+        // Short groups and split 0 stay whole; an L-shape is cut along its longer side.
+        assert_eq!(frontier_pieces(&[(0, 0), (0, 1)], 40.0).len(), 1);
+        let l: Vec<(usize, usize)> = (0..10).map(|r| (r, 0)).chain((1..4).map(|c| (9, c))).collect();
+        let pieces = frontier_pieces(&l, 4.0);
+        assert_eq!(pieces.iter().map(Vec::len).collect::<Vec<_>>(), vec![4, 4, 5]);
+        assert_eq!(pieces[0], vec![(0, 0), (1, 0), (2, 0), (3, 0)]);
     }
 
     #[test]
@@ -1399,18 +2207,25 @@ mod tests {
     struct TestIo {
         t: f64,
         pose: (f64, f64),
+        yaw: f64,
         goals: Vec<GoalRequest>,
         cancels: Vec<u64>,
         logs: Vec<(Level, String)>,
         status: String,
+        zones: Vec<String>,
+        spin_server: bool,
+        spins: Vec<(u64, f32)>,
+        spin_cancels: Vec<u64>,
+        want_markers: bool,
+        markers: Vec<Vec<MarkerSpec>>,
     }
 
     impl Io for TestIo {
-        fn mono(&mut self) -> f64 {
+        fn now(&mut self) -> f64 {
             self.t
         }
         fn lookup(&mut self, _: &str, _: &str) -> Option<([f64; 3], [f64; 4])> {
-            Some(([self.pose.0, self.pose.1, 0.0], [0.0, 0.0, 0.0, 1.0]))
+            Some(([self.pose.0, self.pose.1, 0.0], [0.0, 0.0, (self.yaw / 2.0).sin(), (self.yaw / 2.0).cos()]))
         }
         fn nav_ready(&mut self) -> bool {
             true
@@ -1432,7 +2247,9 @@ mod tests {
         fn status(&mut self, json: String) {
             self.status = json;
         }
-        fn zone_command(&mut self, _: String) {}
+        fn zone_command(&mut self, json: String) {
+            self.zones.push(json);
+        }
         fn log(&mut self, level: Level, msg: String) {
             self.logs.push((level, msg));
         }
@@ -1440,6 +2257,22 @@ mod tests {
             "000000".into()
         }
         fn start_cliff_timer(&mut self) {}
+        fn spin_ready(&mut self) -> bool {
+            self.spin_server
+        }
+        fn send_spin(&mut self, seq: u64, target_yaw: f32, _: i32, _: u32) {
+            self.spins.push((seq, target_yaw));
+        }
+        fn cancel_spin(&mut self, seq: u64) {
+            self.spin_cancels.push(seq);
+        }
+        fn markers_wanted(&mut self) -> bool {
+            self.want_markers
+        }
+        fn markers(&mut self, frame: &str, markers: &[MarkerSpec]) {
+            assert_eq!(frame, "map");
+            self.markers.push(markers.to_vec());
+        }
     }
 
     impl TestIo {
@@ -1456,22 +2289,316 @@ mod tests {
     }
 
     /// Exploring the open room of frontier_goal_in_open_room (0.1 m cells, robot in cell (10, 3)),
-    /// its one frontier goal sent at t = 1 s and not answered yet.
+    /// its one frontier goal sent at t = 1 s and not answered yet (no look-around).
     fn exploring(io: &mut TestIo) -> Explorer {
-        let (w, h) = (20u32, 20u32);
-        let data = (0..h)
-            .flat_map(|r| (0..w).map(move |c| if c >= 13 { -1 } else if r == 0 || r == h - 1 || c == 0 { 100 } else { 0 }))
-            .collect();
-        let mut e = Explorer::new(Params::load(&mut crate::watchdog::Defaults).unwrap(), io);
-        e.on_grid(Grid { width: w, height: h, resolution: 0.1, origin_x: 0.0, origin_y: 0.0, data });
-        e.on_mode("full", io);
-        io.pose = (0.35, 1.05);
+        let mut p = Params::load(&mut crate::watchdog::Defaults).unwrap();
+        p.look_steps = 0;
+        let mut e = open_room(io, p);
         io.t = 1.0;
         e.on_command("start", io);
         e.tick(io);
         assert_eq!(e.state(), State::Exploring);
         assert_eq!(io.goals.len(), 1);
         e
+    }
+
+    fn open_room(io: &mut TestIo, p: Params) -> Explorer {
+        let (w, h) = (20u32, 20u32);
+        let data = (0..h)
+            .flat_map(|r| (0..w).map(move |c| if c >= 13 { -1 } else if r == 0 || r == h - 1 || c == 0 { 100 } else { 0 }))
+            .collect();
+        let mut e = Explorer::new(p, io);
+        e.on_grid(Grid { width: w, height: h, resolution: 0.1, origin_x: 0.0, origin_y: 0.0, data });
+        e.on_mode("full", io);
+        io.pose = (0.35, 1.05);
+        e
+    }
+
+    /// Answers the last look-around turn: accepted, then finished with `status`.
+    fn turn(io: &mut TestIo, e: &mut Explorer, status: i8) {
+        let seq = io.spins.last().unwrap().0;
+        e.on_spin_response(seq, true, io);
+        e.on_spin_result(seq, status, io);
+    }
+
+    #[test]
+    fn looks_around_at_the_first_spot_and_before_giving_up() {
+        let mut io = TestIo { spin_server: true, ..Default::default() };
+        let mut e = open_room(&mut io, Params::load(&mut crate::watchdog::Defaults).unwrap());
+        io.t = 1.0;
+        e.on_command("start", &mut io);
+        // Not at the start point (it may be on the dock): straight to the frontier in view.
+        io.ticks(&mut e, 1, 1);
+        assert!(io.spins.is_empty());
+        assert_eq!(io.goals.len(), 1);
+        // Reached: four quarter turns there, even with nothing left in view.
+        e.on_goal_response(io.goals[0].seq, true, &mut io);
+        io.pose = (io.goals[0].x, io.goals[0].y);
+        e.on_result(io.goals[0].seq, STATUS_SUCCEEDED, &mut io);
+        for k in 0..4 {
+            io.ticks(&mut e, 2 + k, 2 + k);
+            assert_eq!(io.spins.len() as u32, k + 1);
+            assert_eq!(io.spins[k as usize].1, std::f32::consts::FRAC_PI_2);
+            turn(&mut io, &mut e, STATUS_SUCCEEDED);
+        }
+        io.ticks(&mut e, 6, 7);
+        assert_eq!(io.spins.len(), 4, "looked around there once");
+        assert_eq!(io.goals.len(), 1);
+        // Started again where nothing is in view: it looks around before giving up, stopping at
+        // the first turn that is blocked.
+        io.t = 8.0;
+        e.on_command("stop", &mut io);
+        e.on_command("start", &mut io);
+        io.ticks(&mut e, 8, 8);
+        assert_eq!(io.spins.len(), 5);
+        assert!(io.status.contains("looking around"), "{}", io.status);
+        turn(&mut io, &mut e, 6);
+        assert_eq!(io.warnings("stopped early"), 1);
+        // A turn that is never answered is given up on too, and a stop cancels a turn.
+        io.t = 9.0;
+        e.on_command("stop", &mut io);
+        e.on_command("start", &mut io);
+        io.ticks(&mut e, 9, 9);
+        assert_eq!(io.spins.len(), 6);
+        let seq = io.spins.last().unwrap().0;
+        io.ticks(&mut e, 10, 19);
+        assert_eq!(io.warnings("did not answer the turn"), 0);
+        io.ticks(&mut e, 20, 20);
+        assert_eq!(io.warnings("did not answer the turn"), 1);
+        e.on_spin_response(seq, true, &mut io);
+        assert_eq!(io.spin_cancels, vec![seq], "a late acceptance is cancelled");
+    }
+
+    #[test]
+    fn finishes_back_at_the_start_point() {
+        let mut io = TestIo::default();
+        let mut e = exploring(&mut io);
+        let home = io.pose;
+        // The frontier is reached; nothing is left from there: back home and check again there.
+        let g = io.goals[0].clone();
+        e.on_goal_response(g.seq, true, &mut io);
+        io.pose = (g.x, g.y);
+        e.on_result(g.seq, STATUS_SUCCEEDED, &mut io);
+        io.ticks(&mut e, 2, 23);
+        assert_eq!(e.state(), State::Returning);
+        let trip = io.goals.last().unwrap().clone();
+        assert_eq!((trip.x, trip.y), home);
+        e.on_goal_response(trip.seq, true, &mut io);
+        io.pose = home;
+        e.on_result(trip.seq, STATUS_SUCCEEDED, &mut io);
+        assert_eq!(e.state(), State::Exploring);
+        io.ticks(&mut e, 24, 45);
+        assert_eq!(e.state(), State::Done);
+        assert!(io.status.contains("no reachable unmapped areas left - back at the start point"), "{}", io.status);
+        // Already at the start point when nothing is left: no pointless trip, no second wait.
+        let goals = io.goals.len();
+        e.on_command("start", &mut io);
+        io.ticks(&mut e, 46, 46);
+        let g = io.goals.last().unwrap().clone();
+        e.on_goal_response(g.seq, true, &mut io);
+        e.on_result(g.seq, STATUS_SUCCEEDED, &mut io); // looked from home: the spot is visited
+        io.ticks(&mut e, 47, 70);
+        assert_eq!(e.state(), State::Done);
+        assert_eq!(io.goals.len(), goals + 1, "only the frontier goal");
+        assert!(io.status.contains("back at the start point"), "{}", io.status);
+    }
+
+    #[test]
+    fn trip_home_failing_is_reported() {
+        let mut io = TestIo::default();
+        let mut e = exploring(&mut io);
+        let g = io.goals[0].clone();
+        e.on_goal_response(g.seq, true, &mut io);
+        io.pose = (g.x, g.y);
+        e.on_result(g.seq, STATUS_SUCCEEDED, &mut io);
+        io.ticks(&mut e, 2, 23);
+        // Each failed trip is followed by another check from where it is and another trip, up to
+        // return_home_attempts (3) in all.
+        for k in 0..3 {
+            let trip = io.goals.last().unwrap().clone();
+            assert_eq!((trip.x, trip.y), (0.35, 1.05), "trip {k}");
+            e.on_goal_response(trip.seq, false, &mut io);
+            assert_eq!(e.state(), State::Exploring, "checks again from where it is");
+            io.ticks(&mut e, 24 + 22 * k, 45 + 22 * k);
+        }
+        assert_eq!(e.state(), State::Done);
+        assert_eq!(io.goals.len(), 4, "the frontier and three trips home");
+        assert!(io.status.contains("no reachable unmapped areas left - could not drive back to the start point"), "{}", io.status);
+    }
+
+    #[test]
+    fn marks_leave_the_robot_free() {
+        let mut io = TestIo::default();
+        let mut e = exploring(&mut io);
+        e.on_sensors(&Sensors { bump_left: true, ..Default::default() }, &mut io);
+        assert!(io.zones[0].ends_with(r#""ttl_s": 600.0, "clear": [0.35, 1.05, 0.28], "soft": 0.22}"#), "{}", io.zones[0]);
+        e.on_sensors(&Sensors { cliff: [false, true, false, false], ..Default::default() }, &mut io);
+        e.on_mode("passive", &mut io);
+        e.cliff_check(&mut io);
+        assert!(io.zones[1].ends_with(r#""clear": [0.35, 1.05, 0.28], "soft": 0.22}"#), "{}", io.zones[1]);
+    }
+
+    #[test]
+    fn failed_spot_reopens_when_the_map_opens_up() {
+        let mut io = TestIo::default();
+        let mut e = exploring(&mut io);
+        let g = io.goals[0].clone();
+        e.on_goal_response(g.seq, true, &mut io);
+        // Aborted while something blocked the way (cells next to the goal lethal at that moment).
+        let mut blocked = e.grid.clone().unwrap();
+        for r in 3..=9 {
+            for c in 5..=11 {
+                blocked.data[r * 20 + c] = 100;
+            }
+        }
+        let clear = e.grid.replace(blocked).unwrap();
+        e.on_result(g.seq, 6, &mut io);
+        io.ticks(&mut e, 2, 3);
+        assert_eq!(io.goals.len(), 1, "skipped while blocked");
+        e.on_grid(clear);
+        io.ticks(&mut e, 4, 4);
+        assert_eq!(io.goals.len(), 2, "tried again once the way opened up");
+        assert!(io.logs.iter().any(|(_, m)| m.starts_with("The map opened up around an area that failed earlier")));
+    }
+
+    #[test]
+    fn spot_skipped_for_bumps_waits_for_the_retry_before_finishing() {
+        let mut io = TestIo::default();
+        let mut e = exploring(&mut io);
+        let g = io.goals[0].clone();
+        e.on_goal_response(g.seq, true, &mut io);
+        let mut blocked = e.grid.clone().unwrap();
+        for r in 3..=9 {
+            for c in 5..=11 {
+                blocked.data[r * 20 + c] = 100;
+            }
+        }
+        let clear = e.grid.replace(blocked).unwrap();
+        for _ in 0..2 {
+            e.on_sensors(&Sensors { bump_left: true, ..Default::default() }, &mut io);
+            e.on_sensors(&Sensors::default(), &mut io);
+        }
+        assert_eq!(io.warnings("skipping it"), 1);
+        // The camera can't tell whether what it bumped into is gone: the map opening up there
+        // doesn't bring it back.
+        e.on_grid(clear);
+        io.ticks(&mut e, 2, 4);
+        assert_eq!(io.goals.len(), 1);
+        assert!(!io.logs.iter().any(|(_, m)| m.starts_with("The map opened up")));
+    }
+
+    #[test]
+    fn markers_show_how_it_chose_the_goal() {
+        let mut io = TestIo { want_markers: true, ..Default::default() };
+        let mut e = exploring(&mut io);
+        let m = io.markers.last().unwrap().clone();
+        let count = |m: &[MarkerSpec], ns: &str| m.iter().filter(|s| s.ns == ns).count();
+        assert_eq!((count(&m, "frontiers"), count(&m, "options"), count(&m, "home")), (1, 1, 1));
+        assert_eq!(m.iter().find(|s| s.ns == "frontiers").unwrap().points.len(), 18, "column 12, rows 1-18");
+        let arrow = m.iter().find(|s| s.ns == "goal").unwrap();
+        assert_eq!(arrow.points, vec![[0.35, 1.05, 0.1], [io.goals[0].x, io.goals[0].y, 0.1]], "from where it was chosen");
+        assert!(m.iter().any(|s| s.ns == "labels" && s.text.starts_with("chosen: ")), "{m:?}");
+        // Unchanged: not sent again.
+        let sent = io.markers.len();
+        io.ticks(&mut e, 2, 3);
+        assert_eq!(io.markers.len(), sent);
+        // The goal fails: the spot shows as failed, and as skipped in the next search.
+        e.on_goal_response(io.goals[0].seq, true, &mut io);
+        e.on_result(io.goals[0].seq, 6, &mut io);
+        io.ticks(&mut e, 4, 4);
+        let m = io.markers.last().unwrap();
+        assert_eq!(count(m, "failed"), 1);
+        assert!(m.iter().any(|s| s.ns == "labels" && s.text == "failed earlier"));
+        assert!(m.iter().any(|s| s.ns == "labels" && s.text == "failed: retry if the map opens up"));
+        // Nobody listening: nothing built; listening again: sent again.
+        io.want_markers = false;
+        io.ticks(&mut e, 5, 6);
+        assert_eq!(io.markers.len(), sent + 1);
+        io.want_markers = true;
+        io.ticks(&mut e, 7, 7);
+        assert_eq!(io.markers.len(), sent + 2);
+    }
+
+    #[test]
+    fn status_comes_back_after_a_tracking_pause() {
+        let mut io = TestIo::default();
+        let mut e = exploring(&mut io);
+        e.on_filter(r#"{"state": "recovering"}"#);
+        io.ticks(&mut e, 2, 2);
+        assert!(io.status.contains("Paused"), "{}", io.status);
+        e.on_filter(r#"{"state": "idle"}"#);
+        io.ticks(&mut e, 3, 3);
+        assert!(io.status.contains("Heading to an unmapped area"), "{}", io.status);
+    }
+
+    #[test]
+    fn turns_to_face_the_unknown_at_the_spot() {
+        let mut io = TestIo { spin_server: true, ..Default::default() };
+        let mut p = Params::load(&mut crate::watchdog::Defaults).unwrap();
+        p.look_steps = 0;
+        let mut e = open_room(&mut io, p);
+        io.t = 1.0;
+        e.on_command("start", &mut io);
+        io.ticks(&mut e, 1, 1);
+        let g = io.goals[0].clone();
+        e.on_goal_response(g.seq, true, &mut io);
+        // Arrives facing away from the unknown (east): one turn of the difference.
+        io.pose = (g.x, g.y);
+        io.yaw = 2.5;
+        e.on_result(g.seq, STATUS_SUCCEEDED, &mut io);
+        io.ticks(&mut e, 2, 2);
+        assert_eq!(io.spins.len(), 1);
+        let want = (2.0 * g.qz.atan2(g.qw) - 2.5) as f32;
+        assert!((io.spins[0].1 - want).abs() < 1e-6, "{:?} vs {want}", io.spins);
+        assert!(io.status.contains("Turning to face"), "{}", io.status);
+    }
+
+    #[test]
+    fn bump_marks_are_dropped_before_finishing() {
+        let mut io = TestIo::default();
+        let mut e = exploring(&mut io);
+        let g = io.goals[0].clone();
+        e.on_goal_response(g.seq, true, &mut io);
+        // Someone walks into the robot on the way, and the goal fails.
+        e.on_sensors(&Sensors { bump_left: true, ..Default::default() }, &mut io);
+        e.on_sensors(&Sensors::default(), &mut io);
+        e.on_result(g.seq, 6, &mut io);
+        io.ticks(&mut e, 2, 23);
+        assert_eq!(io.zones.len(), 2, "{:?}", io.zones);
+        assert_eq!(io.zones[1], r#"{"op": "delete", "name": "bump_000000_1"}"#);
+        assert!(io.logs.iter().any(|(_, m)| m.starts_with("Removed 1 bump mark(s) (a person walking into the robot")));
+        // Bumped there again: marked again.
+        e.on_sensors(&Sensors { bump_left: true, ..Default::default() }, &mut io);
+        assert_eq!(io.zones.len(), 3);
+    }
+
+    #[test]
+    fn railing_marks_stay_for_the_next_trip_home() {
+        let mut io = TestIo::default();
+        let mut e = exploring(&mut io);
+        let g = io.goals[0].clone();
+        e.on_goal_response(g.seq, true, &mut io);
+        io.pose = (g.x, g.y);
+        e.on_result(g.seq, STATUS_SUCCEEDED, &mut io);
+        // Two hits side by side there: a railing the camera misses, not someone walking by.
+        for dx in [0.0, 0.25] {
+            io.pose = (g.x + dx, g.y);
+            e.on_sensors(&Sensors { bump_left: true, ..Default::default() }, &mut io);
+            e.on_sensors(&Sensors::default(), &mut io);
+        }
+        assert_eq!(io.zones.len(), 2);
+        io.ticks(&mut e, 2, 23);
+        let deletes = |io: &TestIo| io.zones.iter().filter(|z| z.contains(r#""op": "delete""#)).count();
+        for k in 0..3 {
+            // Kept while finishing and for the second trip home (they route it around the
+            // railing), dropped before the last one.
+            assert_eq!(deletes(&io), if k < 2 { 0 } else { 2 }, "trip {k}");
+            let trip = io.goals.last().unwrap().clone();
+            assert_eq!((trip.x, trip.y), (0.35, 1.05), "trip {k}");
+            e.on_goal_response(trip.seq, false, &mut io);
+            io.ticks(&mut e, 24 + 22 * k, 45 + 22 * k);
+        }
+        assert_eq!(e.state(), State::Done);
     }
 
     #[test]

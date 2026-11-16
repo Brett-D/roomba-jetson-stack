@@ -6,14 +6,19 @@
 //!   ["M", t, ros, mode] / ["B", t, ros, percentage|null] / ["F", t, ros, filter_status] / ["C", t, ros, command]
 //!   ["S", t, ros, bump_left, bump_right, wheel_drop_left, wheel_drop_right, [cliff x4], [light x6]]
 //!   ["K", t, ros] 1 s tick / ["CT", t, ros] cliff check timer
-//!   ["NR", t, ros, nav_ready, get_params_ready, set_params_ready]   server availability
+//!   ["NR", t, ros, nav_ready, get_params_ready, set_params_ready(, spin_ready)]   server availability
 //!   ["GR", t, ros, seq, accepted] / ["RS", t, ros, seq, status]       NavigateToPose responses
+//!   ["SR", t, ros, seq, accepted] / ["SS", t, ros, seq, status]       Spin (look-around) responses
 //!   ["PR", t, ros, type|null, double_value, error|null]              GetParameters response
 //!   ["Q", t, ros(, x, y)]   frontier query at the TF pose (or x, y): prints FQ
 //!   ["X", t, ros]           shutdown
 //! and prints one JSON array per output: ["ST", json] / ["ZN", json] / ["LG", level, message] /
 //! ["GL", seq, frame, x, y, qz, qw, stamp_ns] / ["CN", seq] / ["GP"] / ["SP", value] / ["TM"] /
-//! ["FQ", [[goal_row, goal_col, centroid_row, centroid_col, size], ...], seed|null, [row, col]] or ["FQ", null].
+//! ["SG", seq, target_yaw, sec, nanosec] / ["SC", seq] /
+//! ["MK", [[frame, stamp_ns, ns, id, type, action, [x, y, z, qw], [sx, sy, sz], [r, g, b, a], [[x, y, z], ...], text], ...]]
+//! (~/markers, a DELETEALL first) /
+//! ["FQ", [[goal_row, goal_col, centroid_row, centroid_col, size], ...], seed|null, [row, col], [peeks]]
+//! or ["FQ", null].
 use std::fs::File;
 use std::io::{self, BufRead, BufWriter, Read, Seek, SeekFrom, Write};
 
@@ -22,6 +27,7 @@ use serde_json::{json, Map, Value};
 use roomba_rs::explorer::{frontier_goals, Explorer, FrontierParams, GoalRequest, Grid, Io, Params, Sensors};
 use roomba_rs::tf_buffer::{TfBuffer, Transform};
 use roomba_rs::watchdog::{Level, ParamSource};
+use roomba_rs::zones::{MarkerSpec, DELETEALL};
 
 struct Overrides(Map<String, Value>);
 
@@ -46,7 +52,7 @@ struct Replay<W: Write> {
     ros: i64,
     wall0: f64,
     tf: TfBuffer,
-    ready: [bool; 3],
+    ready: [bool; 4],
 }
 
 impl<W: Write> Replay<W> {
@@ -56,8 +62,9 @@ impl<W: Write> Replay<W> {
 }
 
 impl<W: Write> Io for Replay<W> {
-    fn mono(&mut self) -> f64 {
-        self.t
+    fn now(&mut self) -> f64 {
+        // rclpy: self.get_clock().now().nanoseconds * 1e-9
+        self.ros as f64 * 1e-9
     }
     fn lookup(&mut self, target: &str, source: &str) -> Option<([f64; 3], [f64; 4])> {
         let t = self.tf.lookup_transform(target, source, 0).ok()?;
@@ -112,6 +119,40 @@ impl<W: Write> Io for Replay<W> {
     fn start_cliff_timer(&mut self) {
         self.emit(json!(["TM"]));
     }
+    fn spin_ready(&mut self) -> bool {
+        self.ready[3]
+    }
+    fn send_spin(&mut self, seq: u64, target_yaw: f32, sec: i32, nanosec: u32) {
+        self.emit(json!(["SG", seq, target_yaw as f64, sec, nanosec]));
+    }
+    fn cancel_spin(&mut self, seq: u64) {
+        self.emit(json!(["SC", seq]));
+    }
+    fn markers_wanted(&mut self) -> bool {
+        true
+    }
+    fn markers(&mut self, frame: &str, specs: &[MarkerSpec]) {
+        let ros = self.ros;
+        let one = |m: &MarkerSpec| {
+            let c = m.color.map(|v| v as f64);
+            json!([frame, ros, m.ns, m.id, m.kind, m.action, [m.position[0], m.position[1], m.position[2], m.orientation_w],
+                   m.scale, c, m.points, m.text])
+        };
+        let clear = MarkerSpec {
+            ns: String::new(),
+            id: 0,
+            kind: 0,
+            action: DELETEALL,
+            position: [0.0; 3],
+            orientation_w: 1.0,
+            scale: [0.0; 3],
+            color: [0.0; 4],
+            points: Vec::new(),
+            text: String::new(),
+        };
+        let all: Vec<Value> = std::iter::once(&clear).chain(specs.iter()).map(one).collect();
+        self.emit(json!(["MK", all]));
+    }
 }
 
 fn f(v: &Value) -> f64 {
@@ -138,11 +179,15 @@ fn frontier_query(io: &mut Replay<impl Write>, p: &Params, grid: Option<&Grid>, 
         min_cells: p.min_cells,
         standoff_cells: p.standoff / res,
         search_cells: p.goal_search / res,
+        cost_weight: p.cost_weight,
+        peek_cells: p.peek_search / res,
+        split_cells: p.frontier_split / res,
     };
-    let (goals, seed) = frontier_goals(&grid.data, grid.width as usize, grid.height as usize, robot, &fp);
-    let goals: Vec<Value> =
-        goals.iter().map(|g| json!([g.goal.0, g.goal.1, g.centroid.0, g.centroid.1, g.size])).collect();
-    json!(["FQ", goals, seed.map(|s| json!([s.0, s.1])), [robot.0, robot.1]])
+    let (goals, seed, peeks) = frontier_goals(&grid.data, grid.width as usize, grid.height as usize, robot, &fp);
+    let list = |gs: &[roomba_rs::explorer::FrontierGoal]| -> Vec<Value> {
+        gs.iter().map(|g| json!([g.goal.0, g.goal.1, g.centroid.0, g.centroid.1, g.size])).collect()
+    };
+    json!(["FQ", list(&goals), seed.map(|s| json!([s.0, s.1])), [robot.0, robot.1], list(&peeks)])
 }
 
 fn main() -> anyhow::Result<()> {
@@ -153,7 +198,7 @@ fn main() -> anyhow::Result<()> {
     let grid_path = first[5].as_str().unwrap_or("").to_string();
     let mut grids = if grid_path.is_empty() { None } else { Some(File::open(&grid_path)?) };
     let mut io =
-        Replay { out: BufWriter::new(io::stdout().lock()), t: 0.0, ros: 0, wall0: f(&first[4]), tf: TfBuffer::new(), ready: [true; 3] };
+        Replay { out: BufWriter::new(io::stdout().lock()), t: 0.0, ros: 0, wall0: f(&first[4]), tf: TfBuffer::new(), ready: [true; 4] };
     let p = Params::load(&mut Overrides(params))?;
     let mut core = Explorer::new(p.clone(), &mut io);
     let mut last_grid: Option<Grid> = None;
@@ -218,9 +263,11 @@ fn main() -> anyhow::Result<()> {
             }
             "K" => core.tick(&mut io),
             "CT" => core.cliff_check(&mut io),
-            "NR" => io.ready = [b(&e[3]), b(&e[4]), b(&e[5])],
+            "NR" => io.ready = [b(&e[3]), b(&e[4]), b(&e[5]), e.get(6).map_or(io.ready[3], b)],
             "GR" => core.on_goal_response(e[3].as_u64().unwrap(), b(&e[4]), &mut io),
             "RS" => core.on_result(e[3].as_u64().unwrap(), e[4].as_i64().unwrap() as i8, &mut io),
+            "SR" => core.on_spin_response(e[3].as_u64().unwrap(), b(&e[4]), &mut io),
+            "SS" => core.on_spin_result(e[3].as_u64().unwrap(), e[4].as_i64().unwrap() as i8, &mut io),
             "PR" => {
                 let value = match (&e[5], &e[3], &e[4]) {
                     (Value::String(err), _, _) => Err(err.clone()),

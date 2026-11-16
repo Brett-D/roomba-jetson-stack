@@ -6,7 +6,8 @@
 //!
 //! Subscribes: /global_costmap/costmap, /roomba/mode (latched), /battery_state, /roomba/sensors,
 //!             /vslam_filter/status, ~/command ("start" | "stop" | "home"), /tf, /tf_static
-//! Publishes:  ~/status (JSON, transient local), /perception/ignore_zones/command
+//! Publishes:  ~/status (JSON, transient local), /perception/ignore_zones/command, ~/markers (how it
+//!             decides where to go; transient local, only while someone listens)
 //! Uses:       navigate_to_pose action, /controller_server/get_parameters|set_parameters
 
 use std::collections::HashMap;
@@ -15,16 +16,17 @@ use std::time::Duration;
 
 use anyhow::Result;
 use rclrs::*;
-use ros_env::{nav2_msgs, nav_msgs, rcl_interfaces, roomba_msgs, sensor_msgs, std_msgs};
+use ros_env::{builtin_interfaces, geometry_msgs, nav2_msgs, nav_msgs, rcl_interfaces, roomba_msgs, sensor_msgs, std_msgs, visualization_msgs};
 
-use nav2_msgs::action::NavigateToPose;
+use nav2_msgs::action::{NavigateToPose, Spin};
 use rcl_interfaces::msg::{Parameter, ParameterValue};
 use rcl_interfaces::srv::{GetParameters, GetParameters_Request, GetParameters_Response, SetParameters, SetParameters_Request, SetParameters_Response};
 use roomba_rs::explorer::{Explorer, GoalRequest, Grid, Io, Params, Sensors, PARAMETER_DOUBLE, ROTATE_PARAM};
-use roomba_rs::node_params::{block_signals, mono, on_signal, NodeParams};
+use roomba_rs::node_params::{block_signals, on_signal, NodeParams};
 use roomba_rs::tf_buffer::TfBuffer;
 use roomba_rs::tf_listener::{ros_time, HasTfBuffer, WorkerTfListener};
 use roomba_rs::watchdog::Level;
+use roomba_rs::zones::{MarkerSpec, DELETEALL};
 
 struct RosIo {
     node: Node,
@@ -34,10 +36,14 @@ struct RosIo {
     nav: ActionClient<NavigateToPose>,
     /// Accepted goals that have no result yet, by sequence number.
     goals: HashMap<u64, CancellationClient<NavigateToPose>>,
+    spinner: ActionClient<Spin>,
+    /// Accepted look-around turns that have no result yet, by sequence number.
+    spins: HashMap<u64, CancellationClient<Spin>>,
     get_params: Client<GetParameters>,
     set_params: Client<SetParameters>,
     pub_status: Publisher<std_msgs::msg::String>,
     pub_zone: Publisher<std_msgs::msg::String>,
+    pub_markers: Publisher<visualization_msgs::msg::MarkerArray>,
     cliff_timers: Vec<WorkerTimer<State>>,
 }
 
@@ -50,8 +56,8 @@ impl RosIo {
 }
 
 impl Io for RosIo {
-    fn mono(&mut self) -> f64 {
-        mono()
+    fn now(&mut self) -> f64 {
+        self.node.get_clock().now().nsec as f64 * 1e-9
     }
 
     fn lookup(&mut self, target: &str, source: &str) -> Option<([f64; 3], [f64; 4])> {
@@ -184,6 +190,88 @@ impl Io for RosIo {
             Err(e) => log!(self.node.error(), "Could not start the cliff check timer: {e}"),
         }
     }
+
+    fn spin_ready(&mut self) -> bool {
+        self.spinner.server_is_available().unwrap_or(false)
+    }
+
+    fn send_spin(&mut self, seq: u64, target_yaw: f32, sec: i32, nanosec: u32) {
+        let mut goal = nav2_msgs::action::Spin_Goal::default();
+        goal.target_yaw = target_yaw;
+        goal.time_allowance.sec = sec;
+        goal.time_allowance.nanosec = nanosec;
+        let requested = match self.spinner.try_request_goal(goal) {
+            Ok(r) => r,
+            Err(e) => {
+                // Given up on like a turn request that is never answered (goal_response_timeout_s).
+                log!(self.node.error(), "Could not send the look-around turn: {e}");
+                return;
+            }
+        };
+        let worker = self.worker.get().cloned();
+        let _ = self.node.commands().run(async move {
+            let Some(worker) = worker else { return };
+            match requested.await {
+                None => {
+                    let _ = worker.run(move |s: &mut State| s.core.on_spin_response(seq, false, &mut s.io));
+                }
+                Some(client) => {
+                    let GoalClient { result, cancellation, .. } = client;
+                    let _ = worker.run(move |s: &mut State| {
+                        s.io.spins.insert(seq, cancellation);
+                        s.core.on_spin_response(seq, true, &mut s.io);
+                    });
+                    let (status, _) = result.await;
+                    let _ = worker.run(move |s: &mut State| {
+                        s.io.spins.remove(&seq);
+                        s.core.on_spin_result(seq, status as i8, &mut s.io);
+                    });
+                }
+            }
+        });
+    }
+
+    fn cancel_spin(&mut self, seq: u64) {
+        if let Some(c) = self.spins.get(&seq) {
+            if let Err(e) = c.try_cancel() {
+                log!(self.node.warn(), "Could not cancel the look-around turn: {e}");
+            }
+        }
+    }
+
+    fn markers_wanted(&mut self) -> bool {
+        self.pub_markers.get_subscription_count().unwrap_or(0) > 0
+    }
+
+    fn markers(&mut self, frame: &str, specs: &[MarkerSpec]) {
+        let ns = self.node.get_clock().now().nsec;
+        let header = std_msgs::msg::Header {
+            stamp: builtin_interfaces::msg::Time { sec: ns.div_euclid(1_000_000_000) as i32, nanosec: ns.rem_euclid(1_000_000_000) as u32 },
+            frame_id: frame.into(),
+        };
+        let mut clear = visualization_msgs::msg::Marker { header: header.clone(), action: DELETEALL, ..Default::default() };
+        clear.pose.orientation.w = 1.0;
+        let markers = std::iter::once(clear).chain(specs.iter().map(|m| marker(m, &header))).collect();
+        self.pub_markers.publish(visualization_msgs::msg::MarkerArray { markers }).ok();
+    }
+}
+
+fn marker(m: &MarkerSpec, header: &std_msgs::msg::Header) -> visualization_msgs::msg::Marker {
+    let mut out = visualization_msgs::msg::Marker {
+        header: header.clone(),
+        ns: m.ns.clone(),
+        id: m.id,
+        type_: m.kind,
+        action: m.action,
+        text: m.text.clone(),
+        ..Default::default()
+    };
+    out.pose.position = geometry_msgs::msg::Point { x: m.position[0], y: m.position[1], z: m.position[2] };
+    out.pose.orientation = geometry_msgs::msg::Quaternion { x: 0.0, y: 0.0, z: 0.0, w: m.orientation_w };
+    out.scale = geometry_msgs::msg::Vector3 { x: m.scale[0], y: m.scale[1], z: m.scale[2] };
+    out.color = std_msgs::msg::ColorRGBA { r: m.color[0], g: m.color[1], b: m.color[2], a: m.color[3] };
+    out.points = m.points.iter().map(|p| geometry_msgs::msg::Point { x: p[0], y: p[1], z: p[2] }).collect();
+    out
 }
 
 struct State {
@@ -246,10 +334,13 @@ fn main() -> Result<()> {
         tf: TfBuffer::new(),
         nav: node.create_action_client::<NavigateToPose>("navigate_to_pose")?,
         goals: HashMap::new(),
+        spinner: node.create_action_client::<Spin>("spin")?,
+        spins: HashMap::new(),
         get_params: node.create_client::<GetParameters>("/controller_server/get_parameters")?,
         set_params: node.create_client::<SetParameters>("/controller_server/set_parameters")?,
         pub_status: node.create_publisher("~/status".qos(latched()))?,
         pub_zone: node.create_publisher("/perception/ignore_zones/command".keep_last(10))?,
+        pub_markers: node.create_publisher("~/markers".qos(latched()))?,
         cliff_timers: Vec::new(),
     };
     let core = Explorer::new(params, &mut io);

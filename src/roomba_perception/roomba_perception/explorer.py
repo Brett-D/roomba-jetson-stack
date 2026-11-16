@@ -3,12 +3,23 @@
 
 A frontier is free, known space next to unknown space in Nav2's global costmap (which
 already includes RTAB-Map's grid, live obstacles and keep-out zones). Frontier cells are
-grouped; only groups connected to the robot through passable space count. Each gets a goal
-parked in clear, known space (goal_standoff_m from the unknown, away from obstacles) near
-it, facing it, so the controller isn't asked to drive into clutter at the map's edge. The
-explorer drives to the nearest one and repeats. Spots reached are not revisited and goals
-that fail are blacklisted for the session. When no frontier is left (or on request) it
-returns to where it started. Nav2 answers that never come don't stall it: a goal request not
+grouped; only groups connected to the robot through space Nav2 can plan the robot's centre
+through (below "inscribed") count; groups longer than frontier_split_m are cut into pieces. Each
+gets a goal parked in clear, known space
+(goal_standoff_m from the unknown, away from obstacles) near it, facing it, so the controller
+isn't asked to drive into clutter at the map's edge; where there is no such spot (narrow
+passages), the best reachable cell near it that is still below inscribed (goal_cost_weight
+trades distance against cost). The explorer drives to the nearest one and repeats. At the first
+spot it reaches (away from the dock, which the light bumpers would take for an obstacle while
+turning on it), and before deciding nothing is left, it looks around (Nav2 spin in steps); at other
+spots it reached it turns to face the unknown it came to see (Nav2's goal checker ignores the
+heading). Timeouts run on the node clock (sim time under use_sim_time). Spots
+reached are not revisited; goals that fail are skipped until the map around them opens up
+(a door opened, a person walked away) or, once, before finishing (when it also drops its bump
+marks: someone walking into the robot leaves them too). Frontiers it can't reach
+right now get one closer look from the nearest reachable spot before it gives up on them.
+When no frontier is left it returns to where it started and checks once more there; it ends
+there (or says why not). Nav2 answers that never come don't stall it: a goal request not
 answered within goal_response_timeout_s counts as rejected (a late acceptance is cancelled), and
 a trip home with no result within return_timeout_s as failed.
 
@@ -17,13 +28,19 @@ the firmware drops it to passive), and it returns home when the battery runs low
 visual tracking is recovering it pauses. During exploration the controller's in-place
 turn speed can be lowered (rotate_speed_rps) to keep visual tracking. With auto_keepout,
 a cliff-sensor stop (stairs, or deep carpet that reads like a drop; not a wheel drop) adds
-a keep-out zone just ahead of the robot, in exploring, navigation or manual driving.
+a keep-out zone just ahead of the robot, in exploring, navigation or manual driving. Bump and
+cliff marks never cover the robot itself (mark_clear_radius_m around it stays free), so it can
+still turn and back away.
 
 Subscribes: /global_costmap/costmap (OccupancyGrid), /roomba/mode (String), /battery_state,
             /roomba/sensors, /vslam_filter/status (String JSON),
             ~/command (String: "start" | "stop" | "home")
-Publishes:  ~/status (String JSON, transient local), /perception/ignore_zones/command
-Uses:       navigate_to_pose action, /controller_server parameters, TF map -> base frame
+Publishes:  ~/status (String JSON, transient local), /perception/ignore_zones/command,
+            ~/markers (MarkerArray, map frame, transient local; only while someone listens): how it
+            decides where to go - frontier groups, the spots it considered with distance and score
+            (or why it skipped them), the chosen goal with an arrow from where it was chosen, spots
+            to look from, failed and visited spots, keep-out marks it sent, home
+Uses:       navigate_to_pose and spin actions, /controller_server parameters, TF map -> base frame
 """
 import json
 import math
@@ -34,7 +51,9 @@ import numpy as np
 import rclpy
 import rclpy.executors
 from action_msgs.msg import GoalStatus
-from nav2_msgs.action import NavigateToPose
+from builtin_interfaces.msg import Duration
+from geometry_msgs.msg import Point
+from nav2_msgs.action import NavigateToPose, Spin
 from nav_msgs.msg import OccupancyGrid
 from rcl_interfaces.msg import Parameter, ParameterType, ParameterValue
 from rcl_interfaces.srv import GetParameters, SetParameters
@@ -45,6 +64,7 @@ from rclpy.time import Time
 from sensor_msgs.msg import BatteryState
 from std_msgs.msg import String
 from tf2_ros import Buffer, TransformException, TransformListener
+from visualization_msgs.msg import Marker, MarkerArray
 
 ROTATE_PARAM = 'FollowPath.rotate_to_heading_angular_vel'
 # Cliff sensor directions on the Roomba (rad, left positive) for automatic keep-out zones.
@@ -53,6 +73,14 @@ CLIFF_ANGLES = {'cliff_left': 1.05, 'cliff_front_left': 0.35, 'cliff_front_right
 LIGHT_ANGLES = {'light_bump_left_signal': 1.2, 'light_bump_front_left_signal': 0.65,
                 'light_bump_center_left_signal': 0.2, 'light_bump_center_right_signal': -0.2,
                 'light_bump_front_right_signal': -0.65, 'light_bump_right_signal': -1.2}
+# ~/markers colours (r, g, b, a; exact in float32) and goal labels.
+GREEN, BLUE, GREY, PURPLE = (0.0, 1.0, 0.0, 1.0), (0.0, 0.5, 1.0, 1.0), (0.5, 0.5, 0.5, 0.75), (0.75, 0.0, 1.0, 1.0)
+ORANGE, RED_AREA, CYAN = (1.0, 0.5, 0.0, 0.75), (1.0, 0.0, 0.0, 0.25), (0.0, 1.0, 1.0, 0.75)
+YELLOW, RED, WHITE = (1.0, 1.0, 0.0, 1.0), (1.0, 0.0, 0.0, 1.0), (1.0, 1.0, 1.0, 1.0)
+OPTION_COLORS = {'chosen': GREEN, 'option': BLUE, 'skipped': GREY}
+PAUSED = 'Paused: visual tracking is recovering'
+LOOK_REJECTS = 30   # look-around turns Nav2 may reject in a row (its behaviours still inactive) before it gives up
+GOAL_LABELS = {'frontier': 'goal: unmapped area', 'peek': 'goal: closer look', 'home': 'goal: start point'}
 
 try:
     from roomba_msgs.msg import SensorState
@@ -114,12 +142,59 @@ def find_frontiers(grid, free_max, min_cells):
     return groups
 
 
-def frontier_goals(grid, robot_rc, free_max, pass_max, clear_max, min_cells, standoff_cells, search_cells):
+def _nearest(rc, cy, cx, limit_cells):
+    """Index of the cell in rc (N x 2 row, col) nearest to (cy, cx), or None beyond limit_cells."""
+    if not len(rc):
+        return None
+    d2 = (rc[:, 0] - cy) ** 2 + (rc[:, 1] - cx) ** 2
+    i = int(np.argmin(d2))
+    return None if d2[i] > limit_cells ** 2 else i
+
+
+def _best_spot(rc, penalty, cy, cx, limit_cells):
+    """Index of the cell in rc with the lowest distance (cells) to (cy, cx) plus its cost penalty,
+    within limit_cells, or None."""
+    if not len(rc):
+        return None
+    d2 = (rc[:, 0] - cy) ** 2 + (rc[:, 1] - cx) ** 2
+    score = np.where(d2 <= limit_cells ** 2, np.sqrt(d2) + penalty, np.inf)
+    i = int(np.argmin(score))
+    return None if score[i] == np.inf else i
+
+
+def frontier_pieces(cells, split_cells):
+    """A frontier group's cells (np.argwhere order) cut into ceil(extent / split_cells) pieces of
+    equal count along its longer side (split_cells <= 0 or a shorter group: whole)."""
+    n = len(cells)
+    span_r = int(cells[:, 0].max() - cells[:, 0].min())
+    span_c = int(cells[:, 1].max() - cells[:, 1].min())
+    ext = max(span_r, span_c) + 1
+    if split_cells <= 0 or ext <= split_cells:
+        return [cells]
+    k = min(math.ceil(ext / split_cells), n)
+    if span_r > span_c:
+        cells = cells[np.lexsort((cells[:, 1], cells[:, 0]))]
+    else:
+        cells = cells[np.lexsort((cells[:, 0], cells[:, 1]))]
+    return [cells[j * n // k:(j + 1) * n // k] for j in range(k)]
+
+
+def frontier_goals(grid, robot_rc, free_max, pass_max, clear_max, min_cells, standoff_cells, search_cells,
+                   cost_weight=0.0, peek_cells=0.0, groups=None, split_cells=0.0):
     """Reachable frontier groups with a goal cell parked in clear, known space next to each.
 
-    grid: int costmap (-1 unknown, 0..100). robot_rc: (row, col) of the robot.
-    Returns (goals, seed) where goals is a list of (goal_rc, centroid_rc, size) and seed the
-    robot's free cell (None if the robot isn't next to passable space).
+    grid: int costmap (-1 unknown, 0..100; 99 inscribed and 100 lethal: Nav2 never plans the
+    robot's centre there). robot_rc: (row, col) of the robot. A group's goal is the reachable
+    cell nearest to it with cost <= clear_max and standoff_cells from unknown space, within
+    search_cells; failing that (narrow places), with cost_weight > 0, the reachable cell below
+    inscribed (cost <= pass_max, half the standoff) with the lowest distance + cost * cost_weight
+    (cells). Groups the robot can't reach get, with peek_cells > 0, a spot to look at them from:
+    chosen the same way, within peek_cells. Groups longer than split_cells (> 0) are cut into
+    pieces (frontier_pieces), a spot each: one spot failing (a railing the camera misses in the
+    way) doesn't drop a room's whole far side. groups: find_frontiers(grid, free_max, min_cells)
+    if the caller has it already.
+    Returns (goals, seed, peeks): goals and peeks are lists of (goal_rc, piece centroid_rc, group
+    size), seed the robot's free cell (None if the robot isn't next to passable space).
     """
     h, w = grid.shape
     passable = ((grid >= 0) & (grid <= pass_max)).astype(np.uint8)
@@ -135,7 +210,7 @@ def frontier_goals(grid, robot_rc, free_max, pass_max, clear_max, min_cells, sta
             seed = tuple(hits[k] + [r0, c0])
             break
     if seed is None:
-        return [], None
+        return [], None, []
     _, labels = cv2.connectedComponents(passable, connectivity=8)
     reach = labels == labels[seed]
     # Distance (cells) to the nearest unknown cell; outside the grid counts as unknown.
@@ -143,19 +218,31 @@ def frontier_goals(grid, robot_rc, free_max, pass_max, clear_max, min_cells, sta
     d_unknown = cv2.distanceTransform(known, cv2.DIST_L2, 3)[1:-1, 1:-1]
     clear = reach & (grid >= 0) & (grid <= clear_max) & (d_unknown >= standoff_cells)
     clear_rc = np.argwhere(clear)
-    goals = []
-    if not len(clear_rc):
-        return goals, seed
-    for cells, size in find_frontiers(grid, free_max, min_cells):
-        if not reach[cells[:, 0], cells[:, 1]].any():
-            continue          # only seen through a gap the robot can't drive through
-        cy, cx = cells.mean(axis=0)
-        d2 = (clear_rc[:, 0] - cy) ** 2 + (clear_rc[:, 1] - cx) ** 2
-        i = int(np.argmin(d2))
-        if d2[i] > search_cells ** 2:
-            continue          # no clear spot near it to look from
-        goals.append((tuple(clear_rc[i]), (cy, cx), size))
-    return goals, seed
+    if cost_weight > 0:
+        spot = reach & (grid >= 0) & (grid <= pass_max) & (d_unknown >= standoff_cells / 2)
+        spot_rc = np.argwhere(spot)
+        penalty = grid[spot] * cost_weight
+    else:
+        spot_rc, penalty = clear_rc[:0], np.zeros(0)
+    goals, peeks = [], []
+    for cells, size in (find_frontiers(grid, free_max, min_cells) if groups is None else groups):
+        for piece in frontier_pieces(cells, split_cells):
+            cy, cx = piece.mean(axis=0)
+            if reach[piece[:, 0], piece[:, 1]].any():
+                out, limit = goals, search_cells
+            elif peek_cells > 0:
+                out, limit = peeks, peek_cells     # only seen through a gap the robot can't drive through
+            else:
+                continue
+            i = _nearest(clear_rc, cy, cx, limit)
+            if i is not None:
+                out.append((tuple(clear_rc[i]), (cy, cx), size))
+                continue
+            i = _best_spot(spot_rc, penalty, cy, cx, limit)
+            if i is not None:
+                out.append((tuple(spot_rc[i]), (cy, cx), size))
+            # else: no spot near it to look from
+    return goals, seed, peeks
 
 
 class Explorer(Node):
@@ -171,6 +258,14 @@ class Explorer(Node):
         self.clear_max = int(p('goal_cost_max', 15).value)              # goals: well away from obstacles
         self.standoff = float(p('goal_standoff_m', 0.3).value)          # goals this far inside known space
         self.goal_search = float(p('goal_search_radius_m', 0.8).value)  # ... and within this of the frontier
+        # No such spot (a narrow passage): the reachable cell below inscribed with the lowest distance
+        # + cost x this (cells per cost unit; 0 = skip such frontiers).
+        self.cost_weight = float(p('goal_cost_weight', 0.05).value)
+        # Frontiers it can't reach get one look from the nearest reachable spot within this.
+        self.peek_search = float(p('peek_search_m', 3.0).value)         # 0 = never
+        # Frontier groups longer than this get a goal spot per piece of about this length (a
+        # room's far side seen from the doorway); 0 = one spot per group.
+        self.frontier_split = float(p('frontier_split_m', 2.0).value)
         self.min_goal_dist = float(p('min_goal_distance_m', 0.4).value)
         self.blacklist_radius = float(p('blacklist_radius_m', 0.75).value)
         self.visited_radius = float(p('visited_radius_m', 0.6).value)
@@ -185,9 +280,25 @@ class Explorer(Node):
         self.rotate_speed = float(p('rotate_speed_rps', 0.7).value)     # 0 = leave the controller alone
         self.return_home = bool(p('return_home', True).value)
         self.home_tolerance = float(p('home_tolerance_m', 0.5).value)
+        # Trips home when nothing is left: a failed one (a TF hiccup, a bump mark in the way) is
+        # tried again, up to this many in all, before it says it could not drive back.
+        self.home_attempts = max(1, int(p('return_home_attempts', 3).value))
         # A robot briefly boxed in (stale obstacles, tracking recovery) sees no reachable
         # frontier; only call exploring finished after this long with none.
         self.finish_confirm = float(p('finish_confirm_s', 20.0).value)
+        # Look around (Nav2 spin, in steps) before the first goal and before deciding nothing is
+        # left: started facing a wall or with the dock behind it, the camera has seen little.
+        self.look_steps = int(p('look_around_steps', 4).value)          # 0 = never
+        self.look_step = math.radians(float(p('look_around_step_deg', 90.0).value))
+        self.look_timeout = float(p('look_around_timeout_s', 20.0).value)
+        # Nav2's goal checker ignores the final heading here (yaw_goal_tolerance 6.28), so at a spot it
+        # reached it turns to face the unknown it came to see when it is off by more than this
+        # (0 = never).
+        self.face_turn_min = math.radians(float(p('face_frontier_min_deg', 45.0).value))
+        # Failed spots are skipped until the map within blacklist_radius_m of them opens up by at
+        # least this many cells (a door opened, a person walked away: 100+; one flickering railing
+        # post with its inflation: ~37; 0 = never).
+        self.reopen_cells = int(p('blacklist_reopen_cells', 40).value)
         # When a cliff sensor stops the robot (stairs, or deep carpet that reads like a drop),
         # add a keep-out zone there so neither exploring nor navigation tries it again.
         self.auto_keepout = bool(p('auto_keepout', True).value) and SensorState is not None
@@ -201,6 +312,14 @@ class Explorer(Node):
         self.bump_mark_margin = float(p('bump_mark_margin_m', 0.15).value)
         self.bump_mark_spacing = float(p('bump_mark_spacing_m', 0.15).value)
         self.bump_mark_width = float(p('bump_mark_width_m', 0.3).value)
+        # Bump and cliff marks leave the robot's own footprint (plus clearance) free, so Nav2 can
+        # still turn it and back it away (a mark over the robot blocked every move). Footprint
+        # 0.18 m + a mask/costmap cell diagonal (the grids don't line up) + slack: 0.28 m.
+        self.mark_clear = float(p('mark_clear_radius_m', 0.28).value)
+        # ... and carry an "avoid" band this wide beyond their margin: keep-out cells aren't
+        # inflated, so the planner routed the robot's centre along their edge, where the
+        # controller's footprint check then refused to move ("collision ahead").
+        self.mark_soft = float(p('mark_soft_band_m', 0.22).value)
         # Also mark when a front light bumper reads at least this (0-4095; 0 = switches only): thin
         # railing posts set it off right before, or instead of, the switches.
         self.bump_light_min = int(p('bump_light_signal', 0).value)
@@ -223,10 +342,14 @@ class Explorer(Node):
         self.message = 'Ready'
         self.logged_message = None   # last message written to the log
         self.home = None
-        self.goal = None             # (x, y, sent monotonic)
+        self.goal = None             # (x, y, sent (ROS time), kind 'frontier' | 'peek' | 'home', yaw)
+        self.goal_message = ''       # what it said when it sent the goal (shown again after a pause)
+        self.turn = None             # turn (rad) to face the unknown at the spot just reached
         self.goal_handle = None
         self.goal_seq = 0
-        self.blacklist = []
+        self.blacklist = []          # (x, y, passable cells around it when it failed)
+        self.visited = []
+        self.peeked = []
         self.reached = 0
         self.failed = 0
         self.frontier_count = 0
@@ -234,13 +357,29 @@ class Explorer(Node):
         self.sending = None          # (seq, sent monotonic) of the goal request Nav2 hasn't answered
         self.no_frontier_since = None
         self.resume_after_home = False   # went home because nothing was reachable: look again there
-        self.final_check = False
+        self.home_failures = 0       # trips home that failed since something was last reached
+        self.look = None             # [steps left, stop as soon as a frontier shows up] while looking around
+        self.looked_here = False
+        self.look_pending = False    # look around once the first spot is reached
+        self.look_rejects = 0        # look-around turns rejected in a row
+        self.spin = None             # (seq, sent monotonic, accepted) of the look-around turn in progress
+        self.spin_handle = None
+        self.spin_seq = 0
+        # ~/markers: what the last frontier search saw (resolution, frontier cells, spots
+        # considered (x, y, kind, label), spots to look from), where the goal was chosen from,
+        # the keep-out marks sent (kind, name, points, monotonic, ttl s or 0) and the last
+        # markers published.
+        self.viz = None
+        self.goal_from = None
+        self.marks_sent = []
+        self.markers_last = None
 
         self.tf_buffer = Buffer()
         # spin_thread=True would spin this node from a second executor, which races the
         # action client's wait set and kills the TF thread (as in roomba_web).
         self.tf_listener = TransformListener(self.tf_buffer, self, spin_thread=False)
         self.nav = ActionClient(self, NavigateToPose, 'navigate_to_pose')
+        self.spinner = ActionClient(self, Spin, 'spin')
         self.get_params = self.create_client(GetParameters, '/controller_server/get_parameters')
         self.set_params = self.create_client(SetParameters, '/controller_server/set_parameters')
 
@@ -254,6 +393,8 @@ class Explorer(Node):
         if self.auto_keepout or self.bump_marks:
             self.create_subscription(SensorState, '/roomba/sensors', self._on_sensors, 10)
         self.pub_status = self.create_publisher(String, '~/status', latched)
+        # How it decides where to go (only built while someone listens): see _marker_specs.
+        self.pub_markers = self.create_publisher(MarkerArray, '~/markers', latched)
         self.create_timer(1.0, self._tick)
         self._publish_status()
 
@@ -275,7 +416,7 @@ class Explorer(Node):
             self._stop(f'Stopped: the Roomba switched to {msg.data} mode (cliff, wheel drop or carpet?)')
 
     def _on_sensors(self, msg):
-        now = time.monotonic()
+        now = self._now()
         for name in CLIFF_ANGLES:
             if getattr(msg, name, False):
                 self.cliff_seen[name] = now
@@ -297,7 +438,7 @@ class Explorer(Node):
         if self.goal_bumps >= self.bumps_per_goal:
             self.get_logger().warn(f'Bumped {self.goal_bumps} times on the way to a frontier '
                                    '(railing or glass?): skipping it')
-            self._blacklist(self.goal[0], self.goal[1])
+            self._blacklist(self.goal[0], self.goal[1], reopen=False)
             self.failed += 1
             self._cancel_goal()
             self.message = "Kept bumping into something the camera can't see: trying another area"
@@ -314,15 +455,29 @@ class Explorer(Node):
             return   # already marked here
         self.bump_points.append((cx, cy, now))
         name = time.strftime('bump_%H%M%S') + f'_{len(self.bump_points)}'
-        self.pub_zone_cmd.publish(String(data=json.dumps(
-            {'op': 'add', 'kind': 'keepout', 'name': name, 'points': points,
-             'margin': self.bump_mark_margin, 'ttl_s': self.bump_mark_ttl})))
+        cmd = {'op': 'add', 'kind': 'keepout', 'name': name, 'points': points,
+               'margin': self.bump_mark_margin, 'ttl_s': self.bump_mark_ttl}
+        self._clear_robot(cmd, pose)
+        self.pub_zone_cmd.publish(String(data=json.dumps(cmd)))
+        self._sent_mark('bump', name, points, now, self.bump_mark_ttl)
         self.get_logger().info(f'Bumper hit at {math.degrees(bearing):+.0f} deg: marked {name} '
                                f'for {self.bump_mark_ttl / 60:.0f} min')
 
+    def _sent_mark(self, kind, name, points, now, ttl):
+        self.marks_sent.append((kind, name, points, now, ttl))
+        del self.marks_sent[:-50]
+
+    def _clear_robot(self, cmd, pose):
+        """Keep-out command: leave the robot's footprint free (it is standing there), and keep
+        planned paths a robot radius away from the mark (a soft band beyond its margin)."""
+        if self.mark_clear > 0:
+            cmd['clear'] = [round(pose[0], 3), round(pose[1], 3), self.mark_clear]
+        if self.mark_soft > 0:
+            cmd['soft'] = self.mark_soft
+
     def _cliff_keepout(self):
         """The firmware just left safe mode: if a cliff sensor fired, keep out of that spot."""
-        now = time.monotonic()
+        now = self._now()
         if now - self.cliff_seen.get('wheel_drop', -1e9) < 3.0:
             return   # lifted or a wheel dropped: every cliff sensor reads a drop, not a place to avoid
         fired = [n for n in CLIFF_ANGLES if now - self.cliff_seen.get(n, -1e9) < 1.5]
@@ -336,8 +491,10 @@ class Explorer(Node):
                              sum(math.cos(CLIFF_ANGLES[n]) for n in fired))
         points = cliff_zone(pose[0], pose[1], pose[2], bearing)
         name = time.strftime('cliff_%H%M%S')
-        self.pub_zone_cmd.publish(String(data=json.dumps(
-            {'op': 'add', 'kind': 'keepout', 'name': name, 'points': points})))
+        cmd = {'op': 'add', 'kind': 'keepout', 'name': name, 'points': points}
+        self._clear_robot(cmd, pose)
+        self.pub_zone_cmd.publish(String(data=json.dumps(cmd)))
+        self._sent_mark('cliff', name, points, now, 0.0)
         self.get_logger().info(f'Cliff ({", ".join(fired)}): added keep-out zone {name}')
         self.message = f'Cliff sensor stop: added keep-out zone {name}'
 
@@ -385,31 +542,39 @@ class Explorer(Node):
             self.home = pose[:2]
             self.blacklist = []
             self.visited = []
+            self.peeked = []
             self.reached = self.failed = 0
             self.reached_at_retry = -1
         self.no_frontier_since = None
-        self.resume_after_home = self.final_check = False
+        self.resume_after_home = self.looked_here = False
+        self.home_failures = 0
+        # Look around once at the first spot reached, not here: it may be on the dock.
+        self.look_pending = self.look_steps > 0
+        self.look = self.turn = None
         self._slow_turns(True)
         self._set('exploring', 'Looking for unmapped areas…')
         self.get_logger().info(f'Exploration started; home at ({pose[0]:.2f}, {pose[1]:.2f})')
 
     def _stop(self, why):
-        self.resume_after_home = self.final_check = False
+        self.resume_after_home = False
         self._cancel_goal()
+        self._cancel_spin()
         self._slow_turns(False)
         self._set('stopped', why)
         self.get_logger().info(why)
 
     def _go_home(self, why, resume=False):
         self.resume_after_home = resume
+        self._cancel_spin()
         if self.home is None or not self.return_home:
             self._finish('Exploration finished')
             return
         self._cancel_goal()
         self._set('returning', why)
-        self._send_goal(self.home[0], self.home[1], None)
+        self._send_goal(self.home[0], self.home[1], None, 'home')
 
     def _finish(self, why):
+        self._cancel_spin()
         self._slow_turns(False)
         self._set('done', why)
         self.get_logger().info(why)
@@ -420,20 +585,29 @@ class Explorer(Node):
 
     # ---- main loop ----
     def _tick(self):
-        now = time.monotonic()
+        now = self._now()
         if self.sending is not None and now - self.sending[1] > self.response_timeout:
             self._no_response()
+        elif self.spin is not None and now - self.spin[1] > (
+                self.look_timeout + 5.0 if self.spin[2] else self.response_timeout):
+            self.get_logger().warn('Looking around: the turn did not finish' if self.spin[2]
+                                   else 'Looking around: navigation did not answer the turn request')
+            self._cancel_spin()
+            self._look_done()
         elif self.state == 'exploring':
             if self.battery is not None and self.battery < self.low_battery:
                 self._go_home(f'Battery at {self.battery * 100:.0f}%: returning to the start point')
             elif not self.tracking_ok:
-                self.message = 'Paused: visual tracking is recovering'
+                self.message = PAUSED
+            elif self.message == PAUSED:
+                # Tracking is back: say what it is doing again (it kept the goal meanwhile).
+                self.message = self.goal_message if self.goal is not None else 'Looking for unmapped areas…'
             elif self.goal is not None and now - self.goal[2] > self.goal_timeout:
                 self.get_logger().warn('Frontier goal timed out; skipping it')
                 self._blacklist(self.goal[0], self.goal[1])
                 self.failed += 1
                 self._cancel_goal()
-            elif self.goal is None and self.sending is None:
+            elif self.goal is None and self.sending is None and self.spin is None:
                 self._next_frontier()
         elif (self.state == 'returning' and self.goal is not None and self.return_timeout > 0
               and now - self.goal[2] > self.return_timeout):
@@ -441,6 +615,7 @@ class Explorer(Node):
             self._cancel_goal()
             self._returned(False)
         self._publish_status()
+        self._publish_markers()
 
     def _next_frontier(self):
         if self.grid is None:
@@ -454,67 +629,272 @@ class Explorer(Node):
         grid = np.asarray(self.grid.data, dtype=np.int16).reshape(info.height, info.width)
         res, ox, oy = info.resolution, info.origin.position.x, info.origin.position.y
         robot_rc = (int((pose[1] - oy) / res), int((pose[0] - ox) / res))
-        goals, seed = frontier_goals(grid, robot_rc, self.free_max, self.pass_max, self.clear_max,
-                                     self.min_cells, self.standoff / res, self.goal_search / res)
+        viz = self.pub_markers.get_subscription_count() > 0
+        groups = find_frontiers(grid, self.free_max, self.min_cells) if viz else None
+        goals, seed, peeks = frontier_goals(grid, robot_rc, self.free_max, self.pass_max, self.clear_max,
+                                            self.min_cells, self.standoff / res, self.goal_search / res,
+                                            self.cost_weight, self.peek_search / res, groups,
+                                            self.frontier_split / res)
         if seed is None:
             self.message = 'Robot is not in free space on the costmap; waiting…'
             return
+        if self.turn is not None:
+            turn, self.turn = self.turn, None
+            self.message = 'Turning to face the unmapped area…'
+            self._send_spin(turn)
+            return
+        if self.look is not None and not self.look[1]:
+            self.message = 'Looking around…'
+            self._look_step()
+            return
+        self._reopen(grid, res, ox, oy)
         best = None
         candidates = 0
+        options = []                    # for ~/markers: (x, y, kind, label)
         for (gy, gx), (cy, cx), size in goals:
             x, y = ox + (gx + 0.5) * res, oy + (gy + 0.5) * res
             fx, fy = ox + (cx + 0.5) * res, oy + (cy + 0.5) * res
             if self._blacklisted(x, y) or self._visited(x, y):
+                options.append((x, y, 'skipped', 'failed earlier' if self._blacklisted(x, y) else 'looked from here'))
                 continue
             d = math.hypot(x - pose[0], y - pose[1])
             if d < self.min_goal_dist:
                 # Already standing here and the camera still can't fill it in: don't come back.
                 self.visited.append((x, y))
+                options.append((x, y, 'skipped', 'here already'))
                 continue
             candidates += 1
             # Prefer near frontiers, but let bigger ones win over slightly nearer small ones.
             score = d - 0.01 * size
+            options.append((x, y, 'option', f'{d:.1f} m, score {score:.2f}'))
             if best is None or score < best[0]:
                 best = (score, x, y, math.atan2(fy - y, fx - x))   # look at the unknown
+                chosen = len(options) - 1
+        if viz:
+            if best is not None:
+                x, y, _, text = options[chosen]
+                options[chosen] = (x, y, 'chosen', f'chosen: {text}')
+            frontiers = []
+            for cells, _ in groups:
+                xs = (ox + (cells[:, 1] + 0.5) * res).tolist()
+                ys = (oy + (cells[:, 0] + 0.5) * res).tolist()
+                frontiers.append([(px, py, 0.0) for px, py in zip(xs, ys)])
+            self.viz = (res, frontiers, options,
+                        [(ox + (gx + 0.5) * res, oy + (gy + 0.5) * res) for (gy, gx), _, _ in peeks])
         self.frontier_count = candidates
-        if best is None:
-            now = time.monotonic()
-            if self.no_frontier_since is None:
-                self.no_frontier_since = now
-            if now - self.no_frontier_since < self.finish_confirm:
-                self.message = 'No reachable unmapped areas right now; checking again…'
-                return
+        if best is not None:
+            self.look = None
             self.no_frontier_since = None
-            if self.retry_failed and self.blacklist and self.reached != self.reached_at_retry:
-                self.reached_at_retry = self.reached
-                self.get_logger().info(f'No unmapped areas left except {len(self.blacklist)} that failed '
-                                       'earlier: trying those again')
-                self.message = 'Retrying areas that failed earlier…'
-                self.blacklist = []
-                return
-            if self.final_check:
-                self.final_check = False
-                self._finish('Exploration finished: no reachable unmapped areas left'
-                             + (' - back at the start point' if self._near_home() else ''))
-                return
-            self._go_home('Exploration finished: no reachable unmapped areas left', resume=True)
+            _, x, y, yaw = best
+            self.message = f'Heading to an unmapped area {math.hypot(x - pose[0], y - pose[1]):.1f} m away'
+            self._send_goal(x, y, yaw)
+            return
+        now = self._now()
+        if self.no_frontier_since is None:
+            self.no_frontier_since = now
+        if self.look is None and not self.looked_here and self.look_steps > 0:
+            self.look = [self.look_steps, True]
+            self.message = 'No unmapped areas in view: looking around…'
+        if self.look is not None:
+            self._look_step()
+            return
+        peek = self._peek(peeks, pose, res, ox, oy)
+        if peek is not None:
+            d, x, y, yaw = peek
+            self.no_frontier_since = None
+            self.message = f"Taking a closer look at an area it can't reach yet, {d:.1f} m away"
+            self._send_goal(x, y, yaw, 'peek')
+            return
+        if now - self.no_frontier_since < self.finish_confirm:
+            self.message = 'No reachable unmapped areas right now; checking again…'
             return
         self.no_frontier_since = None
-        _, x, y, yaw = best
-        self.message = f'Heading to an unmapped area {math.hypot(x - pose[0], y - pose[1]):.1f} m away'
-        self._send_goal(x, y, yaw)
+        marks = self._bump_marks(now, isolated=True)
+        if self.retry_failed and (self.blacklist or marks) and self.reached != self.reached_at_retry:
+            self.reached_at_retry = self.reached
+            if self.blacklist:
+                self.get_logger().info(f'No unmapped areas left except {len(self.blacklist)} that failed '
+                                       'earlier: trying those again')
+            self._drop_bump_marks(marks)
+            self.message = 'Retrying areas that failed earlier…'
+            self.blacklist = []
+            return
+        # Finish at the start point: go back there and check once more (the map looks different
+        # from there), unless already there; a failed trip there is tried again up to
+        # return_home_attempts in all: without the isolated bump marks (a person's; marks in a row
+        # are a railing or glass the camera misses, and route the trip around it), and before the
+        # last trip without any (people walking into it in a hallway leave rows too).
+        why = 'Exploration finished: no reachable unmapped areas left'
+        if self._near_home():
+            self._finish(f'{why} - back at the start point')
+        elif self.home_failures >= self.home_attempts:
+            self._finish(f'{why} - could not drive back to the start point')
+        else:
+            if self.home_failures:
+                self._drop_bump_marks(self._bump_marks(now, isolated=self.home_failures < self.home_attempts - 1))
+            self._go_home(why, resume=True)
 
-    def _blacklist(self, x, y):
-        self.blacklist.append((x, y))
+    def _bump_marks(self, now, isolated=False):
+        """Bump marks still in force; isolated: only those with no other one within twice the mark
+        width (a railing or glass wall gets bumped and marked along its length; someone walking
+        into the robot leaves single marks)."""
+        marks = [m for m in self.marks_sent if m[0] == 'bump' and (m[4] <= 0 or now - m[3] < m[4])]
+        if not isolated:
+            return marks
+        centres = [(sum(p[0] for p in m[2]) / len(m[2]), sum(p[1] for p in m[2]) / len(m[2])) for m in marks]
+        near = 2.0 * self.bump_mark_width
+        return [m for i, (m, (x, y)) in enumerate(zip(marks, centres))
+                if not any(math.hypot(x - cx, y - cy) < near for j, (cx, cy) in enumerate(centres) if j != i)]
+
+    def _drop_bump_marks(self, marks):
+        """Delete these bump marks: someone walking into the robot leaves them too, and they can
+        close a hallway for bump_mark_ttl_s (what is really there gets bumped and marked again).
+        Before finishing only isolated ones; before trying the trip home again isolated ones, and
+        all of them before the last trip."""
+        if not marks:
+            return
+        for m in marks:
+            self.pub_zone_cmd.publish(String(data=json.dumps({'op': 'delete', 'name': m[1]})))
+        self.marks_sent = [m for m in self.marks_sent if m not in marks]
+        self.bump_points = []
+        self.get_logger().info(f'Removed {len(marks)} bump mark(s) (a person walking into the robot leaves '
+                               'them too): checking again')
+
+    def _peek(self, peeks, pose, res, ox, oy):
+        """The nearest spot to take a closer look at a frontier it can't reach, not tried yet:
+        (distance, x, y, yaw) or None."""
+        best = None
+        for (gy, gx), (cy, cx), size in peeks:
+            x, y = ox + (gx + 0.5) * res, oy + (gy + 0.5) * res
+            fx, fy = ox + (cx + 0.5) * res, oy + (cy + 0.5) * res
+            if self._blacklisted(x, y) or any(math.hypot(x - px, y - py) < self.visited_radius
+                                              for px, py in self.peeked):
+                continue
+            d = math.hypot(x - pose[0], y - pose[1])
+            if d < self.min_goal_dist:
+                self.peeked.append((x, y))    # looking from here already (looked around)
+                continue
+            if best is None or d < best[0]:
+                best = (d, x, y, math.atan2(fy - y, fx - x))
+        if best is not None:
+            self.peeked.append((best[1], best[2]))
+        return best
+
+    def _look_step(self):
+        """The next turn of the look-around, or its end."""
+        if self.look[0] <= 0 or not self.spinner.server_is_ready():
+            self._look_done()
+            return
+        self.look[0] -= 1
+        self._send_spin(self.look_step)
+
+    def _send_spin(self, angle):
+        """A turn in place by angle (rad, + = left) with Nav2's spin behaviour."""
+        if not self.spinner.server_is_ready():
+            return
+        self.spin_seq += 1
+        seq = self.spin_seq
+        self.spin = (seq, self._now(), False)
+        allowance = Duration(sec=int(self.look_timeout),
+                             nanosec=int((self.look_timeout - int(self.look_timeout)) * 1e9))
+        future = self.spinner.send_goal_async(Spin.Goal(target_yaw=float(angle), time_allowance=allowance))
+        future.add_done_callback(lambda f: self._on_spin_response(f, seq))
+
+    def _look_done(self):
+        self.look = None
+        self.looked_here = True
+
+    def _on_spin_response(self, future, seq):
+        handle = future.result()
+        if self.spin is None or self.spin[0] != seq:     # given up on or cancelled meanwhile
+            if handle.accepted:
+                handle.cancel_goal_async()
+            return
+        if not handle.accepted:
+            self.spin = None
+            self.look_rejects += 1
+            if self.look_rejects == 1:
+                self.get_logger().warn('Looking around: navigation rejected the turn')
+            if self.look is not None:
+                if self.look_rejects >= LOOK_REJECTS:
+                    self._look_done()
+                else:
+                    self.look[0] += 1        # Nav2 still starting? that turn again next tick
+            return
+        self.look_rejects = 0
+        self.spin = (seq, self.spin[1], True)
+        self.spin_handle = handle
+        handle.get_result_async().add_done_callback(lambda f: self._on_spin_result(f, seq))
+
+    def _on_spin_result(self, future, seq):
+        if self.spin is None or self.spin[0] != seq:
+            return
+        self.spin, self.spin_handle = None, None
+        if future.result().status != GoalStatus.STATUS_SUCCEEDED:
+            self.get_logger().warn('Looking around: the turn stopped early (obstacle?)')
+            if self.look is not None:
+                self._look_done()
+
+    def _cancel_spin(self):
+        self.look = self.turn = None
+        handle, self.spin_handle, self.spin = self.spin_handle, None, None
+        if handle is not None:
+            handle.cancel_goal_async()
+
+    def _patch(self, grid, res, ox, oy, x, y):
+        """Passable cells (bool, square of blacklist_radius_m) around (x, y); outside the grid: not."""
+        k = int(self.blacklist_radius / res)
+        r0, c0 = int((y - oy) / res) - k, int((x - ox) / res) - k
+        h, w = grid.shape
+        out = np.zeros((2 * k + 1, 2 * k + 1), bool)
+        rr0, rr1 = max(r0, 0), min(r0 + 2 * k + 1, h)
+        cc0, cc1 = max(c0, 0), min(c0 + 2 * k + 1, w)
+        if rr0 < rr1 and cc0 < cc1:
+            sub = grid[rr0:rr1, cc0:cc1]
+            out[rr0 - r0:rr1 - r0, cc0 - c0:cc1 - c0] = (sub >= 0) & (sub <= self.pass_max)
+        return out
+
+    def _grid_array(self):
+        info = self.grid.info
+        if len(self.grid.data) != info.width * info.height:
+            return None
+        return (np.asarray(self.grid.data, dtype=np.int16).reshape(info.height, info.width),
+                info.resolution, info.origin.position.x, info.origin.position.y)
+
+    def _blacklist(self, x, y, reopen=True):
+        """Skip this spot until the map around it opens up (see _reopen); reopen False: only the
+        retry before finishing (the camera can't see what was in the way)."""
+        patch = None
+        if reopen and self.grid is not None and self.reopen_cells > 0:
+            g = self._grid_array()
+            if g is not None:
+                patch = self._patch(*g, x, y)
+        self.blacklist.append((x, y, patch))
+
+    def _reopen(self, grid, res, ox, oy):
+        """Failed spots where the map has opened up since (a door opened, a person walked away):
+        try them again."""
+        if self.reopen_cells <= 0:
+            return
+        keep = []
+        for x, y, patch in self.blacklist:
+            if patch is not None:
+                now_patch = self._patch(grid, res, ox, oy, x, y)
+                if now_patch.shape == patch.shape and int(np.count_nonzero(now_patch & ~patch)) >= self.reopen_cells:
+                    self.get_logger().info(f'The map opened up around an area that failed earlier '
+                                           f'({x:.1f}, {y:.1f}): trying it again')
+                    continue
+            keep.append((x, y, patch))
+        self.blacklist = keep
 
     def _blacklisted(self, x, y):
-        return any(math.hypot(x - bx, y - by) < self.blacklist_radius for bx, by in self.blacklist)
+        return any(math.hypot(x - b[0], y - b[1]) < self.blacklist_radius for b in self.blacklist)
 
     def _visited(self, x, y):
         return any(math.hypot(x - vx, y - vy) < self.visited_radius for vx, vy in self.visited)
 
     # ---- navigation ----
-    def _send_goal(self, x, y, yaw):
+    def _send_goal(self, x, y, yaw, kind='frontier'):
         pose = self._pose()
         if yaw is None:
             yaw = pose[2] if pose is not None else 0.0
@@ -526,7 +906,9 @@ class Explorer(Node):
         goal.pose.pose.orientation.w = math.cos(yaw / 2.0)
         self.goal_seq += 1
         seq = self.goal_seq
-        self.goal = (x, y, time.monotonic())
+        self.goal = (x, y, self._now(), kind, yaw)
+        self.goal_message = self.message
+        self.goal_from = (pose[0], pose[1]) if pose is not None else None
         self.goal_bumps = 0
         self.sending = (seq, self.goal[2])
         future = self.nav.send_goal_async(goal)
@@ -578,12 +960,26 @@ class Explorer(Node):
         if self.state != 'exploring':
             return
         if status == GoalStatus.STATUS_SUCCEEDED:
+            self.looked_here = False         # somewhere new: look around here before giving up
+            if self.look_pending:
+                self.look_pending = False
+                self.look = [self.look_steps, False]
+            elif goal is not None and self.face_turn_min > 0:
+                pose = self._pose()
+                if pose is not None:
+                    d = goal[4] - pose[2]
+                    d = math.atan2(math.sin(d), math.cos(d))
+                    if abs(d) > self.face_turn_min:
+                        self.turn = d        # face the unknown it came to see
+            if goal is not None and goal[3] == 'peek':
+                return
             self.reached += 1
+            self.home_failures = 0
             if goal is not None:
                 # Looked from here once; if the camera couldn't fill it in, don't come back.
                 self.visited.append((goal[0], goal[1]))
-        elif goal is not None:
-            # Unreachable or no progress: don't try this spot again.
+        elif goal is not None and goal[3] != 'peek':
+            # Unreachable or no progress: skip this spot (until the map around it opens up).
             self.failed += 1
             self._blacklist(goal[0], goal[1])
 
@@ -591,9 +987,11 @@ class Explorer(Node):
         """The trip home ended, at the start point (home) or not."""
         why = self.message   # why it went home (finished, low battery, request)
         if self.resume_after_home:
-            # The map looks different from elsewhere: check once more before finishing.
+            # The map looks different from here: check once more before finishing.
             self.resume_after_home = False
-            self.final_check = True
+            self.home_failures = 0 if home else self.home_failures + 1
+            self.looked_here = False
+            self.no_frontier_since = None
             self._set('exploring', 'Back at the start point; checking for unmapped areas again…' if home
                       else 'Could not reach the start point; checking for unmapped areas again from here…')
             return
@@ -606,10 +1004,20 @@ class Explorer(Node):
         if handle is not None:
             handle.cancel_goal_async()
 
+    def _shutdown(self):
+        """Cancel whatever the robot is doing for the explorer (goal, look-around turn)."""
+        self._cancel_goal()
+        self._cancel_spin()
+
     def _near_home(self):
         pose = self._pose()
         return (pose is not None and self.home is not None
                 and math.hypot(pose[0] - self.home[0], pose[1] - self.home[1]) <= self.home_tolerance)
+
+    def _now(self):
+        """The node clock in seconds: ROS time (sim time under use_sim_time), so timeouts about the
+        robot's progress don't fire early when a simulation runs slower than real time."""
+        return self.get_clock().now().nanoseconds * 1e-9
 
     def _pose(self):
         try:
@@ -654,6 +1062,76 @@ class Explorer(Node):
             'home': [round(v, 2) for v in self.home] if self.home else None,
             'goal': [round(self.goal[0], 2), round(self.goal[1], 2)] if self.goal else None})))
 
+    def _marker_specs(self):
+        """How the explorer decides where to go, for ~/markers: the frontier groups of its last
+        search, the spots it considered there (distance and score, the one it chose, or why it
+        skipped them), spots to look at frontiers it can't reach from, failed spots (and when they
+        are retried), visited spots, the keep-out marks it sent, home, and the goal with an arrow
+        from where it was chosen. A list of (ns, id, type, position, scale, colour, points, text)."""
+        specs, labels = [], []
+        if self.viz is not None:
+            res, frontiers, options, peeks = self.viz
+            for k, points in enumerate(frontiers):
+                specs.append(('frontiers', k, Marker.CUBE_LIST, (0.0, 0.0, 0.0), (res, res, 0.01), ORANGE, points, ''))
+            for k, (x, y, kind, text) in enumerate(options):
+                specs.append(('options', k, Marker.SPHERE, (x, y, 0.05), (0.12, 0.12, 0.12), OPTION_COLORS[kind], [], ''))
+                labels.append((x, y, text))
+            for k, (x, y) in enumerate(peeks):
+                specs.append(('peeks', k, Marker.SPHERE, (x, y, 0.05), (0.12, 0.12, 0.12), PURPLE, [], ''))
+                labels.append((x, y, "can't reach: look from here"))
+        d = 2.0 * self.blacklist_radius
+        for k, (x, y, patch) in enumerate(self.blacklist):
+            specs.append(('failed', k, Marker.CYLINDER, (x, y, 0.01), (d, d, 0.02), RED_AREA, [], ''))
+            labels.append((x, y, 'failed: retry if the map opens up' if patch is not None
+                           else 'failed: retry before finishing'))
+        if self.visited:
+            specs.append(('visited', 0, Marker.SPHERE_LIST, (0.0, 0.0, 0.0), (0.08, 0.08, 0.08), GREY,
+                          [(x, y, 0.05) for x, y in self.visited], ''))
+        now = self._now()
+        marks = [m for m in self.marks_sent if m[4] <= 0 or now - m[3] < m[4]]
+        for k, (kind, name, points, _, _) in enumerate(marks):
+            specs.append(('marks', k, Marker.LINE_STRIP, (0.0, 0.0, 0.0), (0.03, 0.0, 0.0),
+                          YELLOW if kind == 'bump' else RED, [(x, y, 0.03) for x, y in points + points[:1]], ''))
+            labels.append((points[0][0], points[0][1], name))
+        if self.home is not None:
+            specs.append(('home', 0, Marker.CYLINDER, (self.home[0], self.home[1], 0.02), (0.3, 0.3, 0.04), CYAN, [], ''))
+            labels.append((self.home[0], self.home[1], 'home'))
+        if self.goal is not None:
+            x, y, _, kind = self.goal[:4]
+            if self.goal_from is not None:
+                specs.append(('goal', 0, Marker.ARROW, (0.0, 0.0, 0.0), (0.03, 0.08, 0.1), GREEN,
+                              [(self.goal_from[0], self.goal_from[1], 0.1), (x, y, 0.1)], ''))
+            else:
+                specs.append(('goal', 0, Marker.SPHERE, (x, y, 0.1), (0.2, 0.2, 0.2), GREEN, [], ''))
+            labels.append((x, y, GOAL_LABELS[kind]))
+        for k, (x, y, text) in enumerate(labels):
+            specs.append(('labels', k, Marker.TEXT_VIEW_FACING, (x, y, 0.3), (0.0, 0.0, 0.1), WHITE, [], text))
+        return specs
+
+    def _publish_markers(self):
+        """~/markers (after a DELETEALL), when they changed and someone listens."""
+        if self.pub_markers.get_subscription_count() == 0:
+            self.markers_last = None
+            return
+        specs = self._marker_specs()
+        if specs == self.markers_last:
+            return
+        self.markers_last = specs
+        stamp = self.get_clock().now().to_msg()
+        clear = Marker(action=Marker.DELETEALL)
+        clear.header.frame_id, clear.header.stamp = self.map_frame, stamp
+        out = MarkerArray(markers=[clear])
+        for ns, mid, kind, pos, scale, color, points, text in specs:
+            m = Marker(ns=ns, id=mid, type=kind, action=Marker.ADD, text=text)
+            m.header.frame_id, m.header.stamp = self.map_frame, stamp
+            m.pose.position.x, m.pose.position.y, m.pose.position.z = (float(v) for v in pos)
+            m.pose.orientation.w = 1.0
+            m.scale.x, m.scale.y, m.scale.z = (float(v) for v in scale)
+            m.color.r, m.color.g, m.color.b, m.color.a = color
+            m.points = [Point(x=float(px), y=float(py), z=float(pz)) for px, py, pz in points]
+            out.markers.append(m)
+        self.pub_markers.publish(out)
+
 
 def main():
     rclpy.init()
@@ -663,7 +1141,7 @@ def main():
     except (KeyboardInterrupt, rclpy.executors.ExternalShutdownException):
         pass
     finally:
-        node._cancel_goal()
+        node._shutdown()
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()

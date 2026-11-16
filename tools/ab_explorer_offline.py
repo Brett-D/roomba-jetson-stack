@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Exact A/B of explorer: drives the Python node (roomba_perception/explorer.py, its callbacks called
 directly) and the Rust core (examples/explorer_replay.rs) with the same scripted input sequence and
-compares every output in order: status JSON, NavigateToPose goals (frame, position, orientation,
+compares every output in order: status JSON, ~/markers (every marker field; the harness listens, so
+they are built), NavigateToPose goals (frame, position, orientation,
 stamp), cancels, controller parameter get/set requests, keep-out commands, cliff timers and log
 lines, plus the frontier goals computed for every costmap (Q events). Nothing goes through ROS:
 time.monotonic, the node clock and the wall clock (mark names, UTC) follow the script. A scripted
@@ -74,13 +75,27 @@ class Outputs(list):
 # ---- fakes for the node's ROS interfaces ----
 
 class FakePub:
-    KINDS = {'~/status': 'ST', '/perception/ignore_zones/command': 'ZN'}
+    KINDS = {'~/status': 'ST', '/perception/ignore_zones/command': 'ZN', '~/markers': 'MK'}
 
     def __init__(self, topic):
         self.kind = self.KINDS[topic]
 
+    def get_subscription_count(self):
+        return 1   # someone watches ~/markers: they are built and compared too
+
     def publish(self, msg):
-        H.py.append([self.kind, msg.data])
+        if self.kind == 'MK':
+            H.py.append(['MK', [marker_list(m) for m in msg.markers]])
+        else:
+            H.py.append([self.kind, msg.data])
+
+
+def marker_list(m):
+    """A visualization_msgs/Marker as explorer_replay prints it."""
+    p, s, c = m.pose.position, m.scale, m.color
+    return [m.header.frame_id, m.header.stamp.sec * 10**9 + m.header.stamp.nanosec, m.ns, m.id, m.type, m.action,
+            [p.x, p.y, p.z, m.pose.orientation.w], [s.x, s.y, s.z], [f32(c.r), f32(c.g), f32(c.b), f32(c.a)],
+            [[q.x, q.y, q.z] for q in m.points], m.text]
 
 
 class FakeFuture:
@@ -139,17 +154,38 @@ class FakeHandle:
 
 class FakeActionClient:
     def __init__(self, node, action_type, name):
-        assert name == 'navigate_to_pose'
+        assert name in ('navigate_to_pose', 'spin')
+        self.spin = name == 'spin'
 
     def server_is_ready(self):
-        return H.ready['nav']
+        return H.ready['spin' if self.spin else 'nav']
 
     def send_goal_async(self, goal):
+        f = FakeFuture()
+        if self.spin:
+            seq = H.node.spin_seq
+            H.py.append(['SG', seq, f32(goal.target_yaw), goal.time_allowance.sec, goal.time_allowance.nanosec])
+            H.server_spin(seq, f)
+            return f
         seq, p = H.node.goal_seq, goal.pose
         H.py.append(['GL', seq, p.header.frame_id, p.pose.position.x, p.pose.position.y, p.pose.orientation.z,
                      p.pose.orientation.w, p.header.stamp.sec * 10**9 + p.header.stamp.nanosec])
-        f = FakeFuture()
         H.server_goal(seq, p.pose, f)
+        return f
+
+
+class FakeSpinHandle:
+    def __init__(self, seq, accepted):
+        self.seq, self.accepted = seq, accepted
+
+    def cancel_goal_async(self):
+        H.py.append(['SC', self.seq])
+        H.spin_cancel(self.seq)
+        return FakeFuture()
+
+    def get_result_async(self):
+        f = FakeFuture()
+        H.spin_futs[self.seq] = f
         return f
 
 
@@ -228,8 +264,11 @@ class Harness:
         self.t, self.ros = T0, ROS0
         self.py, self.trace, self.heap, self.n = Outputs(), [], [], 0
         self.checks = []   # fn(h) -> list of problems with the outputs (h.py)
-        self.ready = {'nav': True, 'get': True, 'set': True}
+        self.ready = {'nav': True, 'get': True, 'set': True, 'spin': True}
         self.subs, self.tick_cb, self.result_futs = {}, None, {}
+        self.spin_futs, self.spin_entry = {}, {}
+        # Look-around turns: accepted at once and done after 2 s (spin_policy(n, seq) -> spec overrides).
+        self.spin_policy, self.spin_n = None, 0
         self.rs_entry, self.dead = {}, set()
         self.policy, self.goal_n, self.goal_pose = None, 0, {}
         self.param_reply = (3, 1.2, None)
@@ -274,7 +313,7 @@ class Harness:
             elif n not in self.dead:
                 self.dispatch(kind, payload)
         self.ev('X')
-        self.node._cancel_goal()
+        self.node._shutdown()
 
     def dispatch(self, kind, p):
         node = self.node
@@ -309,11 +348,24 @@ class Harness:
             self.subs['/roomba/sensors'](m)
         elif kind == 'NR':
             self.ready.update(p)
-            self.ev('NR', self.ready['nav'], self.ready['get'], self.ready['set'])
+            self.ev('NR', self.ready['nav'], self.ready['get'], self.ready['set'], self.ready['spin'])
         elif kind == 'GR':
             seq, accepted, fut = p
             self.ev('GR', seq, accepted)
             fut.set(FakeHandle(seq, accepted))
+        elif kind == 'SR':
+            seq, accepted, fut = p
+            self.ev('SR', seq, accepted)
+            fut.set(FakeSpinHandle(seq, accepted))
+        elif kind == 'SS':
+            seq, status = p
+            self.spin_entry.pop(seq, None)
+            if callable(status):
+                status = status()
+            self.ev('SS', seq, status)
+            fut = self.spin_futs.pop(seq, None)
+            if fut is not None:
+                fut.set(types.SimpleNamespace(status=status))
         elif kind == 'RS':
             seq, status = p
             self.rs_entry.pop(seq, None)
@@ -366,10 +418,32 @@ class Harness:
         grid = np.asarray(node.grid.data, dtype=np.int16).reshape(info.height, info.width)
         res, ox, oy = info.resolution, info.origin.position.x, info.origin.position.y
         rc = (int((xy[1] - oy) / res), int((xy[0] - ox) / res))
-        goals, seed = E.frontier_goals(grid, rc, node.free_max, node.pass_max, node.clear_max, node.min_cells,
-                                       node.standoff / res, node.goal_search / res)
-        return ['FQ', [[int(g[0][0]), int(g[0][1]), float(g[1][0]), float(g[1][1]), int(g[2])] for g in goals],
-                None if seed is None else [int(seed[0]), int(seed[1])], [rc[0], rc[1]]]
+        goals, seed, peeks = E.frontier_goals(grid, rc, node.free_max, node.pass_max, node.clear_max, node.min_cells,
+                                              node.standoff / res, node.goal_search / res, node.cost_weight,
+                                              node.peek_search / res, split_cells=node.frontier_split / res)
+        lst = lambda gs: [[int(g[0][0]), int(g[0][1]), float(g[1][0]), float(g[1][1]), int(g[2])] for g in gs]  # noqa: E731
+        return ['FQ', lst(goals), None if seed is None else [int(seed[0]), int(seed[1])], [rc[0], rc[1]], lst(peeks)]
+
+    # ---- scripted Spin server (look-around turns) ----
+    def server_spin(self, seq, fut):
+        n, self.spin_n = self.spin_n, self.spin_n + 1
+        spec = self.spin_policy(n, seq) if self.spin_policy else {}
+        resp = spec.get('resp', 0.05)
+        if resp is None:
+            return
+        accept = spec.get('accept', True)
+        self.push(self.t + resp, 1, 'SR', (seq, accept, fut))
+        if accept and spec.get('result', 2.0) is not None:
+            def done(status=spec.get('status', 4)):
+                if status == 4 and self.world is not None:
+                    self.world.publish()      # it looked around: the map may have grown
+                return status
+            self.spin_entry[seq] = self.push(self.t + resp + spec.get('result', 2.0), 1, 'SS', (seq, done))
+
+    def spin_cancel(self, seq):
+        if seq in self.spin_entry:
+            self.dead.add(self.spin_entry.pop(seq))
+        self.spin_entry[seq] = self.push(self.t + 0.1, 1, 'SS', (seq, 5))
 
     # ---- scripted NavigateToPose server ----
     def server_goal(self, seq, pose, fut):
@@ -568,9 +642,10 @@ def periodic_tf(h, t0, t1):
 
 def sc_explore_house(h):
     """Explores the whole house (goals succeed, the robot moves) until nothing is left, goes home
-    and checks again before finishing."""
+    and checks again before finishing - there."""
     start_world(h, house())
     h.policy = moving_policy(h)
+    h.checks = [lambda h: check_final(h), lambda h: check_ends(h, 1)]
     return 1500
 
 
@@ -647,6 +722,8 @@ def sc_railing(h):
     h.inp(0.0, 'CALL', lambda: [h.inp(t, 'S', {}) for t in np.arange(1.1, 1500.0, 1.0)])
     h.inp(1.2, 'S', {'bump_left': True})        # robot_mode not set yet -> no mark
     h.inp(1.4, 'S', {})
+    # Before finishing it drops its bump marks (they may be a person's) and tries again.
+    h.checks = [lambda h: check_marks_clear(h), lambda h: check_logs_any(h, 'bump mark(s) (a person walking')]
     return 1500
 
 
@@ -676,6 +753,8 @@ def sc_cliff(h):
     h.inp(160.0, 'M', 'passive')
     h.inp(170.0, 'CALL', lambda: setattr(h.world, 'slam_ok', True))
     h.inp(171.0, 'M', 'safe')
+    if h.params.get('mark_clear_radius_m', 0.28) > 0:
+        h.checks = [lambda h: check_marks_clear(h)]
     return 200
 
 
@@ -729,14 +808,35 @@ def sc_tf_and_costmap(h):
 
 
 def sc_tracking(h):
-    """Visual tracking recovery pauses exploring; odd status JSON (invalid, NaN, no state)."""
+    """Visual tracking recovery pauses exploring; odd status JSON (invalid, NaN, no state). Once
+    tracking is back the status says what it is doing again (not "Paused" while it drives)."""
     start_world(h, house())
     h.policy = moving_policy(h)
     for t, s in ((10.0, '{"state": "recovering"}'), (20.0, 'not json'), (25.0, '{"state": "idle", "x": NaN}'),
                  (40.0, '{"state": "lost", "y": Infinity}'), (50.0, '{}'), (60.0, '{"state": null}'),
                  (70.0, '{"state": "idle"}')):
         h.inp(t, 'F', s)
+
+    def unpaused(h):
+        bad = [t for o, t in zip(h.py, h.py.t)
+               if o[0] == 'ST' and t - T0 > 72.0 and json.loads(o[1])['message'].startswith('Paused')]
+        return [f'still "Paused" at {bad[0] - T0:.0f} s, after tracking came back at 70 s'] if bad else []
+    h.checks = [unpaused]
     return 300
+
+
+def sc_face_frontier(h):
+    """Goals succeed but the robot arrives turned away from the unknown it came to see (Nav2's goal
+    checker ignores the heading here): it turns to face it with one Nav2 spin of the difference."""
+    start_world(h, house())
+    base = moving_policy(h)
+    h.policy = lambda n, seq, x, y, yaw: base(n, seq, x, y, yaw + 2.5)   # arrives 2.5 rad off
+
+    def turned(h):
+        turns = [o for o in h.py if o[0] == 'SG' and abs(abs(o[2]) - math.pi / 2) > 1e-3]
+        return [] if turns else ['never turned to face the unknown']
+    h.checks = [turned, check_final]
+    return 1500
 
 
 def sc_no_frontiers(h, return_home=True, stay_home=False):
@@ -914,21 +1014,223 @@ def sc_goal_response_late(h):
 
 
 def sc_home_lost(h):
-    """The trip home goes wrong every way, in a flat with nothing to explore: never answered,
-    accepted but never finished (return_timeout_s), rejected, and never answered after a "home"
-    command. Each ends the trip as failed (check again from there, or finish) instead of leaving
-    the explorer "returning" for good."""
+    """The trip home goes wrong every way, in a flat with nothing to explore (after the first run,
+    which ends where it started, the robot is pushed away from where it started after each start):
+    never answered, accepted but never finished (return_timeout_s), and never answered after a
+    "home" command. Each ends the trip as failed (check again from there, then finish saying it
+    couldn't get back) instead of leaving the explorer "returning" for good. One trip home per run
+    (return_home_attempts 1; home_retry covers trying again)."""
+    h.params['return_home_attempts'] = 1
     truth = np.full((80, 100), 100, np.int8)
     truth[2:-2, 2:-2] = 0
     start_world(h, truth, start=(1.0, 1.0, 0.0))
     h.world.known[:] = True
-    answers = [{'resp': None}, {'result': None}, {'accept': False}, {'resp': None}]
+    answers = [{'resp': None}, {'result': None}, {'resp': None}]
     h.policy = lambda n, s, x, y, yaw: answers[n] if n < len(answers) else {'result': 2.0, 'status': 4}
-    for t, c in ((100.0, 'start'), (500.0, 'start'), (600.0, 'start'), (605.0, 'home')):
+    for t, c, away in ((100.0, 'start', (2.5, 1.5, 0.0)), (200.0, 'start', (1.0, 1.0, 0.0)),
+                       (600.0, 'start', (2.5, 1.5, 0.0)), (605.0, 'home', None)):
         h.inp(t, 'C', c)
+        if away:
+            h.inp(t + 0.5, 'CALL', lambda p=away: setattr(h.world, 'pose', p))
     h.checks = [check_gives_up, lambda h: check_ends(h, 4), lambda h: check_longest(h, 'returning', RETURN_TIMEOUT + 2),
-                lambda h: check_logs(h, 'did not answer', 2), lambda h: check_logs(h, 'timed out after', 1)]
-    return 660
+                lambda h: check_logs(h, 'did not answer', 2), lambda h: check_logs(h, 'timed out after', 1),
+                lambda h: check_final(h, (' - back at the start point', ' - could not drive back to the start point'))]
+    return 900
+
+
+def sc_home_retry(h):
+    """Nothing to explore and the robot pushed away from where it started: the trip home is not
+    answered, then aborted (a TF hiccup, something in the way); each time it checks again from
+    where it is and tries again, and the third trip gets there: it ends at the start point."""
+    truth = np.full((80, 100), 100, np.int8)
+    truth[2:-2, 2:-2] = 0
+    start_world(h, truth, start=(1.0, 1.0, 0.0))
+    h.world.known[:] = True
+    fails = [{'resp': None}, {'result': 3.0, 'status': 6}]
+    h.policy = moving_policy(h, fail=lambda n, x, y: fails[n] if n < len(fails) else None)
+    h.inp(2.5, 'CALL', lambda: setattr(h.world, 'pose', (2.5, 1.5, 0.0)))
+    h.checks = [lambda h: check_ends(h, 1), check_final, lambda h: check_logs(h, 'did not answer', 1)]
+    return 400
+
+
+def sc_home_retry_marks(h):
+    """home_retry with two bump marks side by side (a railing the camera misses) made while it
+    looks around: kept for the second trip home (they route it around the railing), dropped before
+    the third."""
+    sc_home_retry(h)
+    for t, x in ((3.0, 2.5), (4.2, 2.75)):
+        h.inp(t - 0.3, 'CALL', lambda x=x: (setattr(h.world, 'pose', (x, 1.5, 0.0)), h.world.publish()))
+        h.inp(t, 'S', {'bump_left': True})
+        h.inp(t + 0.2, 'S', {})
+
+    def kept_then_dropped(h):
+        outs = [o for o in h.py if o[0] in ('GL', 'ZN')]
+        gl = [i for i, o in enumerate(outs) if o[0] == 'GL']
+        dels = [i for i, o in enumerate(outs) if o[0] == 'ZN' and json.loads(o[1]).get('op') == 'delete']
+        if len(dels) != 2:
+            return [f'{len(dels)} marks deleted, expected 2']
+        if len(gl) < 3 or not gl[1] < dels[0] < gl[2]:
+            return ['the marks were not kept for the second trip home and dropped before the third']
+        return []
+    h.checks.append(kept_then_dropped)
+    return 400
+
+
+# ---- twin findings: marks over the robot, look-around, narrow places, transient blockage, home ----
+
+def check_marks_clear(h):
+    """Every keep-out mark leaves the robot's spot free ("clear": [x, y, 0.28])."""
+    marks = [m for o in h.py if o[0] == 'ZN' for m in [json.loads(o[1])] if m.get('op') == 'add']
+    bad = [m['name'] for m in marks if m.get('clear', [None] * 3)[2] != 0.28]
+    return [f'marks without a free circle around the robot: {bad}'] if bad else []
+
+
+def check_final(h, endings=(' - back at the start point',)):
+    """Every finished exploration ended at the start point (or says why not)."""
+    st = statuses(h)
+    ends = [m for a, b in zip(st, st[1:]) if b[1] == 'done' and a[1] != 'done' for m in [b[2]]]
+    bad = [m for m in ends if m.startswith('Exploration finished') and not m.endswith(endings)]
+    return [f'finished without saying where: {bad}'] if bad else []
+
+
+def check_looked(h, minimum):
+    n = sum(1 for o in h.py if o[0] == 'SG')
+    return [] if n >= minimum else [f'{n} look-around turns, expected at least {minimum}']
+
+
+def sc_look_around(h):
+    """Look-around turns answered every way: done, rejected, aborted (collision ahead), never
+    answered, accepted late after being given up on, and a spin server that is not there; a stop
+    in the middle of a turn cancels it. Exploring never stalls and ends at the start point."""
+    start_world(h, house())
+    h.policy = moving_policy(h)
+    kinds = [{}, {}, {'accept': False}, {}, {'status': 6}, {'resp': None}, {}, {'resp': 15.0, 'result': 1.0},
+             {'result': 30.0}, {}]
+    h.spin_policy = lambda n, seq: kinds[n % len(kinds)]
+    h.inp(300.0, 'NR', {'spin': False})
+    h.inp(400.0, 'NR', {'spin': True})
+    h.inp(3.5, 'C', 'stop')
+    h.inp(4.0, 'C', 'start')
+    h.checks = [lambda h: check_looked(h, 6), check_final, lambda h: check_ends(h, 1),
+                lambda h: check_longest(h, 'exploring', 1400)]
+    return 1500
+
+
+def sc_marks_no_clear(h):
+    """mark_clear_radius_m 0: cliff marks without the free circle (as before the fix)."""
+    h.params['mark_clear_radius_m'] = 0.0
+    return sc_cliff(h)
+
+
+def narrow_house(width_cells):
+    """house() with door B (south-west <-> north-west) narrowed to width_cells."""
+    g = house()
+    g[98:100, 30:46] = 100
+    g[98:100, 38 - width_cells // 2:38 - width_cells // 2 + width_cells] = 0
+    return g
+
+
+def sc_narrow_door(h):
+    """Door B only 0.45 m wide (cost ~70 in its middle): reachable through cells below inscribed,
+    goals beyond it from the fallback spot rule; the room behind it gets explored."""
+    start_world(h, narrow_house(9))
+    h.policy = moving_policy(h)
+
+    def visited_sw(h):
+        rs = [json.loads(o[1]) for o in h.py if o[0] == 'ST']
+        goals = [o for o in h.py if o[0] == 'GL']
+        sw = [g for g in goals if g[4] > -1.475 + 100 * RES and g[3] < -2.025 + 118 * RES]
+        return [] if sw and rs else ['never went into the room behind the narrow door']
+    h.checks = [visited_sw, check_final]
+    return 1500
+
+
+def sc_closed_gap_peek(h):
+    """Door B only 0.3 m wide (inscribed: Nav2 can't plan through it): the room behind it, seen
+    through the gap, is not reachable; the explorer takes one closer look from the nearest spot,
+    then finishes at the start point."""
+    start_world(h, narrow_house(6))
+    h.policy = moving_policy(h)
+    h.checks = [lambda h: check_logs_any(h, "Taking a closer look"), check_final, lambda h: check_ends(h, 1)]
+    return 1500
+
+
+def check_logs_any(h, text):
+    n = sum(1 for o in h.py if o[0] == 'LG' and text in o[2])
+    return [] if n else [f'no log line with "{text}"']
+
+
+def sc_transient_block(h):
+    """Something stands in door A for a while (a person: lethal in the costmap), so goals beyond it
+    fail and are skipped; when it goes away the map opens up there and those areas are tried again."""
+    start_world(h, house())
+    h.world.door('A', (40, 56), (118, 120))
+    state = {'n': 0}
+
+    def fail(n, x, y):
+        r, c = h.world.cell(x, y)
+        if c > 120 and state['n'] == 0:
+            state['n'] = 1
+
+            def block():
+                h.world.truth[42:54, 112:126] = 100     # the person's blob, in the camera's view
+                h.world.publish()
+            h.push(h.t + 0.5, 0, 'CALL', block)
+            h.push(h.t + 60.0, 0, 'CALL', lambda: (h.world.truth.__setitem__((slice(42, 54), slice(112, 126)), 0),
+                                                    h.world.set_door('A', False), h.world.publish()))
+            return {'result': 3.0, 'status': 6}
+        return None
+    h.policy = moving_policy(h, fail=fail)
+
+    def east_reached(h):
+        goals = [o for o in h.py if o[0] == 'GL']
+        east = [g for g in goals if g[3] > -2.025 + 125 * RES]
+        return [] if len(east) >= 2 else ['never went east after the blockage cleared']
+    h.checks = [east_reached, check_final]
+    return 1500
+
+
+def sc_long_frontier(h, split=None):
+    """An invisible railing across most of the start room (like a stair railing), open at its west
+    end: the room's far side is seen through it as one long frontier. Spots behind the railing make
+    the robot bump (skipped); the piece of the frontier reached around the railing's end gets the
+    robot to the far side and the room behind door B."""
+    if split is not None:
+        h.params['frontier_split_m'] = split
+    truth = house()
+    start_world(h, truth)
+    h.world.invisible[70:72, 40:118] = True
+    truth[70:72, 40:118] = 100
+
+    def fail(n, x, y):
+        stop = h.world.blocked_by_railing(x, y)
+        if stop is None:
+            return None
+        sx, sy = stop
+
+        def drive():
+            h.world.pose = (sx, sy, math.atan2(y - sy, x - sx))
+            h.world.publish()
+        h.push(h.t + 2.0, 0, 'CALL', drive)
+        for k, side in enumerate(('bump_left', 'bump_right')):
+            h.push(h.t + 2.5 + k, 0, 'S', {side: True})
+            h.push(h.t + 2.7 + k, 0, 'S', {})
+        return {'result': 8.0, 'status': 6}
+    h.policy = moving_policy(h, fail=fail)
+    h.inp(0.0, 'CALL', lambda: [h.inp(t, 'S', {}) for t in np.arange(1.1, 1500.0, 1.0)])
+
+    def behind_door_b(h):
+        goals = [o for o in h.py if o[0] == 'GL']
+        nw = [g for g in goals if g[4] > -1.475 + 100 * RES and g[3] < -2.025 + 118 * RES]
+        return [] if nw else ['never got past the railing into the room behind door B']
+    if split is None:
+        h.checks = [behind_door_b, check_final]
+    return 1500
+
+
+def sc_long_frontier_unsplit(h):
+    """The same with frontier_split_m 0 (one spot per frontier group, as before)."""
+    return sc_long_frontier(h, split=0.0)
 
 
 SCENARIOS = {name[3:]: fn for name, fn in globals().items() if name.startswith('sc_')}
