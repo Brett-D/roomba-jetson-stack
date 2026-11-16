@@ -93,6 +93,8 @@ PAUSED = 'Paused: visual tracking is recovering'
 LOOK_REJECTS = 30   # look-around turns Nav2 may reject in a row (its behaviours still inactive) before it gives up
 GOAL_LABELS = {'frontier': 'goal: unmapped area', 'peek': 'goal: closer look', 'home': 'goal: start point'}
 DROP_CELL_M = 0.05  # lattice (m) of the drop-off cells it remembers, in the map frame
+DROP_TF_WAIT_S = 1.0  # a drop cloud waits this long (s after its stamp) for the transform at its time
+MAX_PENDING_DROPS = 10  # drop clouds waiting for their transform at most (the oldest go first)
 
 try:
     from roomba_msgs.msg import SensorState
@@ -461,6 +463,8 @@ class Explorer(Node):
         self.bump_points = []        # (x, y, monotonic) of recent marks
         self.persons = []            # (time, x, y) in the map frame of people the detector saw lately
         self.drop_hits = {}          # drop-off cell (DROP_CELL_M lattice, map frame) -> clouds with drop points there
+        self.pending_drops = []      # (stamp ns, frame, points) of drop clouds waiting for their transform
+        self.drops_skipped = 0
         self.trap_next = -math.inf   # no trap-breaking mark removal before this time
         self.look_until = -math.inf  # next look-around turn not before this time (look_around_pause_s)
 
@@ -608,16 +612,39 @@ class Explorer(Node):
                    for _, px, py in self.persons)
 
     def _on_drops(self, msg):
-        self._drops(msg.header.frame_id, _cloud_xyz(msg))
+        stamp = msg.header.stamp.sec * 1000000000 + msg.header.stamp.nanosec
+        self._drops(msg.header.frame_id, stamp, _cloud_xyz(msg))
 
-    def _drops(self, frame, points):
-        """Drop points floor_obstacles reports (float32 N x 3), in `frame`: remembered as drop-off
-        cells (a cell counts once per cloud)."""
+    def _drops(self, frame, stamp, points):
+        """Drop points floor_obstacles reports (float32 N x 3), in `frame` at `stamp` (ns, the depth
+        frame's time): remembered as drop-off cells (a cell counts once per cloud), placed with the
+        transform at that time; a cloud whose transform isn't there yet waits for it (up to
+        DROP_TF_WAIT_S), then is skipped."""
         if self.drop_clear <= 0 or not len(points):
             return
-        tf = self._lookup(frame)
-        if tf is None:
+        self.pending_drops.append((stamp, frame, points))
+        del self.pending_drops[:-MAX_PENDING_DROPS]
+        self._apply_drops()
+
+    def _apply_drops(self):
+        """The waiting drop clouds whose transform is there now."""
+        if not self.pending_drops:
             return
+        now = self._now()
+        keep = []
+        for stamp, frame, points in self.pending_drops:
+            tf = self._lookup(frame, stamp)
+            if tf is not None:
+                self._remember_drops(tf, points)
+            elif now - stamp * 1e-9 > DROP_TF_WAIT_S:
+                self.drops_skipped += 1
+                if self.drops_skipped == 1:
+                    self.get_logger().warn('Drop-off points without a transform at their time: skipped')
+            else:
+                keep.append((stamp, frame, points))
+        self.pending_drops = keep
+
+    def _remember_drops(self, tf, points):
         (tx, ty, _), q = tf
         r = _rotation(q)
         p = np.asarray(points, dtype=np.float32).astype(np.float64)
@@ -633,10 +660,10 @@ class Explorer(Node):
         """The drop-off cells (DROP_CELL_M lattice), sorted."""
         return sorted(c for c, n in self.drop_hits.items() if n >= self.drop_min_hits)
 
-    def _lookup(self, frame):
-        """Latest transform frame -> map: ((x, y, z), (qx, qy, qz, qw)) or None."""
+    def _lookup(self, frame, stamp=0):
+        """Transform frame -> map at stamp (ns; 0: the latest): ((x, y, z), (qx, qy, qz, qw)) or None."""
         try:
-            t = self.tf_buffer.lookup_transform(self.map_frame, frame, Time())
+            t = self.tf_buffer.lookup_transform(self.map_frame, frame, Time(nanoseconds=stamp))
         except TransformException:
             return None
         tr, q = t.transform.translation, t.transform.rotation
@@ -829,6 +856,7 @@ class Explorer(Node):
     # ---- main loop ----
     def _tick(self):
         now = self._now()
+        self._apply_drops()
         if self.sending is not None and now - self.sending[1] > self.response_timeout:
             self._no_response()
         elif self.spin is not None and now - self.spin[1] > (

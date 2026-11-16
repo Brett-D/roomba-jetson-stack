@@ -77,6 +77,11 @@ impl Io for RosIo {
         Some((t.transform.translation, t.transform.rotation))
     }
 
+    fn lookup_at(&mut self, target: &str, source: &str, stamp_ns: i64) -> Option<([f64; 3], [f64; 4])> {
+        let t = self.tf.lookup_transform(target, source, stamp_ns).ok()?;
+        Some((t.transform.translation, t.transform.rotation))
+    }
+
     fn nav_ready(&mut self) -> bool {
         self.nav.server_is_available().unwrap_or(false)
     }
@@ -534,7 +539,8 @@ fn main() -> Result<()> {
         "/perception/drops".keep_last(2),
         |s: &mut State, m: sensor_msgs::msg::PointCloud2| {
             let points = cloud_xyz(&m);
-            s.core.on_drops(&m.header.frame_id, &points, &mut s.io)
+            let stamp = m.header.stamp.sec as i64 * 1_000_000_000 + m.header.stamp.nanosec as i64;
+            s.core.on_drops(&m.header.frame_id, stamp, &points, &mut s.io)
         },
     )?;
     let _persons = worker.create_subscription::<vision_msgs::msg::Detection3DArray, _>(

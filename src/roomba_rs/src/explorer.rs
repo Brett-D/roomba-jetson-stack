@@ -26,6 +26,10 @@ const PAUSED: &str = "Paused: visual tracking is recovering";
 const LOOK_REJECTS: i64 = 30;
 /// Lattice (m) of the drop-off cells it remembers, in the map frame.
 const DROP_CELL_M: f64 = 0.05;
+/// A drop cloud waits this long (s after its stamp) for the transform at its time, then is skipped.
+const DROP_TF_WAIT_S: f64 = 1.0;
+/// Drop clouds waiting for their transform at most (the oldest go first).
+const MAX_PENDING_DROPS: usize = 10;
 /// Cliff sensors (SensorState fields) and their direction on the Roomba (rad, left positive).
 pub const CLIFF_ANGLES: [(&str, f64); 4] =
     [("cliff_left", 1.05), ("cliff_front_left", 0.35), ("cliff_front_right", -0.35), ("cliff_right", -1.05)];
@@ -878,6 +882,9 @@ pub trait Io {
     fn now(&mut self) -> f64;
     /// Latest transform `source` -> `target` (translation, quaternion xyzw); None on a TF error.
     fn lookup(&mut self, target: &str, source: &str) -> Option<([f64; 3], [f64; 4])>;
+    /// The transform `source` -> `target` at `stamp_ns` (0: latest), as tf2 interpolates it;
+    /// None on a TF error (not there yet, or older than the cache).
+    fn lookup_at(&mut self, target: &str, source: &str, stamp_ns: i64) -> Option<([f64; 3], [f64; 4])>;
     fn nav_ready(&mut self) -> bool;
     /// Send a goal; answer with [`Explorer::on_goal_response`] and, if accepted, [`Explorer::on_result`].
     fn send_goal(&mut self, goal: GoalRequest);
@@ -1078,6 +1085,9 @@ pub struct Explorer {
     persons: Vec<(f64, f64, f64)>,
     /// Drop-off cells (DROP_CELL_M lattice in the map frame) -> clouds that had drop points there.
     drop_hits: HashMap<(i64, i64), i64>,
+    /// Drop clouds (stamp ns, frame, points) waiting for the transform at their time.
+    pending_drops: Vec<(i64, String, Vec<[f32; 3]>)>,
+    drops_skipped: u64,
     /// No trap-breaking mark removal before this time.
     trap_next: f64,
     /// Next look-around turn not before this time (look_around_pause_s).
@@ -1139,6 +1149,8 @@ impl Explorer {
             unstuck_missing_logged: false,
             persons: Vec::new(),
             drop_hits: HashMap::new(),
+            pending_drops: Vec::new(),
+            drops_skipped: 0,
             trap_next: f64::NEG_INFINITY,
             look_until: f64::NEG_INFINITY,
         };
@@ -1245,13 +1257,44 @@ impl Explorer {
             .any(|&(_, px, py)| py_hypot(px - x, py - y) <= self.p.person_bump_dist && (px - x) * c + (py - y) * s > 0.0)
     }
 
-    /// Drop points floor_obstacles reports (/perception/drops), in `frame`: remembered as drop-off
-    /// cells (a cell counts once per cloud).
-    pub fn on_drops(&mut self, frame: &str, points: &[[f32; 3]], io: &mut impl Io) {
+    /// Drop points floor_obstacles reports (/perception/drops), in `frame` at `stamp_ns` (the
+    /// depth frame's time): remembered as drop-off cells (a cell counts once per cloud), placed
+    /// with the transform at that time; a cloud whose transform isn't there yet waits for it (up
+    /// to DROP_TF_WAIT_S), then is skipped.
+    pub fn on_drops(&mut self, frame: &str, stamp_ns: i64, points: &[[f32; 3]], io: &mut impl Io) {
         if self.p.drop_clear <= 0.0 || points.is_empty() {
             return;
         }
-        let Some((t, q)) = io.lookup(&self.p.map_frame, frame) else { return };
+        self.pending_drops.push((stamp_ns, frame.to_string(), points.to_vec()));
+        if self.pending_drops.len() > MAX_PENDING_DROPS {
+            self.pending_drops.remove(0);
+        }
+        self.apply_drops(io);
+    }
+
+    /// The waiting drop clouds whose transform is there now (explorer.py _apply_drops).
+    fn apply_drops(&mut self, io: &mut impl Io) {
+        if self.pending_drops.is_empty() {
+            return;
+        }
+        let now = io.now();
+        let mut keep = Vec::new();
+        for (stamp, frame, points) in std::mem::take(&mut self.pending_drops) {
+            match io.lookup_at(&self.p.map_frame, &frame, stamp) {
+                Some((t, q)) => self.remember_drops(t, q, &points),
+                None if now - stamp as f64 * 1e-9 > DROP_TF_WAIT_S => {
+                    self.drops_skipped += 1;
+                    if self.drops_skipped == 1 {
+                        io.log(Level::Warn, "Drop-off points without a transform at their time: skipped".into());
+                    }
+                }
+                None => keep.push((stamp, frame, points)),
+            }
+        }
+        self.pending_drops = keep;
+    }
+
+    fn remember_drops(&mut self, t: [f64; 3], q: [f64; 4], points: &[[f32; 3]]) {
         let r = rotation(q);
         let mut cells = std::collections::BTreeSet::new();
         for p in points {
@@ -1530,6 +1573,7 @@ impl Explorer {
     /// The 1 s timer.
     pub fn tick(&mut self, io: &mut impl Io) {
         let now = io.now();
+        self.apply_drops(io);
         if let Some(call) = self.unstuck.filter(|c| now - c.sent > self.p.unstuck_call_timeout) {
             io.log(Level::Warn, format!("The unstuck skill did not finish within {:.0} s", self.p.unstuck_call_timeout));
             if call.accepted {
@@ -2836,6 +2880,8 @@ mod tests {
         unstuck_calls: Vec<(u64, Option<(f64, f64)>)>,
         unstuck_cancels: Vec<u64>,
         drops: Vec<Vec<[f32; 3]>>,
+        /// TF known up to this time (ns; 0: always): later stamps aren't there yet.
+        tf_until: i64,
     }
 
     impl Io for TestIo {
@@ -2844,6 +2890,12 @@ mod tests {
         }
         fn lookup(&mut self, _: &str, _: &str) -> Option<([f64; 3], [f64; 4])> {
             Some(([self.pose.0, self.pose.1, 0.0], [0.0, 0.0, (self.yaw / 2.0).sin(), (self.yaw / 2.0).cos()]))
+        }
+        fn lookup_at(&mut self, target: &str, source: &str, stamp_ns: i64) -> Option<([f64; 3], [f64; 4])> {
+            if self.tf_until > 0 && stamp_ns > self.tf_until {
+                return None;
+            }
+            self.lookup(target, source)
         }
         fn nav_ready(&mut self) -> bool {
             true
@@ -3417,8 +3469,8 @@ mod tests {
         // Drop points seen along x = 0.85 m (the map shows floor beyond, up to the frontier at 1.2 m),
         // relative to the robot at (0.35, 1.05).
         let pts: Vec<[f32; 3]> = (1..19).map(|r| [0.5, (r as f64 * 0.1 + 0.05 - 1.05) as f32, 0.1]).collect();
-        e.on_drops("camera", &pts, &mut io);
-        e.on_drops("camera", &pts, &mut io);
+        e.on_drops("camera", 0, &pts, &mut io);
+        e.on_drops("camera", 0, &pts, &mut io);
         assert_eq!(e.drop_cells().len(), 18);
         io.t = 1.0;
         e.on_command("start", &mut io);
@@ -3449,16 +3501,41 @@ mod tests {
         io.ticks(&mut e, 1, 1);
         assert!(io.drops.is_empty(), "nothing remembered yet");
         let pts: Vec<[f32; 3]> = (1..19).map(|r| [0.5, (r as f64 * 0.1 + 0.05 - 1.05) as f32, 0.1]).collect();
-        e.on_drops("camera", &pts, &mut io);
+        e.on_drops("camera", 0, &pts, &mut io);
         io.ticks(&mut e, 2, 2);
         assert!(io.drops.is_empty(), "a cell counts after drop_min_hits clouds");
-        e.on_drops("camera", &pts, &mut io);
+        e.on_drops("camera", 0, &pts, &mut io);
         io.ticks(&mut e, 3, 5);
         assert_eq!(io.drops.len(), 3);
         assert!(io.drops.iter().all(|d| d == &io.drops[0]));
         let first = &io.drops[0];
         assert_eq!(first.len(), 18);
         assert!(first.iter().all(|q| q[0] == first[0][0] && q[2] == 0.0), "{first:?}");
+    }
+
+    #[test]
+    fn drop_clouds_wait_for_the_transform_at_their_time() {
+        // A cloud newer than the TF waits for it (each cloud and each tick tries again); one
+        // still without it 1 s after its stamp is skipped (warned once).
+        let mut io = TestIo { tf_until: 1_000_000_000, ..Default::default() };
+        let mut p = Params::load(&mut crate::watchdog::Defaults).unwrap();
+        p.look_steps = 0;
+        p.drop_min_hits = 1;
+        let mut e = open_room(&mut io, p);
+        io.t = 1.2;
+        e.on_drops("camera", 1_100_000_000, &[[0.5, 0.0, 0.1]], &mut io);
+        assert!(e.drop_cells().is_empty(), "waits for the transform at 1.1 s");
+        io.tf_until = 2_000_000_000;
+        io.ticks(&mut e, 2, 2);
+        assert_eq!(e.drop_cells().len(), 1);
+        e.on_drops("camera", 2_500_000_000, &[[0.5, 0.5, 0.1]], &mut io);
+        io.ticks(&mut e, 3, 3);
+        assert_eq!(e.drop_cells().len(), 1, "0.5 s after its stamp: still waiting");
+        io.ticks(&mut e, 4, 4);
+        assert_eq!(io.warnings("without a transform at their time"), 1);
+        io.tf_until = 0;
+        io.ticks(&mut e, 5, 5);
+        assert_eq!(e.drop_cells().len(), 1, "skipped for good");
     }
 
     #[test]

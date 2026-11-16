@@ -6,7 +6,7 @@
 //!   ["M", t, ros, mode] / ["B", t, ros, percentage|null] / ["F", t, ros, filter_status] / ["C", t, ros, command]
 //!   ["S", t, ros, bump_left, bump_right, wheel_drop_left, wheel_drop_right, [cliff x4], [light x6]]
 //!   ["K", t, ros] 1 s tick / ["CT", t, ros] cliff check timer
-//!   ["DR", t, ros, frame, [[x, y, z], ...]] drop points (float32) / ["PD", t, ros, frame, [[x, y, z], ...]] people seen
+//!   ["DR", t, ros, frame, [[x, y, z], ...], stamp_ns] drop points (float32) / ["PD", t, ros, frame, [[x, y, z], ...]] people seen
 //!   ["NR", t, ros, nav_ready, get_params_ready, set_params_ready(, spin_ready)]   server availability
 //!   ["GR", t, ros, seq, accepted] / ["RS", t, ros, seq, status]       NavigateToPose responses
 //!   ["SR", t, ros, seq, accepted] / ["SS", t, ros, seq, status]       Spin (look-around) responses
@@ -69,6 +69,10 @@ impl<W: Write> Io for Replay<W> {
     }
     fn lookup(&mut self, target: &str, source: &str) -> Option<([f64; 3], [f64; 4])> {
         let t = self.tf.lookup_transform(target, source, 0).ok()?;
+        Some((t.transform.translation, t.transform.rotation))
+    }
+    fn lookup_at(&mut self, target: &str, source: &str, stamp_ns: i64) -> Option<([f64; 3], [f64; 4])> {
+        let t = self.tf.lookup_transform(target, source, stamp_ns).ok()?;
         Some((t.transform.translation, t.transform.rotation))
     }
     fn nav_ready(&mut self) -> bool {
@@ -275,7 +279,7 @@ fn main() -> anyhow::Result<()> {
             "CT" => core.cliff_check(&mut io),
             "DR" => {
                 let pts: Vec<[f32; 3]> = points(&e).iter().map(|p| [p[0] as f32, p[1] as f32, p[2] as f32]).collect();
-                core.on_drops(e[3].as_str().unwrap(), &pts, &mut io);
+                core.on_drops(e[3].as_str().unwrap(), e[5].as_i64().unwrap_or(0), &pts, &mut io);
             }
             "PD" => core.on_persons(e[3].as_str().unwrap(), &points(&e), &mut io),
             "NR" => io.ready = [b(&e[3]), b(&e[4]), b(&e[5]), e.get(6).map_or(io.ready[3], b)],

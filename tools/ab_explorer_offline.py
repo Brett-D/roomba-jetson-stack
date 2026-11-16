@@ -62,11 +62,12 @@ def f32(v):
     return float(np.float32(v))
 
 
-def cloud_msg(frame, pts):
-    """PointCloud2 of float32 x, y, z (as floor_obstacles publishes it)."""
+def cloud_msg(frame, pts, stamp=0):
+    """PointCloud2 of float32 x, y, z (as floor_obstacles publishes it), stamped stamp (ns)."""
     msg = PointCloud2(height=1, width=len(pts), is_dense=True, is_bigendian=False, point_step=12,
                       row_step=12 * len(pts))
     msg.header.frame_id = frame
+    msg.header.stamp.sec, msg.header.stamp.nanosec = divmod(int(stamp), 10**9)
     msg.fields = [PointField(name=n, offset=4 * i, datatype=PointField.FLOAT32, count=1) for i, n in enumerate('xyz')]
     msg.data = np.ascontiguousarray(pts, dtype=np.float32).tobytes()
     return msg
@@ -413,10 +414,11 @@ class Harness:
             self.ev('CT')
             p()
         elif kind == 'DR':
-            frame, pts = p
+            frame, pts, *stamp = p    # stamp (ns): the acquisition time, default now
+            stamp = stamp[0] if stamp else self.ros
             arr = np.asarray(pts, dtype=np.float32).reshape(-1, 3)
-            self.ev('DR', frame, [[float(v) for v in row] for row in arr])
-            self.subs['/perception/drops'](cloud_msg(frame, arr))
+            self.ev('DR', frame, [[float(v) for v in row] for row in arr], int(stamp))
+            self.subs['/perception/drops'](cloud_msg(frame, arr, stamp))
         elif kind == 'PD':
             frame, pts = p
             self.ev('PD', frame, [[float(v) for v in q] for q in pts])
@@ -1300,6 +1302,34 @@ def sc_drop_void(h):
         return [f'goals past the drop: {[(round(o[3], 2), round(o[4], 2)) for o in bad]}'] if bad else []
     h.checks = [stayed_out, check_final]
     return 1500
+
+
+def sc_drop_stamps(h):
+    """Drop clouds are placed with the transform at their stamp: two clouds stamped before the
+    robot was moved (they arrive after its new pose is on TF) land where it stood then; two newer
+    than the TF wait for it; one older than the TF cache is skipped (one warning)."""
+    start_world(h, house(), cmd_at=None)
+    a, b = (0.5, 0.5, 0.3), (2.0, 0.6, 1.2)
+    ahead = [(0.6, y, 0.1) for y in (-0.2, -0.1, 0.0, 0.1, 0.2)]
+    h.inp(10.3, 'CALL', lambda: (setattr(h.world, 'pose', b), h.world.publish()))
+    for t in (10.5, 10.6):    # stamped at 10 s, when TF had the robot at a
+        h.inp(t, 'CALL', lambda: h.dispatch('DR', ('base_link', ahead, ROS0 + 10 * 10**9)))
+    for t in (20.5, 20.6):    # stamped 20.9 s: TF has it at 21 s
+        h.inp(t, 'CALL', lambda: h.dispatch('DR', ('base_link', [(0.0, 1.0, 0.1)], ROS0 + 20_900_000_000)))
+    h.inp(30.5, 'CALL', lambda: h.dispatch('DR', ('base_link', [(0.0, -1.0, 0.1)], ROS0 + 5 * 10**9)))
+
+    def xy(pose, pts):
+        c, s = math.cos(pose[2]), math.sin(pose[2])
+        return [(pose[0] + px * c - py * s, pose[1] + px * s + py * c) for px, py, _ in pts]
+
+    def placed_then(h):
+        want = xy(a, ahead) + xy(b, [(0.0, 1.0, 0.1)])
+        got = h.node._drop_cells()
+        near = [any(abs((i + 0.5) * 0.05 - x) <= 0.03 and abs((j + 0.5) * 0.05 - y) <= 0.03 for x, y in want)
+                for i, j in got]
+        return [] if len(got) == len(want) and all(near) else [f'drop cells {got}, expected at {want}']
+    h.checks = [placed_then, lambda h: check_logs(h, 'without a transform at their time', 1)]
+    return 60
 
 
 def sc_people_bump(h):
