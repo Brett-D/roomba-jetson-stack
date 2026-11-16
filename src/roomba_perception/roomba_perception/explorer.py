@@ -386,6 +386,8 @@ class Explorer(Node):
         self.look_steps = int(p('look_around_steps', 4).value)          # 0 = never
         self.look_step = math.radians(float(p('look_around_step_deg', 90.0).value))
         self.look_timeout = float(p('look_around_timeout_s', 20.0).value)
+        # Pause after each look-around turn (s): visual tracking catches up while it stands.
+        self.look_pause = float(p('look_around_pause_s', 0.0).value)
         # Nav2's goal checker ignores the final heading here (yaw_goal_tolerance 6.28), so at a spot it
         # reached it turns to face the unknown it came to see when it is off by more than this
         # (0 = never).
@@ -458,6 +460,7 @@ class Explorer(Node):
         self.persons = []            # (time, x, y) in the map frame of people the detector saw lately
         self.drop_hits = {}          # drop-off cell (DROP_CELL_M lattice, map frame) -> clouds with drop points there
         self.trap_next = -math.inf   # no trap-breaking mark removal before this time
+        self.look_until = -math.inf  # next look-around turn not before this time (look_around_pause_s)
 
         self.grid = None
         self.robot_mode = None
@@ -1072,6 +1075,8 @@ class Explorer(Node):
 
     def _look_step(self):
         """The next turn of the look-around, or its end."""
+        if self.look[0] > 0 and self._now() < self.look_until:
+            return   # standing still between turns (look_around_pause_s)
         if self.look[0] <= 0 or not self.spinner.server_is_ready():
             self._look_done()
             return
@@ -1124,6 +1129,8 @@ class Explorer(Node):
             self.get_logger().warn('Looking around: the turn stopped early (obstacle?)')
             if self.look is not None:
                 self._look_done()
+        elif self.look is not None and self.look_pause > 0:
+            self.look_until = self._now() + self.look_pause
 
     def _cancel_spin(self):
         self.look = self.turn = None

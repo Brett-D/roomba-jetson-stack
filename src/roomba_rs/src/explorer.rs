@@ -669,6 +669,7 @@ pub struct Params {
     /// Radians.
     pub look_step: f64,
     pub look_timeout: f64,
+    pub look_pause: f64,
     pub face_turn_min: f64,
     pub reopen_cells: i64,
     pub auto_keepout: bool,
@@ -749,6 +750,8 @@ impl Params {
             look_steps: p.int("look_around_steps", 4)?,
             look_step: p.float("look_around_step_deg", 90.0)?.to_radians(),
             look_timeout: p.float("look_around_timeout_s", 20.0)?,
+            // Pause after each look-around turn (s): visual tracking catches up while it stands.
+            look_pause: p.float("look_around_pause_s", 0.0)?,
             // Nav2's goal checker ignores the final heading here (yaw_goal_tolerance 6.28), so at a
             // spot it reached it turns to face the unknown it came to see when it is off by more
             // than this (0 = never).
@@ -1074,6 +1077,8 @@ pub struct Explorer {
     drop_hits: HashMap<(i64, i64), i64>,
     /// No trap-breaking mark removal before this time.
     trap_next: f64,
+    /// Next look-around turn not before this time (look_around_pause_s).
+    look_until: f64,
 }
 
 const WHEEL_DROP: usize = 4;
@@ -1132,6 +1137,7 @@ impl Explorer {
             persons: Vec::new(),
             drop_hits: HashMap::new(),
             trap_next: f64::NEG_INFINITY,
+            look_until: f64::NEG_INFINITY,
         };
         e.publish_status(io);
         e
@@ -1917,6 +1923,9 @@ impl Explorer {
     /// The next turn of the look-around, or its end.
     fn look_step(&mut self, io: &mut impl Io) {
         let Some((left, early)) = self.look else { return };
+        if left > 0 && io.now() < self.look_until {
+            return; // standing still between turns (look_around_pause_s)
+        }
         if left <= 0 || !io.spin_ready() {
             self.look_done();
             return;
@@ -1983,6 +1992,8 @@ impl Explorer {
             if self.look.is_some() {
                 self.look_done();
             }
+        } else if self.look.is_some() && self.p.look_pause > 0.0 {
+            self.look_until = io.now() + self.p.look_pause;
         }
     }
 
@@ -3405,6 +3416,27 @@ mod tests {
         e2.on_command("start", &mut io2);
         e2.tick(&mut io2);
         assert!(io2.goals[0].x > 0.85, "{:?}", io2.goals[0]);
+    }
+
+    #[test]
+    fn look_around_pauses_between_turns() {
+        let mut io = TestIo { spin_server: true, ..Default::default() };
+        let mut p = Params::load(&mut crate::watchdog::Defaults).unwrap();
+        p.look_pause = 1.5;
+        let mut e = open_room(&mut io, p);
+        io.t = 1.0;
+        e.on_command("start", &mut io);
+        io.ticks(&mut e, 1, 1);
+        e.on_goal_response(io.goals[0].seq, true, &mut io);
+        io.pose = (io.goals[0].x, io.goals[0].y);
+        e.on_result(io.goals[0].seq, STATUS_SUCCEEDED, &mut io);
+        io.ticks(&mut e, 2, 2);
+        assert_eq!(io.spins.len(), 1);
+        turn(&mut io, &mut e, STATUS_SUCCEEDED);
+        io.ticks(&mut e, 3, 3);
+        assert_eq!(io.spins.len(), 1, "standing still for 1.5 s after the turn");
+        io.ticks(&mut e, 4, 4);
+        assert_eq!(io.spins.len(), 2);
     }
 
     #[test]

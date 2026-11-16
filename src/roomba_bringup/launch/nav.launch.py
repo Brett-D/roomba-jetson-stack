@@ -155,6 +155,9 @@ def generate_launch_description():
                           # from it (footprint 0.17 + 0.1 m; keep-out cells aren't inflated, and in
                           # Isaac run 9 it rubbed along the stair railing).
                           'bump_mark_confirmed_margin_m': 0.28,
+                          # Gentle look-around: 0.5 rad/s, a 1.5 s pause after each 90 deg (half of the
+                          # visual tracking losses in Isaac began while turning in place).
+                          'look_around_pause_s': 1.5, 'rotate_speed_rps': 0.5,
                           'frontier_split_m': 2.0,
                           'unstuck_skill': ParameterValue(LaunchConfiguration('unstuck_skill'), value_type=bool),
                           'goal_ranking': LaunchConfiguration('goal_ranking'),

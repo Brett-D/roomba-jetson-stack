@@ -1387,6 +1387,14 @@ def sc_ring_trap(h):
         return [] if len(goals) >= 3 else [f'{len(goals)} goals after the ring opened']
     h.checks = [lambda h: check_logs_any(h, 'Boxed in by its own bump marks'), got_out]
     return 600
+
+
+def sc_look_pause(h):
+    """explore_house with look_around_pause_s 1.5: it stands still after each look-around turn."""
+    h.params['look_around_pause_s'] = 1.5
+    return sc_explore_house(h)
+
+
 SCENARIOS = {name[3:]: fn for name, fn in globals().items() if name.startswith('sc_')}
 
 
