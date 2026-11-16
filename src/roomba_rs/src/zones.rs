@@ -314,15 +314,27 @@ pub struct Mask {
     pub data: Vec<i8>,
 }
 
-/// keepout_mask(): cells covering the polygons plus their margins (`margins[i]` None = `margin`),
-/// with numpy's operations in numpy's order. None without polygons.
-pub fn keepout_mask(polygons: &[Vec<[f64; 2]>], resolution: f64, margin: f64, margins: &[Option<f64>]) -> Option<Mask> {
+/// keepout_mask(): cells covering the polygons plus their margins (`margins[i]` None = `margin`)
+/// keep out (100); within each polygon's free circle `clears[i]` ([x, y, r]: the robot's spot when
+/// it was marked) they are only "avoid" (99), as is a soft band `softs[i]` (None = `soft`) beyond
+/// the margin. numpy's operations in numpy's order. None without polygons.
+pub fn keepout_mask(
+    polygons: &[Vec<[f64; 2]>],
+    resolution: f64,
+    margin: f64,
+    margins: &[Option<f64>],
+    clears: &[Option<[f64; 3]>],
+    softs: &[Option<f64>],
+    soft: f64,
+) -> Option<Mask> {
     if polygons.is_empty() {
         return None;
     }
     let margins: Vec<f64> = margins.iter().map(|m| m.unwrap_or(margin)).collect();
+    let softs: Vec<f64> = (0..polygons.len()).map(|i| softs.get(i).copied().flatten().unwrap_or(soft)).collect();
     let pts: Vec<[f64; 2]> = polygons.iter().flatten().copied().collect();
-    let max_margin = margins.iter().copied().reduce(|a, b| if b > a { b } else { a }).unwrap_or(margin);
+    let max_margin =
+        margins.iter().zip(&softs).map(|(m, s)| m + s).reduce(|a, b| if b > a { b } else { a }).unwrap_or(margin);
     let pad = max_margin + 2.0 * resolution;
     let min = |k: usize| pts.iter().map(|p| p[k]).fold(f64::INFINITY, f64::min);
     let max = |k: usize| pts.iter().map(|p| p[k]).fold(f64::NEG_INFINITY, f64::max);
@@ -332,11 +344,15 @@ pub fn keepout_mask(polygons: &[Vec<[f64; 2]>], resolution: f64, margin: f64, ma
     let xs: Vec<f64> = (0..w).map(|i| ox + (i as f64 + 0.5) * resolution).collect();
     let ys: Vec<f64> = (0..h).map(|i| oy + (i as f64 + 0.5) * resolution).collect();
     let mut blocked = vec![false; w * h];
+    let mut avoid = vec![false; w * h];
     let mut inside = vec![false; w * h];
     let mut near = vec![false; w * h];
-    for (poly, &poly_margin) in polygons.iter().zip(&margins) {
+    let mut band = vec![false; w * h];
+    for (k_poly, (poly, &poly_margin)) in polygons.iter().zip(&margins).enumerate() {
         inside.fill(false);
         near.fill(false);
+        band.fill(false);
+        let poly_soft = softs[k_poly];
         let n = poly.len();
         for k in 0..n {
             let ([x1, y1], [x2, y2]) = (poly[k], poly[(k + 1) % n]);
@@ -353,18 +369,30 @@ pub fn keepout_mask(polygons: &[Vec<[f64; 2]>], resolution: f64, margin: f64, ma
                     }
                     // Distance to this edge for the margin.
                     let t = (((cx - x1) * dx + (cy - y1) * dy) / len2).clamp(0.0, 1.0);
-                    if (cx - (x1 + t * dx)).hypot(cy - (y1 + t * dy)) <= poly_margin {
+                    let d = (cx - (x1 + t * dx)).hypot(cy - (y1 + t * dy));
+                    if d <= poly_margin {
                         near[i] = true;
+                    }
+                    if poly_soft > 0.0 && d <= poly_margin + poly_soft {
+                        band[i] = true;
                     }
                 }
             }
         }
+        let clear = clears.get(k_poly).copied().flatten();
         for i in 0..w * h {
-            blocked[i] |= inside[i] | near[i];
+            let lethal = inside[i] | near[i];
+            let free = clear.is_some_and(|[x, y, r]| (xs[i % w] - x).hypot(ys[i / w] - y) <= r);
+            avoid[i] |= (lethal & free) | band[i];
+            blocked[i] |= lethal & !free;
         }
     }
-    Some(Mask { origin_x: ox, origin_y: oy, width: w, height: h, data: blocked.iter().map(|&b| if b { 100 } else { 0 }).collect() })
+    let data = blocked.iter().zip(&avoid).map(|(&b, &a)| if b { 100 } else if a { SOFT } else { 0 }).collect();
+    Some(Mask { origin_x: ox, origin_y: oy, width: w, height: h, data })
 }
+
+/// Mask value of the "avoid" band: costmap cost 251 (Nav2's planner avoids it but may cross it).
+pub const SOFT: i8 = 99;
 
 // ---- the node's state ----
 
@@ -415,6 +443,11 @@ pub struct Params {
     pub keepout_margin_m: f64,
     pub keepout_resolution_m: f64,
     pub clear_on_start: bool,
+    /// A keep-out zone added without "clear" that reaches the robot leaves this much around it free.
+    pub robot_clear_radius_m: f64,
+    pub base_frame: String,
+    /// "Avoid" band beyond the margin of keep-out zones without their own "soft".
+    pub keepout_soft_band_m: f64,
 }
 
 /// os.path.expanduser for "~" and "~/...".
@@ -449,6 +482,44 @@ fn points_of(v: Option<&Value>) -> Vec<[f64; 2]> {
 
 fn fval(x: f64) -> Value {
     Number::from_f64(x).map_or(Value::Null, Value::Number)
+}
+
+/// ignore_zones.py _clear_of: a zone's free circle [x, y, r], if it is a list of three numbers.
+fn clear_of(z: &Map<String, Value>) -> Option<[f64; 3]> {
+    match z.get("clear") {
+        Some(Value::Array(c)) if c.len() == 3 && c.iter().all(Value::is_number) => Some([num_of(&c[0]), num_of(&c[1]), num_of(&c[2])]),
+        _ => None,
+    }
+}
+
+fn num_of(v: &Value) -> f64 {
+    v.as_f64().unwrap_or(f64::NAN)
+}
+
+/// Ray-casting inside test (ignore_zones.py _point_in).
+fn point_in(poly: &[[f64; 2]], x: f64, y: f64) -> bool {
+    let mut inside = false;
+    for k in 0..poly.len() {
+        let ([x1, y1], [x2, y2]) = (poly[k], poly[(k + 1) % poly.len()]);
+        let dy = if y2 - y1 != 0.0 { y2 - y1 } else { 1e-12 };
+        if (y1 > y) != (y2 > y) && x < (x2 - x1) * (y - y1) / dy + x1 {
+            inside = !inside;
+        }
+    }
+    inside
+}
+
+/// Distance from (x, y) to the polygon's outline (ignore_zones.py _edge_distance, CPython hypot).
+fn edge_distance(poly: &[[f64; 2]], x: f64, y: f64) -> f64 {
+    let mut best = f64::INFINITY;
+    for k in 0..poly.len() {
+        let ([x1, y1], [x2, y2]) = (poly[k], poly[(k + 1) % poly.len()]);
+        let (dx, dy) = (x2 - x1, y2 - y1);
+        let len2 = if dx * dx + dy * dy != 0.0 { dx * dx + dy * dy } else { 1e-12 };
+        let t = (((x - x1) * dx + (y - y1) * dy) / len2).max(0.0).min(1.0);
+        best = best.min(crate::explorer::py_hypot(x - (x1 + t * dx), y - (y1 + t * dy)));
+    }
+    best
 }
 
 /// Python len() of a JSON value and its items as `for p in pts` sees them.
@@ -559,7 +630,10 @@ impl IgnoreZones {
         let polygons: Vec<Vec<[f64; 2]>> = keep.iter().map(|z| points_of(z.get("points"))).collect();
         let margins: Vec<Option<f64>> =
             keep.iter().map(|z| z.get("margin").filter(|m| !m.is_null()).and_then(|m| py_float(m).ok())).collect();
-        keepout_mask(&polygons, self.params.keepout_resolution_m, self.params.keepout_margin_m, &margins)
+        let clears: Vec<Option<[f64; 3]>> = keep.iter().map(|z| clear_of(z)).collect();
+        let softs: Vec<Option<f64>> = keep.iter().map(|z| z.get("soft").filter(|v| v.is_number()).map(num_of)).collect();
+        let p = &self.params;
+        keepout_mask(&polygons, p.keepout_resolution_m, p.keepout_margin_m, &margins, &clears, &softs, p.keepout_soft_band_m)
             .unwrap_or(Mask { origin_x: 0.0, origin_y: 0.0, width: 1, height: 1, data: vec![0] })
     }
 
@@ -618,11 +692,12 @@ impl IgnoreZones {
     }
 
     /// ~/command: "close", "undo", "cancel", "clear" or a JSON op from the web app / explorer.
-    pub fn on_command(&mut self, data: &str, now: f64) -> Vec<Output> {
+    /// `robot`: the robot's position in the map frame (TF), if known.
+    pub fn on_command(&mut self, data: &str, now: f64, robot: Option<[f64; 2]>) -> Vec<Output> {
         let mut out = Vec::new();
         let text = data.trim();
         if text.starts_with('{') {
-            match self.json_command(text, now, &mut out) {
+            match self.json_command(text, now, robot, &mut out) {
                 Ok(()) => self.changed(&mut out),
                 Err(e) => out.push(Output::Log(Level::Warn, format!("Rejected zone command: {e}"))),
             }
@@ -662,7 +737,7 @@ impl IgnoreZones {
 
     /// JSON ops: {"op": "add", "points": [[x, y], ...], "name"?, "kind"?, "margin"?, "ttl_s"?},
     /// {"op": "delete", "name"}, {"op": "rename", "name", "new_name"}, {"op": "clear"}.
-    fn json_command(&mut self, text: &str, now: f64, out: &mut Vec<Output>) -> Result<(), String> {
+    fn json_command(&mut self, text: &str, now: f64, robot: Option<[f64; 2]>, out: &mut Vec<Output>) -> Result<(), String> {
         let cmd: Map<String, Value> = match serde_json::from_str::<Value>(text).map_err(|e| e.to_string())? {
             Value::Object(m) => m,
             other => return Err(format!("'{}' object has no attribute 'get'", type_name(&other))),
@@ -712,6 +787,35 @@ impl IgnoreZones {
                         return Err("ttl_s must be 0..86400".into());
                     }
                     zone.insert("expires".into(), fval(py_round(now + ttl, 1)));
+                }
+                if let Some(s) = cmd.get("soft").filter(|s| !s.is_null()) {
+                    let soft = py_float(s)?;
+                    if !(0.0..=1.0).contains(&soft) {
+                        return Err("soft must be 0..1 m".into());
+                    }
+                    zone.insert("soft".into(), fval(py_round(soft, 3)));
+                }
+                if let Some(c) = cmd.get("clear").filter(|c| !c.is_null()) {
+                    let c = match c {
+                        Value::Array(c) if c.len() == 3 => c,
+                        _ => return Err("clear must be [x, y, radius]".into()),
+                    };
+                    let mut v = [0.0; 3];
+                    for (k, item) in c.iter().enumerate() {
+                        v[k] = py_round(py_float(item)?, 3);
+                    }
+                    if !(v.iter().all(|x| x.is_finite()) && v[0].abs() < 1000.0 && v[1].abs() < 1000.0 && (0.0..=1.0).contains(&v[2])) {
+                        return Err("clear out of range".into());
+                    }
+                    zone.insert("clear".into(), Value::Array(v.iter().map(|&x| fval(x)).collect()));
+                } else if kind == "keepout" && self.params.robot_clear_radius_m > 0.0 {
+                    let margin = zone.get("margin").map_or(self.params.keepout_margin_m, num_of);
+                    let reach = margin + self.params.robot_clear_radius_m + self.params.keepout_resolution_m;
+                    if let Some([x, y]) = robot.filter(|&[x, y]| point_in(&pts, x, y) || edge_distance(&pts, x, y) <= reach) {
+                        let r = self.params.robot_clear_radius_m;
+                        zone.insert("clear".into(), Value::Array(vec![fval(py_round(x, 3)), fval(py_round(y, 3)), fval(r)]));
+                        out.push(Output::Log(Level::Info, format!("Keep-out zone {name} reaches the robot: left {r:.2} m around it free")));
+                    }
                 }
                 self.zones.push(zone);
                 out.push(Output::Log(Level::Info, format!("Added {kind} zone {name} ({} corners)", pts.len())));
@@ -853,16 +957,41 @@ mod tests {
     #[test]
     fn mask_covers_polygon_and_margin() {
         let square = vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
-        let m = keepout_mask(&[square], 0.05, 0.2, &[None]).unwrap();
+        let m = keepout_mask(&[square], 0.05, 0.2, &[None], &[], &[], 0.0).unwrap();
         let at = |x: f64, y: f64| {
             let (c, r) = (((x - m.origin_x) / 0.05) as usize, ((y - m.origin_y) / 0.05) as usize);
             m.data[r * m.width + c]
         };
         assert_eq!((at(0.5, 0.5), at(1.15, 0.5), at(1.3, 0.5)), (100, 100, 0));
-        assert!(keepout_mask(&[], 0.05, 0.2, &[]).is_none());
+        assert!(keepout_mask(&[], 0.05, 0.2, &[], &[], &[], 0.0).is_none());
     }
 
-    fn zones(dir: &str) -> IgnoreZones {
+    #[test]
+    fn mask_leaves_the_robot_free() {
+        // A bump mark 0.18-0.24 m ahead of a robot at the origin facing +x, margin 0.15: without the
+        // free circle the margin reaches 3 cm from the robot's centre.
+        let strip = vec![[0.18, -0.25], [0.24, -0.25], [0.24, 0.25], [0.18, 0.25]];
+        let at = |m: &Mask, x: f64, y: f64| {
+            let (c, r) = (((x - m.origin_x) / 0.05) as usize, ((y - m.origin_y) / 0.05) as usize);
+            m.data[r * m.width + c]
+        };
+        let plain = keepout_mask(&[strip.clone()], 0.05, 0.2, &[Some(0.15)], &[], &[], 0.0).unwrap();
+        assert_eq!(at(&plain, 0.06, 0.0), 100);
+        let m = keepout_mask(&[strip], 0.05, 0.2, &[Some(0.15)], &[Some([0.0, 0.0, 0.22])], &[Some(0.22)], 0.0).unwrap();
+        // No keep-out cell within 0.22 m of the robot (its footprint, 0.17 m, plus clearance) ...
+        for r in 0..m.height {
+            for c in 0..m.width {
+                let (x, y) = (m.origin_x + (c as f64 + 0.5) * 0.05, m.origin_y + (r as f64 + 0.5) * 0.05);
+                assert!(m.data[r * m.width + c] != 100 || x.hypot(y) > 0.22, "cell ({x:.3}, {y:.3}) blocked");
+            }
+        }
+        // ... there they are "avoid", while the strip and the margin beyond still keep out, with an
+        // "avoid" band a robot radius further out.
+        assert_eq!((at(&m, 0.17, 0.0), at(&m, 0.33, 0.0), at(&m, 0.21, 0.3)), (SOFT, 100, 100));
+        assert_eq!((at(&m, 0.26, 0.0), at(&m, 0.55, 0.0), at(&m, 0.70, 0.0)), (100, SOFT, 0));
+    }
+
+    fn zones_with(dir: &str, robot_clear: f64) -> IgnoreZones {
         let file = std::env::temp_dir().join(format!("roomba_rs_zones_{dir}_{}", std::process::id())).join("z.json");
         let _ = std::fs::remove_file(&file);
         let params = Params {
@@ -872,19 +1001,54 @@ mod tests {
             keepout_margin_m: 0.2,
             keepout_resolution_m: 0.05,
             clear_on_start: false,
+            robot_clear_radius_m: robot_clear,
+            base_frame: "base_link".into(),
+            keepout_soft_band_m: 0.0,
         };
         IgnoreZones::new(params).0
+    }
+
+    fn zones(dir: &str) -> IgnoreZones {
+        zones_with(dir, 0.0)
+    }
+
+    #[test]
+    fn keepout_over_the_robot_is_trimmed() {
+        let mut z = zones_with("trim", 0.22);
+        // Explicit circle (explorer marks): kept as sent, rounded.
+        let out = z.on_command(
+            r#"{"op": "add", "kind": "keepout", "name": "bump_1", "points": [[0.18, -0.25], [0.24, -0.25], [0.24, 0.25]], "margin": 0.15, "clear": [0.00049, 0, 0.22]}"#,
+            100.0,
+            Some([5.0, 5.0]),
+        );
+        assert!(out.iter().any(|o| matches!(o, Output::Log(Level::Info, t) if t.starts_with("Added keepout"))), "{out:?}");
+        assert_eq!(z.zones[0]["clear"], serde_json::json!([0.0, 0.0, 0.22]));
+        // No circle, drawn where the robot stands: one is added around it.
+        let out = z.on_command(r#"{"op": "add", "kind": "keepout", "name": "rug", "points": [[-1, -1], [1, -1], [1, 1], [-1, 1]]}"#, 100.0, Some([0.1234, -0.2]));
+        assert!(out.contains(&Output::Log(Level::Info, "Keep-out zone rug reaches the robot: left 0.22 m around it free".into())), "{out:?}");
+        assert_eq!(z.zones[1]["clear"], serde_json::json!([0.123, -0.2, 0.22]));
+        // Far from the robot, or no robot position, or an exclusion zone: untouched.
+        z.on_command(r#"{"op": "add", "kind": "keepout", "name": "far", "points": [[3, 3], [4, 3], [4, 4]]}"#, 100.0, Some([0.0, 0.0]));
+        z.on_command(r#"{"op": "add", "kind": "keepout", "name": "nopose", "points": [[-1, -1], [1, -1], [1, 1]]}"#, 100.0, None);
+        z.on_command(r#"{"op": "add", "name": "people", "points": [[-1, -1], [1, -1], [1, 1]]}"#, 100.0, Some([0.0, 0.0]));
+        assert!(z.zones[2..].iter().all(|zone| !zone.contains_key("clear")));
+        // Bad circles are rejected.
+        for bad in [r#""clear": [1, 2]"#, r#""clear": [1, 2, 1.5]"#, r#""clear": "x""#, r#""clear": [1, 2, "a"]"#] {
+            let out = z.on_command(&format!(r#"{{"op": "add", "kind": "keepout", "points": [[0, 0], [1, 0], [1, 1]], {bad}}}"#), 100.0, None);
+            assert!(matches!(&out[..], [Output::Log(Level::Warn, t)] if t.starts_with("Rejected zone command")), "{bad}: {out:?}");
+        }
+        let _ = std::fs::remove_dir_all(z.zones_file().parent().unwrap());
     }
 
     #[test]
     fn commands_and_expiry() {
         let mut z = zones("cmd");
-        let out = z.on_command(r#"{"op": "add", "kind": "keepout", "name": "bump_1!", "points": [[0, 0], [1, 0], ["1", 1]], "margin": 0.15, "ttl_s": 600}"#, 100.0);
+        let out = z.on_command(r#"{"op": "add", "kind": "keepout", "name": "bump_1!", "points": [[0, 0], [1, 0], ["1", 1]], "margin": 0.15, "ttl_s": 600}"#, 100.0, None);
         assert!(out.contains(&Output::Log(Level::Info, "Added keepout zone bump_1 (3 corners)".into())), "{out:?}");
         assert_eq!(z.zones[0]["expires"], serde_json::json!(700.0));
         let saved = std::fs::read_to_string(z.zones_file()).unwrap();
         assert!(saved.contains("\"zones\": []"), "temporary zones are not saved: {saved}");
-        let rejected = z.on_command(r#"{"op": "add", "points": [[0, 0], [1, 0]]}"#, 100.0);
+        let rejected = z.on_command(r#"{"op": "add", "points": [[0, 0], [1, 0]]}"#, 100.0, None);
         assert_eq!(rejected, vec![Output::Log(Level::Warn, "Rejected zone command: zone needs 3..64 points".into())]);
         assert!(z.expire(699.9).is_empty());
         let out = z.expire(700.0);

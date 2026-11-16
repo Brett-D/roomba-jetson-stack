@@ -214,7 +214,20 @@ def bump_mark(k):
     x, y, a = rng.uniform(-4, 4), rng.uniform(-4, 4), rng.uniform(-math.pi, math.pi)
     pts = [[round(x + u * math.cos(a) - v * math.sin(a), 3), round(y + u * math.sin(a) + v * math.cos(a), 3)]
            for u, v in ((0.0, 0.25), (0.12, 0.25), (0.12, -0.25), (0.0, -0.25))]
-    jcmd(op='add', kind='keepout', name=f'bump_123456_{k}', points=pts, margin=0.15, ttl_s=600.0)
+    kw = {}
+    if rng.random() < 0.5:   # the explorer's marks carry the robot's spot (mark_clear_radius_m)
+        kw['clear'] = [round(x - 0.18 * math.cos(a), 3), round(y - 0.18 * math.sin(a), 3), 0.28]
+    jcmd(op='add', kind='keepout', name=f'bump_123456_{k}', points=pts, margin=0.15, ttl_s=600.0, **kw)
+
+
+def robot_zone(k):
+    """A keep-out zone drawn around (or next to) wherever TF says the robot is."""
+    xy = node._robot_xy() or (0.0, 0.0)
+    off = rng.choice([0.0, 0.2, 0.35, 0.6, 1.5])
+    x, y = xy[0] + off, xy[1]
+    jcmd(op='add', kind='keepout', name=f'over_robot_{k}',
+         points=[[round(x - 0.3, 3), round(y - 0.3, 3)], [round(x + 0.3, 3), round(y - 0.3, 3)],
+                 [round(x + 0.3, 3), round(y + 0.3, 3)]], **({'margin': 0.1} if rng.random() < 0.5 else {}))
 
 
 def cliff_mark():
@@ -259,6 +272,16 @@ ODD_COMMANDS = [
     '{"op": "add", "points": [[0,0],[1,0],[1,1]], "extra": {"a": [1, 2]}}',
     '{"op": "add", "points": ' + json.dumps([[k * 0.01, (k % 2) * 0.5] for k in range(65)]) + '}',
     '{"op": "add", "points": ' + json.dumps([[k * 0.01, (k % 2) * 0.5] for k in range(64)]) + '}',
+    '{"op": "add", "kind": "keepout", "points": [[0,0],[1,0],[1,1]], "clear": [1, 2]}',
+    '{"op": "add", "kind": "keepout", "points": [[0,0],[1,0],[1,1]], "clear": "x"}',
+    '{"op": "add", "kind": "keepout", "points": [[0,0],[1,0],[1,1]], "clear": [1, 2, 1.5]}',
+    '{"op": "add", "kind": "keepout", "points": [[0,0],[1,0],[1,1]], "clear": [1e4, 0, 0.2]}',
+    '{"op": "add", "kind": "keepout", "points": [[0,0],[1,0],[1,1]], "clear": [1, 2, "0.2"]}',
+    '{"op": "add", "kind": "keepout", "points": [[0,0],[1,0],[1,1]], "clear": [true, 0, 0.1]}',
+    '{"op": "add", "kind": "keepout", "points": [[0,0],[1,0],[1,1]], "clear": [1, 2, null]}',
+    '{"op": "add", "kind": "keepout", "points": [[0,0],[1,0],[1,1]], "clear": null}',
+    '{"op": "add", "kind": "keepout", "points": [[0,0],[1,0],[1,1]], "clear": [0.5, 0.25, 0.3]}',
+    '{"op": "add", "points": [[0,0],[1,0],[1,1]], "clear": [0.5, 0.25, 0.3]}',
 ]
 
 
@@ -270,8 +293,10 @@ def random_event(k):
         rand_click()
     elif r < 0.45:
         bump_mark(k)
-    elif r < 0.48:
+    elif r < 0.47:
         cliff_mark()
+    elif r < 0.48:
+        robot_zone(k)
     elif r < 0.6:
         kind = rng.choice([None, 'exclusion', 'keepout', 'keepout'])
         kw = dict(op='add', points=[[round(x, rng.choice([1, 3, 6])), round(y, 4)] for x, y in rand_poly()])
@@ -343,6 +368,9 @@ hand_edited = json.dumps({'frame': 'map', 'note': 'edited by hand', 'zones': [
     {'points': [[4, 4], [5, 4], [5, 5.5]], 'name': 'reordered', 'kind': 'keepout', 'margin': None},
     {'name': 'temp', 'points': [[-1, -1], [-2, -1], [-2, -2]], 'kind': 'keepout', 'expires': now[0] + 5},
     {'name': 'nokind', 'points': [[7, 7], [8, 7], [8, 8], [7.5, 9]]},
+    {'name': 'cleared', 'points': [[0, -3], [1, -3], [1, -2]], 'kind': 'keepout', 'clear': [0.5, -2.8, 0.3]},
+    {'name': 'badclear', 'points': [[2, -3], [3, -3], [3, -2]], 'kind': 'keepout', 'clear': 'x'},
+    {'name': 'boolclear', 'points': [[4, -3], [5, -3], [5, -2]], 'kind': 'keepout', 'clear': [4.5, -2.8, True]},
 ]}, indent=2)
 write_file('s2.zones.json', hand_edited)
 start('s2.zones.json')
@@ -377,8 +405,21 @@ tick(2.0)
 start('s7.zones.json')
 for t in statics:
     tf(t, True)
-for k in range(args.fuzz):
+for k in range(args.fuzz // 2):
     random_event(k)
+
+# the robot's spot stays free: zones drawn around the robot, explorer marks with and without a circle
+start('s8.zones.json', {'robot_clear_radius_m': 0.28})
+for t in statics:
+    tf(t, True)
+feed_tf(200)
+for k in range(12):
+    robot_zone(100 + k)
+    bump_mark(100 + k)
+    feed_tf(rng.randint(1, 30))
+    tick()
+for k in range(args.fuzz - args.fuzz // 2):
+    random_event(1000 + k)
 
 # ---- run Rust and compare ----
 path = os.path.join(args.work, 'events.jsonl')

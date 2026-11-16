@@ -10,7 +10,12 @@ ops from the web app ({"op": "add" | "delete" | "rename" | "clear", ...}). Zones
 Keep-out zones become a Nav2 keep-out filter mask, grown by keepout_margin_m because Nav2
 plans the robot's centre (the Roomba's body reaches 0.17 m beyond it). A zone can carry its
 own "margin", and a "ttl_s": such temporary zones (e.g. bumper hits marked by the explorer)
-expire on their own and are never saved with the map.
+expire on their own and are never saved with the map. A zone's "soft" (or keepout_soft_band_m)
+adds an "avoid" band (mask 99, cost 251) that far beyond the margin, so the planner keeps the
+robot's centre a body radius away from the keep-out cells rather than along their edge. A zone's
+"clear": [x, y, r] makes the cells within r of (x, y) only "avoid" (the explorer's marks: where
+the robot stood); a keep-out zone added without one that reaches the robot gets one around it
+(robot_clear_radius_m), so no zone can trap the robot where it stands.
 
 Zones are stored in the map frame, so they stay valid while the same map database is
 used (mapping session that created it, or later runs with localization:=true). With
@@ -51,18 +56,65 @@ MAX_ZONE_POINTS = 64
 KINDS = ('exclusion', 'keepout')
 
 
-def keepout_mask(polygons, resolution, margin, margins=None):
-    """OccupancyGrid data (row-major, 100 = keep out, 0 = free) covering the polygons plus margin.
+def _point_in(poly, x, y):
+    """Ray-casting inside test, like keepout_mask's."""
+    inside = False
+    for (x1, y1), (x2, y2) in zip(poly, poly[1:] + poly[:1]):
+        if (y1 > y) != (y2 > y) and x < (x2 - x1) * (y - y1) / ((y2 - y1) or 1e-12) + x1:
+            inside = not inside
+    return inside
+
+
+def _edge_distance(poly, x, y):
+    """Distance from (x, y) to the polygon's outline."""
+    best = math.inf
+    for (x1, y1), (x2, y2) in zip(poly, poly[1:] + poly[:1]):
+        dx, dy = x2 - x1, y2 - y1
+        t = min(max(((x - x1) * dx + (y - y1) * dy) / ((dx * dx + dy * dy) or 1e-12), 0.0), 1.0)
+        best = min(best, math.hypot(x - (x1 + t * dx), y - (y1 + t * dy)))
+    return best
+
+
+def _clear_of(zone):
+    """A zone's free circle [x, y, r] (the robot's spot when it was marked), if well formed."""
+    c = zone.get('clear')
+    if isinstance(c, list) and len(c) == 3 and all(
+            isinstance(v, (int, float)) and not isinstance(v, bool) for v in c):
+        return [float(v) for v in c]
+    return None
+
+
+def _soft_of(zone):
+    """A zone's soft band (m), if it has a well-formed one."""
+    s = zone.get('soft')
+    return float(s) if isinstance(s, (int, float)) and not isinstance(s, bool) else None
+
+
+SOFT = 99   # mask value of the soft band: costmap cost 251 (Nav2's planner avoids it, but may cross it)
+
+
+def keepout_mask(polygons, resolution, margin, margins=None, clears=None, softs=None, soft=0.0):
+    """OccupancyGrid data (row-major, 100 = keep out, 99 = avoid, 0 = free) covering the polygons
+    plus margin.
 
     margins: optional per-polygon margins (None entries use `margin`).
+    clears: optional per-polygon [x, y, r]: within r of (x, y) the polygon is only "avoid", never
+    "keep out" (the robot was standing there when it was marked: it must be able to leave).
+    softs: optional per-polygon soft bands (None entries use `soft`): an "avoid" band that far
+    beyond the margin. Keep-out cells aren't inflated by Nav2 (filters come after the inflation
+    layer): the planner, which plans the robot's centre, would route it right along their edge,
+    where the controller's footprint check then sees a collision; the band keeps paths a robot
+    radius away from them.
 
     Returns (origin_x, origin_y, width, height, data) or None when there are no polygons.
     """
     if not polygons:
         return None
     margins = [margin if m is None else m for m in (margins or [None] * len(polygons))]
+    clears = clears or [None] * len(polygons)
+    softs = [soft if s is None else s for s in (softs or [None] * len(polygons))]
     pts = np.array([p for poly in polygons for p in poly], dtype=float)
-    pad = max(margins) + 2 * resolution
+    pad = max(m + s for m, s in zip(margins, softs)) + 2 * resolution
     ox, oy = pts.min(axis=0) - pad
     w = int(math.ceil((pts[:, 0].max() + pad - ox) / resolution))
     h = int(math.ceil((pts[:, 1].max() + pad - oy) / resolution))
@@ -70,11 +122,13 @@ def keepout_mask(polygons, resolution, margin, margins=None):
     ys = oy + (np.arange(h) + 0.5) * resolution
     cx, cy = np.meshgrid(xs, ys)
     blocked = np.zeros((h, w), dtype=bool)
-    for poly, poly_margin in zip(polygons, margins):
+    avoid = np.zeros((h, w), dtype=bool)
+    for poly, poly_margin, clear, poly_soft in zip(polygons, margins, clears, softs):
         p = np.array(poly, dtype=float)
         q = np.roll(p, -1, axis=0)
         inside = np.zeros((h, w), dtype=bool)
         near = np.zeros((h, w), dtype=bool)
+        band = np.zeros((h, w), dtype=bool)
         for (x1, y1), (x2, y2) in zip(p, q):
             # Ray casting for the inside test.
             crosses = ((y1 > cy) != (y2 > cy)) & (cx < (x2 - x1) * (cy - y1) / ((y2 - y1) or 1e-12) + x1)
@@ -82,9 +136,19 @@ def keepout_mask(polygons, resolution, margin, margins=None):
             # Distance to this edge for the margin.
             dx, dy = x2 - x1, y2 - y1
             t = np.clip(((cx - x1) * dx + (cy - y1) * dy) / ((dx * dx + dy * dy) or 1e-12), 0.0, 1.0)
-            near |= np.hypot(cx - (x1 + t * dx), cy - (y1 + t * dy)) <= poly_margin
-        blocked |= inside | near
-    return float(ox), float(oy), w, h, np.where(blocked, 100, 0).astype(np.int8).ravel().tolist()
+            d = np.hypot(cx - (x1 + t * dx), cy - (y1 + t * dy))
+            near |= d <= poly_margin
+            if poly_soft > 0:
+                band |= d <= poly_margin + poly_soft
+        lethal = inside | near
+        if clear is not None:
+            free = np.hypot(cx - clear[0], cy - clear[1]) <= clear[2]
+            avoid |= lethal & free
+            lethal &= ~free
+        blocked |= lethal
+        avoid |= band
+    data = np.where(blocked, 100, np.where(avoid, SOFT, 0))
+    return float(ox), float(oy), w, h, data.astype(np.int8).ravel().tolist()
 
 
 class IgnoreZones(Node):
@@ -97,6 +161,13 @@ class IgnoreZones(Node):
         self.close_dist = float(self.declare_parameter('close_distance_m', 0.25).value)
         self.keepout_margin = float(self.declare_parameter('keepout_margin_m', 0.2).value)
         self.mask_resolution = float(self.declare_parameter('keepout_resolution_m', 0.05).value)
+        # A keep-out zone added over the robot (bumper / cliff marks, a zone drawn where it stands)
+        # would block every move, turning and backing away included: cells within this of the
+        # robot's position (base_frame on TF) when the zone is added stay free (0 = off).
+        self.robot_clear = float(self.declare_parameter('robot_clear_radius_m', 0.0).value)
+        self.base_frame = self.declare_parameter('base_frame', 'base_link').value
+        # "Avoid" band beyond the margin of keep-out zones without their own "soft" (0 = none).
+        self.keepout_soft = float(self.declare_parameter('keepout_soft_band_m', 0.0).value)
 
         self.tf_buffer = Buffer()
         # spin_thread=True spins this node from a second executor; under load it races the main
@@ -168,7 +239,8 @@ class IgnoreZones(Node):
     def _publish_mask(self):
         keep = [z for z in self.zones if z.get('kind') == 'keepout']
         mask = keepout_mask([z['points'] for z in keep], self.mask_resolution, self.keepout_margin,
-                            [z.get('margin') for z in keep])
+                            [z.get('margin') for z in keep], [_clear_of(z) for z in keep],
+                            [_soft_of(z) for z in keep], self.keepout_soft)
         if mask is None:
             # The filter needs a mask; a single free cell means "no keep-out anywhere".
             mask = (0.0, 0.0, 1, 1, [0])
@@ -200,6 +272,14 @@ class IgnoreZones(Node):
         self.draft = []
         self.get_logger().info(f'Added {name}')
         self._changed()
+
+    def _robot_xy(self):
+        """The robot's position in the map frame, or None."""
+        try:
+            tf = self.tf_buffer.lookup_transform(self.map_frame, self.base_frame, Time())
+        except TransformException:
+            return None
+        return tf.transform.translation.x, tf.transform.translation.y
 
     def _on_click(self, msg):
         try:
@@ -244,7 +324,8 @@ class IgnoreZones(Node):
 
     def _on_json_command(self, text):
         """JSON ops from the web app:
-        {"op": "add", "points": [[x, y], ...], "name": "optional", "kind": "exclusion" | "keepout"}
+        {"op": "add", "points": [[x, y], ...], "name": "optional", "kind": "exclusion" | "keepout",
+         "margin"?, "ttl_s"?, "clear"?: [x, y, r]}
         {"op": "delete", "name": "zone_1"}
         {"op": "rename", "name": "zone_1", "new_name": "tv"}
         {"op": "clear"}
@@ -278,6 +359,27 @@ class IgnoreZones(Node):
                     if not 0.0 < ttl <= 86400.0:
                         raise ValueError('ttl_s must be 0..86400')
                     zone['expires'] = round(time.time() + ttl, 1)
+                if cmd.get('soft') is not None:
+                    soft = float(cmd['soft'])
+                    if not 0.0 <= soft <= 1.0:
+                        raise ValueError('soft must be 0..1 m')
+                    zone['soft'] = round(soft, 3)
+                if cmd.get('clear') is not None:
+                    c = cmd['clear']
+                    if not isinstance(c, list) or len(c) != 3:
+                        raise ValueError('clear must be [x, y, radius]')
+                    c = [round(float(v), 3) for v in c]
+                    if not (all(math.isfinite(v) for v in c) and abs(c[0]) < 1000.0 and abs(c[1]) < 1000.0
+                            and 0.0 <= c[2] <= 1.0):
+                        raise ValueError('clear out of range')
+                    zone['clear'] = c
+                elif kind == 'keepout' and self.robot_clear > 0:
+                    robot = self._robot_xy()
+                    reach = (zone.get('margin', self.keepout_margin) + self.robot_clear + self.mask_resolution)
+                    if robot is not None and (_point_in(pts, *robot) or _edge_distance(pts, *robot) <= reach):
+                        zone['clear'] = [round(robot[0], 3), round(robot[1], 3), self.robot_clear]
+                        self.get_logger().info(f'Keep-out zone {name} reaches the robot: left '
+                                               f'{self.robot_clear:.2f} m around it free')
                 self.zones.append(zone)
                 self.get_logger().info(f'Added {kind} zone {name} ({len(pts)} corners)')
             elif op == 'delete':

@@ -86,6 +86,13 @@ fn marker(m: &MarkerSpec, header: &std_msgs::msg::Header) -> visualization_msgs:
 }
 
 impl State {
+    /// The robot's position in the map frame (latest TF), if known.
+    fn robot(&self) -> Option<[f64; 2]> {
+        let p = &self.core.params;
+        let t = self.tf.lookup_transform(&p.map_frame, &p.base_frame, 0).ok()?;
+        Some([t.transform.translation[0], t.transform.translation[1]])
+    }
+
     fn emit(&self, outputs: Vec<Output>) {
         let frame = &self.core.params.map_frame;
         for o in outputs {
@@ -143,6 +150,9 @@ fn main() -> Result<()> {
         keepout_margin_m: d.get("keepout_margin_m", 0.2)?,
         keepout_resolution_m: d.get("keepout_resolution_m", 0.05)?,
         clear_on_start: d.get("clear_on_start", false)?,
+        robot_clear_radius_m: d.get("robot_clear_radius_m", 0.0)?,
+        base_frame: d.get::<Arc<str>>("base_frame", Arc::from("base_link"))?.to_string(),
+        keepout_soft_band_m: d.get("keepout_soft_band_m", 0.0)?,
     };
 
     let latched = || QoSProfile::topics_default().keep_last(1).reliable().transient_local();
@@ -177,7 +187,8 @@ fn main() -> Result<()> {
     let _command = worker.create_subscription::<std_msgs::msg::String, _>(
         "~/command".keep_last(10),
         |s: &mut State, m: std_msgs::msg::String| {
-            let out = s.core.on_command(&m.data, wall());
+            let robot = s.robot();
+            let out = s.core.on_command(&m.data, wall(), robot);
             s.emit(out);
         },
     )?;

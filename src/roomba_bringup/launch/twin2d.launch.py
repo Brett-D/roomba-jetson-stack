@@ -98,7 +98,8 @@ def _setup(context):
              namespace='camera', parameters=[{'use_mag': False, 'publish_tf': False, 'world_frame': 'enu'}],
              remappings=[('imu/data_raw', '/camera/imu/data_raw'), ('imu/data', '/camera/imu/data')]),
         Node(package=pkg, executable='ignore_zones', name='ignore_zones', namespace='perception', output='screen',
-             parameters=[{'zones_file': os.path.join(out_dir, 'zones.json'), 'clear_on_start': True}]),
+             parameters=[{'zones_file': os.path.join(out_dir, 'zones.json'), 'clear_on_start': True,
+                          'robot_clear_radius_m': 0.28, 'base_frame': 'base_link'}]),
     ]
     if lc('driver') == 'true':
         actions.append(Node(package='roomba_driver_rs' if rust else 'roomba_driver', executable='roomba_driver',

@@ -372,6 +372,10 @@ def generate_launch_description():
                 ["'", LaunchConfiguration('database_path'), "'.rsplit('.db', 1)[0] + '.zones.json'"]),
             # Mapping mode deletes the database, so zones drawn on the old map are set aside.
             'clear_on_start': PythonExpression(["'", localization, "' != 'true'"]),
+            # A keep-out zone added over the robot leaves its footprint (0.18 m) + 0.1 m free, so it
+            # can still turn and back away (a bump mark over the robot once blocked every move).
+            'robot_clear_radius_m': 0.28,
+            'base_frame': LaunchConfiguration('base_frame'),
         }],
         # Always on: besides the person detector's exclusion zones it serves the keep-out mask the
         # costmaps use, including the explorer's bump and cliff marks (it once ran only with

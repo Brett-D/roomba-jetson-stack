@@ -41,6 +41,9 @@ fn main() -> anyhow::Result<()> {
                     keepout_margin_m: p["keepout_margin_m"].as_f64().unwrap_or(0.2),
                     keepout_resolution_m: p["keepout_resolution_m"].as_f64().unwrap_or(0.05),
                     clear_on_start: p["clear_on_start"].as_bool().unwrap_or(false),
+                    robot_clear_radius_m: p["robot_clear_radius_m"].as_f64().unwrap_or(0.0),
+                    base_frame: p["base_frame"].as_str().unwrap_or("base_link").into(),
+                    keepout_soft_band_m: p["keepout_soft_band_m"].as_f64().unwrap_or(0.0),
                 };
                 tf = TfBuffer::new();
                 filter_info.push(json!({"type": 0, "topic": "/keepout_filter_mask", "base": 0.0, "multiplier": 1.0, "frame": params.map_frame}));
@@ -64,7 +67,14 @@ fn main() -> anyhow::Result<()> {
                 let p = [ev["p"][0].as_f64().unwrap_or(0.0), ev["p"][1].as_f64().unwrap_or(0.0), ev["p"][2].as_f64().unwrap_or(0.0)];
                 outputs = zones.as_mut().unwrap().on_click(ev["frame"].as_str().unwrap_or(""), p, &tf);
             }
-            "cmd" => outputs = zones.as_mut().unwrap().on_command(ev["text"].as_str().unwrap_or(""), f("now")),
+            "cmd" => {
+                let z = zones.as_mut().unwrap();
+                let robot = tf
+                    .lookup_transform(&z.params.map_frame, &z.params.base_frame, 0)
+                    .ok()
+                    .map(|t| [t.transform.translation[0], t.transform.translation[1]]);
+                outputs = z.on_command(ev["text"].as_str().unwrap_or(""), f("now"), robot)
+            }
             "markers" => outputs = vec![zones.as_ref().unwrap().markers()],
             "expire" => outputs = zones.as_mut().unwrap().expire(f("now")),
             other => anyhow::bail!("unknown event {other}"),
