@@ -21,6 +21,7 @@
 //!             /perception/floor_status (blind depth), /tf(_static)
 //! Publishes:  cmd_vel_nav (geometry_msgs/Twist) while a goal runs, ~/status (JSON)
 
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -52,6 +53,8 @@ struct Params {
     /// Floor share of the light-bumper signals (x gain) while driving / standing still.
     light_floor: (f32, f32),
     stale_s: f64,
+    /// Exit (to be respawned) when the 10 Hz step hasn't run for this long.
+    watchdog_s: f64,
 }
 
 #[derive(Default)]
@@ -86,6 +89,9 @@ struct State {
     status: Publisher<std_msgs::msg::String>,
     active: Option<Active>,
     node: Node,
+    /// Watchdog: mono() in ms of the last step, and whether a goal is running.
+    heartbeat: Arc<AtomicU64>,
+    running: Arc<AtomicBool>,
 }
 
 impl HasTfBuffer for State {
@@ -130,6 +136,8 @@ impl State {
 
     /// The 10 Hz control step.
     fn step(&mut self) {
+        self.heartbeat.store((mono() * 1000.0) as u64, Ordering::Relaxed);
+        self.running.store(self.active.is_some(), Ordering::Relaxed);
         if self.active.is_none() {
             return;
         }
@@ -232,7 +240,28 @@ fn load_params(node: &Node) -> Result<Params> {
         light_gain,
         light_floor: (p.float("light_floor_driving", 30.0)? as f32, p.float("light_floor_still", 5.0)? as f32),
         stale_s: p.float("sensor_timeout_s", 1.0)?,
+        watchdog_s: p.float("watchdog_s", 2.0)?,
     })
+}
+
+/// If the 10 Hz step stops running (a stuck executor), stop the robot and exit with an error so the
+/// launch file respawns the node; the caller's own timeout turns the lost goal into a failure.
+fn watchdog(heartbeat: Arc<AtomicU64>, running: Arc<AtomicBool>, cmd: Publisher<geometry_msgs::msg::Twist>, limit_s: f64) {
+    if limit_s <= 0.0 {
+        return;
+    }
+    std::thread::spawn(move || loop {
+        std::thread::sleep(Duration::from_millis(250));
+        let age = mono() - heartbeat.load(Ordering::Relaxed) as f64 / 1000.0;
+        if age > limit_s {
+            if running.load(Ordering::Relaxed) {
+                cmd.publish(geometry_msgs::msg::Twist::default()).ok();
+            }
+            eprintln!("[unstuck_skill] watchdog: no control step for {age:.1} s; exiting to be respawned");
+            std::thread::sleep(Duration::from_millis(100));
+            std::process::exit(3);
+        }
+    });
 }
 
 fn main() -> Result<()> {
@@ -249,6 +278,9 @@ fn main() -> Result<()> {
         }
     };
     let latched = || QoSProfile::topics_default().keep_last(1).reliable().transient_local();
+    let heartbeat = Arc::new(AtomicU64::new((mono() * 1000.0) as u64));
+    let running = Arc::new(AtomicBool::new(false));
+    let watchdog_s = p.watchdog_s;
     let state = State {
         p,
         tf: TfBuffer::new(),
@@ -263,7 +295,10 @@ fn main() -> Result<()> {
         status: node.create_publisher("~/status".qos(latched()))?,
         active: None,
         node: node.clone(),
+        heartbeat: Arc::clone(&heartbeat),
+        running: Arc::clone(&running),
     };
+    let stop_cmd = state.cmd.clone();
     let worker = node.create_worker::<State>(state);
     let _tf = WorkerTfListener::new(&worker, &node)?;
     let _costmap = worker.create_subscription::<nav_msgs::msg::OccupancyGrid, _>(
@@ -303,7 +338,12 @@ fn main() -> Result<()> {
         "/odom".keep_last(5),
         |s: &mut State, m: nav_msgs::msg::Odometry| s.yaw_rate = m.twist.twist.angular.z,
     )?;
-    let _timer = worker.create_timer_repeating(Duration::from_millis(100).node_time(), |s: &mut State| s.step())?;
+    // Steady clock: with a ROS-time (system clock) timer, a wait that ends just as the clock is
+    // stepped back (WSL's time sync every ~30 s, NTP) makes rcl_wait report a timeout and rclrs 0.8
+    // stops this worker's wait set for good: no more steps and no goal ever started (the "accepted,
+    // then silent" hang). Same fix as the other Rust nodes (explorer, nav_coach, ...).
+    let _timer = worker.create_timer_repeating(Duration::from_millis(100).steady_time(), |s: &mut State| s.step())?;
+    watchdog(heartbeat, running, stop_cmd, watchdog_s);
 
     let w = Arc::clone(&worker);
     let busy = Arc::new(Mutex::new(false));
