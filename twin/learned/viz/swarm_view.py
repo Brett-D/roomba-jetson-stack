@@ -46,13 +46,13 @@ import torch  # noqa: E402
 from isaaclab.app import launch_simulation  # noqa: E402
 
 LABELS = {
-    "model_0": "iteration 0 - untrained (start of training)",
-    "model_50": "iteration 50 - early training",
+    "model_0": "iteration 0 - start of training (after the first of 312 PPO updates)",
+    "model_50": "iteration 50 - early in training",
     "model_100": "iteration 100",
     "model_150": "iteration 150",
     "model_200": "iteration 200",
     "model_250": "iteration 250",
-    "model_300": "iteration 300 - final (exported to ONNX for the robot)",
+    "model_300": "iteration 300 - final; the checkpoint exported to ONNX (not deployed on the robot)",
 }
 RING = {
     "drive": (0.10, 0.40, 1.00),
@@ -94,6 +94,7 @@ def parse():
     ap.add_argument("--window_title", default="Isaac Lab - Roomba unstuck swarm")
     ap.add_argument("--record", default="", help="write every rendered frame (with the overlay) to this MP4 and exit")
     ap.add_argument("--record_s", type=float, default=45.0, help="video length; the camera and the sim advance per frame")
+    ap.add_argument("--split_label", default="", help="half of a before / after split screen: big label (| = new line) + first-try counter")
     return ap.parse_args()
 
 
@@ -493,7 +494,7 @@ def main():
             fb_w, fb_h = viewer.renderer._screen_width, viewer.renderer._screen_height
             rec["proc"] = subprocess.Popen(
                 ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{fb_w}x{fb_h}",
-                 "-r", f"{rec['fps']:g}", "-i", "-", "-vf", "scale=1920:1080:flags=lanczos", "-c:v", "libx264", "-preset", "medium",
+                 "-r", f"{rec['fps']:g}", "-i", "-", "-vf", f"scale={a.width}:{a.height}:flags=lanczos", "-c:v", "libx264", "-preset", "medium",
                  "-crf", "19", "-pix_fmt", "yuv420p", "-movflags", "+faststart", a.record],
                 stdin=subprocess.PIPE)
             print(f"[swarm] recording {rec['n']} frames at {rec['fps']:g} fps ({fb_w}x{fb_h}) to {a.record}", flush=True)
@@ -510,6 +511,7 @@ def main():
                     print(f"[swarm] recorded {rec['frames']}/{rec['n']} frames", flush=True)
 
             vis.step = step_and_grab
+            cam["t0"] = rec["t0"] - a.orbit_phase * a.orbit_s
 
         def user_input(*args, **kw):
             cam["user_until"] = time.time() + TAKEOVER_S
@@ -540,15 +542,34 @@ def main():
         vis._render_markers = per_frame
 
         # ---- overlay ----
-        hud = {"lines": []}
+        hud = {"lines": [], "big": [], "small": []}
 
         def overlay(imgui):
+            flags = (imgui.WindowFlags_.no_decoration | imgui.WindowFlags_.always_auto_resize
+                     | imgui.WindowFlags_.no_saved_settings | imgui.WindowFlags_.no_focus_on_appearing
+                     | imgui.WindowFlags_.no_nav | imgui.WindowFlags_.no_inputs)
+            if a.split_label:
+                try:
+                    base = imgui.get_font_size()
+                    h1 = 0.0
+                    for win, size, lines, alpha in (("split_big", 2.1, hud["big"], 0.7), ("split_small", 1.3, hud["small"], 0.6)):
+                        imgui.set_next_window_pos(imgui.ImVec2(14, 14 + (h1 + 6 if h1 else 0)))
+                        imgui.set_next_window_bg_alpha(alpha)
+                        imgui.begin(win, None, flags)
+                        try:
+                            imgui.push_font(None, base * size)
+                            for txt, c in lines:
+                                imgui.text_colored(imgui.ImVec4(*c, 1.0), txt)
+                            imgui.pop_font()
+                            h1 = imgui.get_window_size().y
+                        finally:
+                            imgui.end()
+                except Exception as e:  # noqa: BLE001
+                    print(f"[swarm] overlay: {e}", flush=True)
+                return
             try:
                 imgui.set_next_window_pos(imgui.ImVec2(18, 16))
                 imgui.set_next_window_bg_alpha(0.6)
-                flags = (imgui.WindowFlags_.no_decoration | imgui.WindowFlags_.always_auto_resize
-                         | imgui.WindowFlags_.no_saved_settings | imgui.WindowFlags_.no_focus_on_appearing
-                         | imgui.WindowFlags_.no_nav | imgui.WindowFlags_.no_inputs)
                 imgui.begin("swarm_hud", None, flags)
                 try:
                     imgui.set_window_font_scale(1.45)
@@ -659,8 +680,24 @@ def main():
                 cam_line = (f"camera: yours for {left:.0f} s more, then the automatic orbit resumes" if left > 0
                             else f"camera: slow orbit over all {T} tiles, high and wide down to a low pass and back (loops every {a.orbit_s:.0f} s)"
                             if a.tour != "none" else "camera: free")
+                title = "Isaac Lab - the unstuck skill's training environment" + ("" if a.record else ", live")
+                f_t = float(first_t[first == 1].mean()) if f_free else float("nan")
+                hud["big"] = [
+                    *[(t, (1.0, 0.85, 0.3)) for t in a.split_label.split("|")],
+                    (f"freed on first try: {f_free} / {N} ({100.0 * f_free / N:.0f} %)", (0.55, 1.0, 0.6)),
+                ]
+                hud["small"] = [
+                    (f"mean time to get free: {f_t:.1f} s" if f_free else "mean time to get free: -", (1.0, 1.0, 1.0)),
+                    (f"still trying {int((first == 0).sum())}, out of time (15 s) {int((first == 4).sum())}, "
+                     f"drops {int(((first == 2) | (first == 3)).sum())}", (0.85, 0.85, 0.85)),
+                    (f"{N} simulated Roombas (Isaac Lab, PhysX),", (0.85, 0.85, 0.85)),
+                    ("each stuck in its own 4 x 4 m tile", (0.85, 0.85, 0.85)),
+                    ("ring: blue driving, grey idle, red bump, green freed", (0.75, 0.85, 1.0)),
+                    ("line: last 4 s of driving", (0.75, 0.85, 1.0)),
+                    (f"time {ts:4.1f} s (simulated), shown at {a.speed:.1f} x real time", (0.7, 0.7, 0.7)),
+                ]
                 hud["lines"] = [
-                    ("Isaac Lab - the unstuck skill's training environment, live", (1.0, 1.0, 1.0)),
+                    (title, (1.0, 1.0, 1.0)),
                     (f"{N} simulated Roombas at once (PhysX), each stuck in its own generated 4 x 4 m situation", None),
                     (f"Policy: {name}  ({label}){part}", (1.0, 0.85, 0.3)),
                     (f"time {ts:5.1f} s   first try: freed {f_free} of {N} ({100.0 * f_free / N:.0f} %) in {avg} on average,"
@@ -673,7 +710,9 @@ def main():
                      (0.75, 0.85, 1.0)),
                     (cam_line, (0.6, 1.0, 0.7)),
                 ]
-                if not a.no_keys:
+                if a.record:
+                    hud["lines"].append((f"simulation shown at {a.speed:.1f} x real time", (0.7, 0.7, 0.7)))
+                elif not a.no_keys:
                     hud["lines"].append((f"sim speed {rate:.2f} x real time", (0.6, 0.6, 0.6)))
                 if a.max_s and time.time() - wall0 > a.max_s:
                     break
@@ -682,7 +721,8 @@ def main():
                 if rec["proc"] is not None and rec["frames"] >= rec["n"]:
                     break
             print(f"[swarm] {name}: first try freed {int((first == 1).sum())}/{N}, drops {int(((first == 2) | (first == 3)).sum())}, "
-                  f"out of time {int((first == 4).sum())}, running {int((first == 0).sum())}; all tries {n_end} episodes, "
+                  f"out of time {int((first == 4).sum())}, running {int((first == 0).sum())}, mean time to free "
+                  f"{float(first_t[first == 1].mean()) if int((first == 1).sum()) else float('nan'):.2f} s; all tries {n_end} episodes, "
                   f"{n_free} freed, {n_drop} drops in {ts:.0f} s sim ({time.time() - seg_wall:.0f} s wall)", flush=True)
             seg += 1
             if a.max_s and time.time() - wall0 > a.max_s:

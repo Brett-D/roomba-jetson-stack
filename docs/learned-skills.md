@@ -544,25 +544,47 @@ python render_explore.py --runs E:/twin/learned/runs/video/explore_up1.pkl E:/tw
 **The training environment, live** (`twin/learned/viz/swarm_view.py`): all 1536 training tiles at
 once in Isaac Lab's Newton GL viewer, one robot per tile, the same kit-less OVPhysX env and physics as
 training (`unstuck_env.UnstuckEnv`, training tiles and domain randomisation), driven by checkpoints
-in turn: `model_0` (untrained), `model_50`, `model_300` (the one exported to ONNX), actions sampled
+in turn: `model_0` (start of training), `model_50`, `model_300` (the one exported to ONNX), actions sampled
 from each policy as in training. Viewer-only additions: robots drawn bright cyan with a floor ring by
 state (blue driving, grey idle, red bump, green freed) and a fading line of their last 4 s of driving;
 walls and furniture semi-transparent; a freed robot pauses 1.5 s (wheels stopped) before its next stuck
 episode so you can see where it drove. The camera is one smooth loop driven by wall-clock time (a slow
 orbit around the grid, high and wide down to a low pass and back, 100 s), the simulation runs at a
 constant 0.6 x real time with frames paced evenly (~30 fps), and any mouse or camera key hands the
-camera to you for 30 s. The overlay counts each robot's *first* attempt per checkpoint (within the 15 s
-episode): `model_0` frees ~16 %, `model_50` ~81 %, `model_300` ~84 % of the 1536 robots (training
-tiles; retries make the "all tries" share look higher).
+camera to you for 30 s. The overlay counts each robot's *first* attempt per checkpoint (an episode
+ends when the robot is free, drops, or after 15 s); retries make the "all tries" share look higher.
 
-- `unstuck_swarm.mp4` (45 s, 1920 x 1080, 30 fps): the same camera move, `model_0` for the first half
-  and `model_300` for the second; recorded frame by frame from the viewer's framebuffer (overlay
-  included), so camera and simulation advance exactly one frame each.
+Before / after, same seed, same 1536 tiles and start states, same camera path (the camera follows the
+frame count, i.e. simulated time, and every frame is one physics step of 0.02 s, shown at 0.6 x real
+time), first attempt of every robot, training tiles, simulation only:
+
+| checkpoint | freed on first try | mean time to get free | out of time (15 s) | drops |
+|---|---|---|---|---|
+| `model_0` (iteration 0, start of training) | 243 / 1536 (15.8 %) | 4.55 s | 1245 | 48 |
+| `model_50` (iteration 50) | 1247 / 1536 (81.2 %) | 2.31 s | 286 | 3 |
+| `model_300` (iteration 300, exported to ONNX) | 1289 / 1536 (83.9 %) | 2.19 s | 245 | 2 |
+
+(Most of the learning happens in the first tens of PPO iterations; see the training curve in section 1.
+These counts are on the training tiles, so they are not the held-out evaluation of section 1.)
+
+Clips (not in git, `E:\twin\videos\learned\`), recorded frame by frame from the viewer's framebuffer
+with the overlay, so camera and simulation advance exactly one step per video frame:
+
+- `unstuck_before_after.mp4` (40 s, 1920 x 1080, H.264, no audio, 13 MB, `+faststart`) and
+  `unstuck_before_after_poster.png`: `model_0` (left) and `model_300` (right) side by side, each half a
+  960 x 1080 recording (`swarm_before.mp4`, `swarm_after.mp4`) joined with ffmpeg `hstack`;
+  `unstuck_early_training_still.png`: the same moment for `model_50` (`swarm_early.mp4`).
+- `unstuck_swarm.mp4` (45 s): the same camera move in one view, `model_0` then `model_300`.
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File twin\learned\viz\swarm_view.ps1            # live window (Esc closes it)
-powershell -ExecutionPolicy Bypass -File twin\learned\viz\swarm_view.ps1 --record E:\twin\videos\learned\unstuck_swarm.mp4 `
-    --record_s 45 --ckpts model_0,model_300 --segment_s 13.5 --loop 0 --no_keys --orbit_phase 0.12
+$rec = '--record_s','40','--loop','0','--no_keys','--orbit_phase','0.12','--width','960','--height','1080','--segment_s','0'
+powershell -ExecutionPolicy Bypass -File twin\learned\viz\swarm_view.ps1 --record E:\twin\videos\learned\swarm_before.mp4 `
+    --ckpts model_0 --split_label 'Before training|(iteration 0, the policy|at the start of training)' @rec
+powershell -ExecutionPolicy Bypass -File twin\learned\viz\swarm_view.ps1 --record E:\twin\videos\learned\swarm_after.mp4 `
+    --ckpts model_300 --split_label 'After training|(iteration 300, the policy|exported for the robot)' @rec
+ffmpeg -i swarm_before.mp4 -i swarm_after.mp4 -filter_complex "[0:v][1:v]hstack=inputs=2,drawbox=x=958:y=0:w=4:h=ih:color=white@0.9:t=fill" `
+    -an -c:v libx264 -preset slow -b:v 2700k -maxrate 3600k -bufsize 7200k -pix_fmt yuv420p -movflags +faststart unstuck_before_after.mp4
 ```
 
 Live, in the 2D twin with the real stack (`twin/learned/twin2d_live.py`), with the web app and
