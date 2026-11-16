@@ -85,6 +85,9 @@ def generate_launch_description():
                      value_type=float),
                  'drop_max_range_m': 2.0,
                  'drop_min_points': 6,
+                 # ... 10 cm nearer the robot than the edge, so the planner keeps it 10 cm off the
+                 # railing / edge (Isaac run 9: the body rubbed along the railing at the stair head).
+                 'drop_edge_margin_m': 0.10,
              }]),
         # Joins dotted obstacles in RTAB-Map's grid (railing posts) into solid walls for the costmaps.
         # Rust port: the same grid cell for cell (tools/ab_map_gap_filler_offline.py), ~20x faster.

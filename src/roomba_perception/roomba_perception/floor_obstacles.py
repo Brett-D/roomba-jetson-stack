@@ -44,7 +44,7 @@ from tf2_ros import Buffer, TransformException, TransformListener
 from roomba_perception.scene_filter import quat_rotate
 
 
-def drop_points(pts, h, floor_h, up, below, max_range, lift, fwd, side, cell, min_points):
+def drop_points(pts, h, floor_h, up, below, max_range, lift, fwd, side, cell, min_points, margin=0.0):
     """Negative obstacles. Points more than elow m under the floor plane and closer than
     max_range m (depth noise grows with range) were seen past a drop, which the obstacle band
     above the floor never reports. The floor ends where each such point's line of sight crosses the
@@ -58,6 +58,13 @@ def drop_points(pts, h, floor_h, up, below, max_range, lift, fwd, side, cell, mi
         return np.zeros((0, 3))
     t = floor_h / h[deep]
     q = pts[deep] * t[:, None] + lift * up
+    if margin > 0:
+        # margin m nearer the camera along the floor: the planner keeps the robot further away.
+        a = q[:, 0] * fwd[0] + q[:, 1] * fwd[1] + q[:, 2] * fwd[2]
+        b = q[:, 0] * side[0] + q[:, 1] * side[1] + q[:, 2] * side[2]
+        d = np.hypot(a, b)
+        s = np.where(d > margin, margin / np.maximum(d, margin), 0.0)
+        q = np.stack([q[:, k] - s * (a * fwd[k] + b * side[k]) for k in range(3)], axis=1)
     i = np.floor((q[:, 0] * fwd[0] + q[:, 1] * fwd[1] + q[:, 2] * fwd[2]) / cell).astype(np.int64).tolist()
     j = np.floor((q[:, 0] * side[0] + q[:, 1] * side[1] + q[:, 2] * side[2]) / cell).astype(np.int64).tolist()
     counts = {}
@@ -118,6 +125,9 @@ class FloorObstacles(Node):
         self.drop_max_range = float(p('drop_max_range_m', 2.0).value)
         self.drop_lift = float(p('drop_point_height_m', 0.1).value)
         self.drop_min_points = max(1, int(p('drop_min_points', 6).value))
+        # ... and drop_edge_margin_m nearer the camera along the floor (the planner keeps the robot
+        # that much further from the edge).
+        self.drop_margin = float(p('drop_edge_margin_m', 0.0).value)
         self.blind_frames = 0
         self.speckles = 0
         self.last_fast_turn = 0.0
@@ -266,7 +276,7 @@ class FloorObstacles(Node):
         if self.drop_depth > 0.0:
             fwd, side = floor_axes(up)
             d = drop_points(pts, h, self.floor_h, up, self.drop_depth, self.drop_max_range, self.drop_lift,
-                            fwd, side, self.cell_size, self.drop_min_points)
+                            fwd, side, self.cell_size, self.drop_min_points, self.drop_margin)
             drops = int(d.shape[0])
             if drops:
                 obstacles = np.concatenate([obstacles, d])

@@ -38,6 +38,7 @@ fn main() -> anyhow::Result<()> {
             v3(&c["side"]),
             f(&c["cell"]),
             c["min_points"].as_u64().unwrap() as usize,
+            f(&c["margin"]),
         );
         let q: Vec<Value> = d.iter().map(|p| json!([p[0].to_bits(), p[1].to_bits(), p[2].to_bits()])).collect();
         writeln!(out, "{}", Value::from(q))?;

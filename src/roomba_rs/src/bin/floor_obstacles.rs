@@ -39,6 +39,7 @@ struct Params {
     drop_max_range: MandatoryParameter<f64>,
     drop_lift: MandatoryParameter<f64>,
     drop_min_points: MandatoryParameter<i64>,
+    drop_margin: MandatoryParameter<f64>,
 }
 
 #[derive(Default)]
@@ -196,6 +197,7 @@ impl State {
                 side,
                 p.cell_size.get(),
                 p.drop_min_points.get().max(1) as usize,
+                p.drop_margin.get(),
             );
             drops = drop_pts.len();
             obstacles.extend(drop_pts.iter().copied());
@@ -272,6 +274,9 @@ fn main() -> Result<()> {
         drop_max_range: f("drop_max_range_m", 2.0)?,
         drop_lift: f("drop_point_height_m", 0.1)?,
         drop_min_points: i("drop_min_points", 6)?,
+        // ... and drop_edge_margin_m nearer the camera along the floor (the planner keeps the robot
+        // that much further from the edge).
+        drop_margin: f("drop_edge_margin_m", 0.0)?,
     });
     let out = Outputs {
         obs: node.create_publisher("/perception/obstacles".keep_last(2))?,

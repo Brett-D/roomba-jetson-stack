@@ -71,7 +71,7 @@ def case(rng):
     floor_h = -cam_h if rng.random() < 0.7 else -cam_h + rng.gauss(0.0, 0.01)
     params = dict(below=rng.choice([0.12, 0.12, 0.08, 0.2]), max_range=rng.choice([2.0, 2.0, 1.5, 3.0]),
                   lift=rng.choice([0.1, 0.1, 0.05]), cell=rng.choice([0.05, 0.05, 0.1]),
-                  min_points=rng.choice([6, 6, 1, 3, 10]))
+                  min_points=rng.choice([6, 6, 1, 3, 10]), margin=rng.choice([0.0, 0.1, 0.1, 0.05, 2.5]))
     return pts, up, fwd, side, floor_h, params
 
 
@@ -87,13 +87,13 @@ def main():
         pts, up, fwd, side, floor_h, prm = case(rng)
         h = pts @ up
         out = drop_points(pts, h, floor_h, up, prm['below'], prm['max_range'], prm['lift'], fwd, side,
-                          prm['cell'], prm['min_points'])
+                          prm['cell'], prm['min_points'], prm['margin'])
         expected.append([[bits(v) for v in q] for q in out])
         lines.append(json.dumps({
             'pts': [[bits(v) for v in p] for p in pts], 'h': [bits(v) for v in h], 'floor_h': bits(floor_h),
             'up': [bits(v) for v in up], 'fwd': [bits(v) for v in fwd], 'side': [bits(v) for v in side],
             'below': bits(prm['below']), 'max_range': bits(prm['max_range']), 'lift': bits(prm['lift']),
-            'cell': bits(prm['cell']), 'min_points': prm['min_points']}))
+            'cell': bits(prm['cell']), 'min_points': prm['min_points'], 'margin': bits(prm['margin'])}))
     res = subprocess.run([args.rust], input='\n'.join(lines) + '\n', capture_output=True, text=True)
     if res.returncode:
         sys.exit(f'rust replay failed: {res.stderr[-2000:]}')

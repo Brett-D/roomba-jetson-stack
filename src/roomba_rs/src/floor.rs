@@ -119,10 +119,12 @@ pub fn dense_mask(pts: &[Vec3], up: Vec3, cell: f64, min_points: usize) -> Vec<b
 /// plane and closer than max_range m (depth noise grows with range) were seen past a drop (through a stair railing's balusters, over a landing's edge, to the
 /// floor below), which the obstacle band above the floor never reports, so the drop was mapped as
 /// floor. The floor ends where each such point's line of sight crosses the floor plane: a point is
-/// reported there, `lift` m above the floor. Only where at least `min_points` of them fall in their
-/// 3x3 block of `cell` m floor cells (`fwd`, `side`: floor_axes) - stray deep pixels are noise.
-/// `h`: the points' heights relative to the camera, `floor_h`: the floor's (negative). Exactly the
-/// numpy arithmetic (elementwise, no fused multiply-add), as tools/ab_floor_drops_offline.py checks.
+/// reported there, `lift` m above the floor, and `margin` m nearer the camera along the floor (the
+/// planner then keeps the robot that much further from the edge). Only where at least
+/// `min_points` of them fall in their 3x3 block of `cell` m floor cells (`fwd`, `side`:
+/// floor_axes) - stray deep pixels are noise. `h`: the points' heights relative to the camera,
+/// `floor_h`: the floor's (negative). Exactly the numpy arithmetic (elementwise, no fused
+/// multiply-add), as tools/ab_floor_drops_offline.py checks.
 #[allow(clippy::too_many_arguments)]
 pub fn drop_points(
     pts: &[Vec3],
@@ -136,6 +138,7 @@ pub fn drop_points(
     side: Vec3,
     cell: f64,
     min_points: usize,
+    margin: f64,
 ) -> Vec<Vec3> {
     let limit = floor_h - below;
     let lifted = [lift * up[0], lift * up[1], lift * up[2]];
@@ -145,7 +148,15 @@ pub fn drop_points(
         .filter(|&(p, &hp)| hp < limit && p[2] < max_range)
         .map(|(p, &hp)| {
             let t = floor_h / hp;
-            [p[0] * t + lifted[0], p[1] * t + lifted[1], p[2] * t + lifted[2]]
+            let mut q = [p[0] * t + lifted[0], p[1] * t + lifted[1], p[2] * t + lifted[2]];
+            if margin > 0.0 {
+                let a = q[0] * fwd[0] + q[1] * fwd[1] + q[2] * fwd[2];
+                let b = q[0] * side[0] + q[1] * side[1] + q[2] * side[2];
+                let d = a.hypot(b);
+                let s = if d > margin { margin / d } else { 0.0 };
+                q = [q[0] - s * (a * fwd[0] + b * side[0]), q[1] - s * (a * fwd[1] + b * side[1]), q[2] - s * (a * fwd[2] + b * side[2])];
+            }
+            q
         })
         .collect();
     let key = |p: &Vec3| {
@@ -239,12 +250,16 @@ mod tests {
         pts.push([0.0, 0.61, 2.5]); // too far
         let h: Vec<f64> = pts.iter().map(|&p| dot(p, UP)).collect();
         let (fwd, side) = floor_axes(UP);
-        let d = drop_points(&pts, &h, -0.11, UP, 0.12, 2.0, 0.1, fwd, side, 0.05, 6);
+        let d = drop_points(&pts, &h, -0.11, UP, 0.12, 2.0, 0.1, fwd, side, 0.05, 6, 0.0);
         assert_eq!(d.len(), 60);
         // On the line of sight, where it crosses the floor plane (1.6 * 0.11 / 0.61 = 0.29 m ahead),
         // lifted 0.1 m above the floor.
         assert!((d[0][2] - 1.6 * 0.11 / 0.61).abs() < 1e-9 && (dot(d[0], UP) - (-0.11 + 0.1)).abs() < 1e-9, "{:?}", d[0]);
-        assert!(drop_points(&pts, &h, -0.11, UP, 0.12, 2.0, 0.1, fwd, side, 0.05, 61).is_empty());
+        assert!(drop_points(&pts, &h, -0.11, UP, 0.12, 2.0, 0.1, fwd, side, 0.05, 61, 0.0).is_empty());
+        // With a margin, 0.1 m nearer the camera along the floor (the same height).
+        let m = drop_points(&pts, &h, -0.11, UP, 0.12, 2.0, 0.1, fwd, side, 0.05, 6, 0.1);
+        let flat = |p: Vec3| (p[0] * p[0] + p[2] * p[2]).sqrt();
+        assert!((flat(d[0]) - flat(m[0]) - 0.1).abs() < 1e-9 && (dot(m[0], UP) - dot(d[0], UP)).abs() < 1e-9, "{:?} {:?}", d[0], m[0]);
     }
 
     #[test]
