@@ -541,6 +541,30 @@ python record_explore.py --layout heldout:2 --yaw -1.327 --out E:/twin/learned/r
 python render_explore.py --runs E:/twin/learned/runs/video/explore_up1.pkl E:/twin/learned/runs/video/explore_h2.pkl --seconds 21 16
 ```
 
+**The training environment, live** (`twin/learned/viz/swarm_view.py`): all 1536 training tiles at
+once in Isaac Lab's Newton GL viewer, one robot per tile, the same kit-less OVPhysX env and physics as
+training (`unstuck_env.UnstuckEnv`, training tiles and domain randomisation), driven by checkpoints
+in turn: `model_0` (untrained), `model_50`, `model_300` (the one exported to ONNX), actions sampled
+from each policy as in training. Viewer-only additions: robots drawn bright cyan with a floor ring by
+state (blue driving, grey idle, red bump, green freed) and a fading line of their last 4 s of driving;
+walls and furniture semi-transparent; a freed robot pauses 1.5 s (wheels stopped) before its next stuck
+episode so you can see where it drove. The camera is one smooth loop driven by wall-clock time (a slow
+orbit around the grid, high and wide down to a low pass and back, 100 s), the simulation runs at a
+constant 0.6 x real time with frames paced evenly (~30 fps), and any mouse or camera key hands the
+camera to you for 30 s. The overlay counts each robot's *first* attempt per checkpoint (within the 15 s
+episode): `model_0` frees ~16 %, `model_50` ~81 %, `model_300` ~84 % of the 1536 robots (training
+tiles; retries make the "all tries" share look higher).
+
+- `unstuck_swarm.mp4` (45 s, 1920 x 1080, 30 fps): the same camera move, `model_0` for the first half
+  and `model_300` for the second; recorded frame by frame from the viewer's framebuffer (overlay
+  included), so camera and simulation advance exactly one frame each.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File twin\learned\viz\swarm_view.ps1            # live window (Esc closes it)
+powershell -ExecutionPolicy Bypass -File twin\learned\viz\swarm_view.ps1 --record E:\twin\videos\learned\unstuck_swarm.mp4 `
+    --record_s 45 --ckpts model_0,model_300 --segment_s 13.5 --loop 0 --no_keys --orbit_phase 0.12
+```
+
 Live, in the 2D twin with the real stack (`twin/learned/twin2d_live.py`), with the web app and
 Foxglove on fixed ports and a status file. Two modes:
 
@@ -578,6 +602,6 @@ bash twin/learned/twin2d_live_stop.sh            # stops it and everything it st
 | `twin/learned/twin2d_abq.py` | phase-2 A/B: every scenario x seed x config, queued over N ROS domains, merged summary |
 | `twin/learned/unstuck_hangtest.sh` | reproduces the clock-step hang of the skill's action server (section 3) |
 | `twin/learned/twin2d_live.py`, `twin2d_live_stop.sh` | the looping live demo (web app + Foxglove) and its stop script |
-| `twin/learned/viz/` | rollout recorders and the video renderers (section 6) |
+| `twin/learned/viz/` | rollout recorders and the video renderers, the live swarm viewer `swarm_view.py` / `swarm_view.ps1` (section 6) |
 | `src/roomba_skills_msgs/` | `action/Unstuck.action` |
 | `src/roomba_rs/src/learned/`, `src/bin/unstuck_skill.rs`, `models/` | Rust inference, node, models + test vectors |
