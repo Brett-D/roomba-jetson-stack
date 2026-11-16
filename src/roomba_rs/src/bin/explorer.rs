@@ -185,7 +185,7 @@ impl Io for RosIo {
         if self.cliff_timers.len() >= 4 {
             self.cliff_timers.remove(0);
         }
-        match worker.create_timer_oneshot(Duration::from_millis(600).node_time(), |s: &mut State| s.core.cliff_check(&mut s.io)) {
+        match worker.create_timer_oneshot(Duration::from_millis(600).steady_time(), |s: &mut State| s.core.cliff_check(&mut s.io)) {
             Ok(t) => self.cliff_timers.push(t),
             Err(e) => log!(self.node.error(), "Could not start the cliff check timer: {e}"),
         }
@@ -387,8 +387,12 @@ fn main() -> Result<()> {
     } else {
         None
     };
-    // Node clock, like rclpy's create_timer (sim time when use_sim_time is set).
-    let _tick = worker.create_timer_repeating(Duration::from_secs(1).node_time(), |s: &mut State| s.core.tick(&mut s.io))?;
+    // Steady-clock timers: with a ROS-time (system clock) timer, a wait that ends for it just as the
+    // clock is stepped back (WSL's time sync every ~30 s, an NTP step) makes rcl_wait report a
+    // timeout; rclrs 0.8 then stops this worker's wait set for good while the node's other wait set
+    // keeps the executor spinning, so the explorer froze (no ticks, no Nav2 results). Its timeouts
+    // still run on the node clock (Io::now), so sim time is respected.
+    let _tick = worker.create_timer_repeating(Duration::from_secs(1).steady_time(), |s: &mut State| s.core.tick(&mut s.io))?;
 
     log!(node.info(), "explorer (Rust) running");
     roomba_rs::node_params::spin(&mut executor)?;

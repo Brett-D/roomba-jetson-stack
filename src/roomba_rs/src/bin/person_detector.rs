@@ -347,7 +347,8 @@ fn main() -> Result<()> {
     let send = push(&queue);
     let _grid = node.create_subscription::<std_msgs::msg::Bool, _>("~/floor_grid".keep_last(2), move |m: std_msgs::msg::Bool| send(Event::Grid(m.data)))?;
     let send = push(&queue);
-    let _stats = node.create_timer_repeating(Duration::from_secs(30).node_time(), move || send(Event::Stats))?;
+    // Steady clock: a ROS-time timer can stop this wait set for good on a clock step (see explorer).
+    let _stats = node.create_timer_repeating(Duration::from_secs(30).steady_time(), move || send(Event::Stats))?;
 
     let worker_tf = WaitingTf { buffer: Arc::clone(tf.buffer()) };
     let (worker_queue, worker_node) = (Arc::clone(&queue), node.clone());

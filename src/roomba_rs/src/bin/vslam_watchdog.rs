@@ -266,11 +266,13 @@ fn main() -> Result<()> {
             }
         },
     )?;
-    // Node clock, like rclpy's create_timer (sim time when use_sim_time is set).
-    let _tick = worker.create_timer_repeating(Duration::from_millis(100).node_time(), |s: &mut State| {
+    // Steady-clock timers (the core gets the time it uses): a ROS-time timer whose wait ends just as
+    // the system clock is stepped back makes rcl_wait report a timeout, and rclrs 0.8 then stops this
+    // worker's wait set for good while the node's own one keeps spinning (the worker froze).
+    let _tick = worker.create_timer_repeating(Duration::from_millis(100).steady_time(), |s: &mut State| {
         s.core.tick(mono(), &mut s.io)
     })?;
-    let _status_timer = worker.create_timer_repeating(Duration::from_secs(1).node_time(), |s: &mut State| {
+    let _status_timer = worker.create_timer_repeating(Duration::from_secs(1).steady_time(), |s: &mut State| {
         let data = s.core.status(mono());
         s.io.pub_status.publish(std_msgs::msg::String { data }).ok();
     })?;

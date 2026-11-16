@@ -78,7 +78,10 @@ fn main() -> Result<()> {
         "/navigate_to_pose/_action/feedback".keep_last(10),
         |s: &mut State, m: nav2_msgs::action::NavigateToPose_FeedbackMessage| s.core.on_feedback(m.feedback.distance_remaining),
     )?;
-    let _tick = worker.create_timer_repeating(Duration::from_millis(200).node_time(), |s: &mut State| {
+    // Steady-clock timers (the core gets the time it uses): a ROS-time timer whose wait ends just as
+    // the system clock is stepped back makes rcl_wait report a timeout, and rclrs 0.8 then stops this
+    // worker's wait set for good while the node's own one keeps spinning (the worker froze).
+    let _tick = worker.create_timer_repeating(Duration::from_millis(200).steady_time(), |s: &mut State| {
         let data = s.core.tick(mono());
         s.publisher.publish(std_msgs::msg::String { data }).ok();
     })?;

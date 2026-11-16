@@ -192,12 +192,14 @@ fn main() -> Result<()> {
             s.emit(out);
         },
     )?;
-    // Node clock, like rclpy's create_timer.
-    let _markers = worker.create_timer_repeating(Duration::from_secs(1).node_time(), |s: &mut State| {
+    // Steady-clock timers (the core gets the time it uses): a ROS-time timer whose wait ends just as
+    // the system clock is stepped back makes rcl_wait report a timeout, and rclrs 0.8 then stops this
+    // worker's wait set for good while the node's own one keeps spinning (the worker froze).
+    let _markers = worker.create_timer_repeating(Duration::from_secs(1).steady_time(), |s: &mut State| {
         let out = vec![s.core.markers()];
         s.emit(out);
     })?;
-    let _expire = worker.create_timer_repeating(Duration::from_secs(2).node_time(), |s: &mut State| {
+    let _expire = worker.create_timer_repeating(Duration::from_secs(2).steady_time(), |s: &mut State| {
         let out = s.core.expire(wall());
         s.emit(out);
     })?;
