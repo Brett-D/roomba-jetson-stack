@@ -753,6 +753,7 @@ impl Params {
             // light bumpers see it while turning) and before deciding nothing is left (0 = never).
             look_steps: p.int("look_around_steps", 4)?,
             look_step: p.float("look_around_step_deg", 90.0)?.to_radians(),
+            // time allowance per 90 deg of turn
             look_timeout: p.float("look_around_timeout_s", 20.0)?,
             // Pause after each look-around turn (s): visual tracking catches up while it stands.
             look_pause: p.float("look_around_pause_s", 0.0)?,
@@ -1064,6 +1065,8 @@ pub struct Explorer {
     goal_message: String,
     /// (seq, sent monotonic, accepted) of the look-around turn in progress.
     spin: Option<(u64, f64, bool)>,
+    /// Its time allowance (s).
+    spin_allowance: f64,
     spin_handle: Option<u64>,
     spin_seq: u64,
     // ~/markers: the last frontier search, where the goal was chosen from, the marks sent and the
@@ -1134,6 +1137,7 @@ impl Explorer {
             look_rejects: 0,
             goal_message: String::new(),
             spin: None,
+            spin_allowance: 0.0,
             spin_handle: None,
             spin_seq: 0,
             viz: None,
@@ -1582,7 +1586,7 @@ impl Explorer {
             self.unstuck_done(false, "no answer", io);
         }
         let spin_overdue = self.spin.is_some_and(|(_, sent, accepted)| {
-            now - sent > if accepted { self.p.look_timeout + 5.0 } else { self.p.response_timeout }
+            now - sent > if accepted { self.spin_allowance + 5.0 } else { self.p.response_timeout }
         });
         if self.sending.is_some_and(|(_, sent)| now - sent > self.p.response_timeout) {
             self.no_response(io);
@@ -1993,7 +1997,8 @@ impl Explorer {
         self.send_spin(self.p.look_step, io);
     }
 
-    /// A turn in place by ngle (rad, + = left) with Nav2's spin behaviour.
+    /// A turn in place by angle (rad, + = left) with Nav2's spin behaviour; it may take
+    /// look_around_timeout_s per 90 deg (gentle turns on carpet go at half the commanded rate or less).
     fn send_spin(&mut self, angle: f64, io: &mut impl Io) {
         if !io.spin_ready() {
             return;
@@ -2001,7 +2006,8 @@ impl Explorer {
         self.spin_seq += 1;
         let seq = self.spin_seq;
         self.spin = Some((seq, io.now(), false));
-        let t = self.p.look_timeout;
+        let t = self.p.look_timeout * (angle.abs() / std::f64::consts::FRAC_PI_2).max(1.0);
+        self.spin_allowance = t;
         io.send_spin(seq, angle as f32, t as i32, ((t - (t as i32) as f64) * 1e9) as u32);
     }
 
@@ -2873,6 +2879,7 @@ mod tests {
         zones: Vec<String>,
         spin_server: bool,
         spins: Vec<(u64, f32)>,
+        spin_allowances: Vec<f64>,
         spin_cancels: Vec<u64>,
         want_markers: bool,
         markers: Vec<Vec<MarkerSpec>>,
@@ -2930,8 +2937,9 @@ mod tests {
         fn spin_ready(&mut self) -> bool {
             self.spin_server
         }
-        fn send_spin(&mut self, seq: u64, target_yaw: f32, _: i32, _: u32) {
+        fn send_spin(&mut self, seq: u64, target_yaw: f32, sec: i32, nanosec: u32) {
             self.spins.push((seq, target_yaw));
+            self.spin_allowances.push(sec as f64 + nanosec as f64 * 1e-9);
         }
         fn cancel_spin(&mut self, seq: u64) {
             self.spin_cancels.push(seq);
@@ -3328,6 +3336,32 @@ mod tests {
         let want = (2.0 * g.qz.atan2(g.qw) - 2.5) as f32;
         assert!((io.spins[0].1 - want).abs() < 1e-6, "{:?} vs {want}", io.spins);
         assert!(io.status.contains("Turning to face"), "{}", io.status);
+    }
+
+    #[test]
+    fn long_turns_get_more_time() {
+        let mut io = TestIo { spin_server: true, ..Default::default() };
+        let mut p = Params::load(&mut crate::watchdog::Defaults).unwrap();
+        p.look_steps = 0;
+        let mut e = open_room(&mut io, p);
+        io.t = 1.0;
+        e.on_command("start", &mut io);
+        io.ticks(&mut e, 1, 1);
+        let g = io.goals[0].clone();
+        e.on_goal_response(g.seq, true, &mut io);
+        // Arrives facing nearly away from the unknown: a 3 rad turn gets 20 s per 90 deg.
+        io.pose = (g.x, g.y);
+        io.yaw = 2.0 * g.qz.atan2(g.qw) + 3.0;
+        e.on_result(g.seq, STATUS_SUCCEEDED, &mut io);
+        io.ticks(&mut e, 2, 2);
+        assert_eq!(io.spins.len(), 1);
+        let want = 20.0 * 3.0 / std::f64::consts::FRAC_PI_2;
+        assert!((io.spin_allowances[0] - want).abs() < 1e-3, "{:?} vs {want}", io.spin_allowances);
+        e.on_spin_response(io.spins[0].0, true, &mut io);
+        io.ticks(&mut e, 3, 45);
+        assert!(io.spin_cancels.is_empty(), "still turning 43 s later");
+        io.ticks(&mut e, 46, 46);
+        assert_eq!(io.spin_cancels, vec![io.spins[0].0]);
     }
 
     #[test]

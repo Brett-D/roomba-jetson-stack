@@ -9,6 +9,10 @@
   first (90 deg one way, then 180 deg back, which also lets the forward camera look around and
   refresh the costmap), then back up 10 cm, then clear the costmaps and wait. With 6 retries it
   backs up at most once per goal; the explorer then picks another spot.
+
+  The spins are gentle (behavior_server: 0.3-0.5 rad/s, for visual tracking) and on carpet the
+  Roomba turns at 40-60% of the commanded rate: 180 deg can take 10.5-26 s, past Spin's default
+  10 s time_allowance, so each spin gets its own (20 s for 90 deg, 35 s for 180 deg).
 -->
 <root BTCPP_format="4" main_tree_to_execute="MainTree">
   <BehaviorTree ID="MainTree">
@@ -41,8 +45,8 @@
         <ReactiveFallback name="RecoveryFallback">
           <GoalUpdated/>
           <RoundRobin name="RecoveryActions">
-            <Spin name="TurnLeft" spin_dist="1.57" error_code_id="{spin_error_code}"/>
-            <Spin name="TurnBackRight" spin_dist="-3.14" error_code_id="{spin_error_code}"/>
+            <Spin name="TurnLeft" spin_dist="1.57" time_allowance="20.0" error_code_id="{spin_error_code}"/>
+            <Spin name="TurnBackRight" spin_dist="-3.14" time_allowance="35.0" error_code_id="{spin_error_code}"/>
             <BackUp backup_dist="0.10" backup_speed="0.05" error_code_id="{backup_code_id}"/>
             <Sequence name="ClearingActions">
               <ClearEntireCostmap name="ClearLocalCostmap-Subtree" service_name="local_costmap/clear_entirely_local_costmap"/>

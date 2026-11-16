@@ -389,7 +389,7 @@ class Explorer(Node):
         # left: started facing a wall or with the dock behind it, the camera has seen little.
         self.look_steps = int(p('look_around_steps', 4).value)          # 0 = never
         self.look_step = math.radians(float(p('look_around_step_deg', 90.0).value))
-        self.look_timeout = float(p('look_around_timeout_s', 20.0).value)
+        self.look_timeout = float(p('look_around_timeout_s', 20.0).value)   # time allowance per 90 deg of turn
         # Pause after each look-around turn (s): visual tracking catches up while it stands.
         self.look_pause = float(p('look_around_pause_s', 0.0).value)
         # Nav2's goal checker ignores the final heading here (yaw_goal_tolerance 6.28), so at a spot it
@@ -497,6 +497,7 @@ class Explorer(Node):
         self.look_pending = False    # look around once the first spot is reached
         self.look_rejects = 0        # look-around turns rejected in a row
         self.spin = None             # (seq, sent monotonic, accepted) of the look-around turn in progress
+        self.spin_allowance = 0.0    # its time allowance (s)
         self.spin_handle = None
         self.spin_seq = 0
         # ~/markers: what the last frontier search saw (resolution, frontier cells, spots
@@ -860,7 +861,7 @@ class Explorer(Node):
         if self.sending is not None and now - self.sending[1] > self.response_timeout:
             self._no_response()
         elif self.spin is not None and now - self.spin[1] > (
-                self.look_timeout + 5.0 if self.spin[2] else self.response_timeout):
+                self.spin_allowance + 5.0 if self.spin[2] else self.response_timeout):
             self.get_logger().warn('Looking around: the turn did not finish' if self.spin[2]
                                    else 'Looking around: navigation did not answer the turn request')
             self._cancel_spin()
@@ -1131,14 +1132,16 @@ class Explorer(Node):
         self._send_spin(self.look_step)
 
     def _send_spin(self, angle):
-        """A turn in place by angle (rad, + = left) with Nav2's spin behaviour."""
+        """A turn in place by angle (rad, + = left) with Nav2's spin behaviour; it may take
+        look_around_timeout_s per 90 deg (gentle turns on carpet go at half the commanded rate or less)."""
         if not self.spinner.server_is_ready():
             return
         self.spin_seq += 1
         seq = self.spin_seq
         self.spin = (seq, self._now(), False)
-        allowance = Duration(sec=int(self.look_timeout),
-                             nanosec=int((self.look_timeout - int(self.look_timeout)) * 1e9))
+        t = self.look_timeout * max(abs(angle) / (math.pi / 2), 1.0)
+        self.spin_allowance = t
+        allowance = Duration(sec=int(t), nanosec=int((t - int(t)) * 1e9))
         future = self.spinner.send_goal_async(Spin.Goal(target_yaw=float(angle), time_allowance=allowance))
         future.add_done_callback(lambda f: self._on_spin_response(f, seq))
 
