@@ -4,7 +4,7 @@ directly) and the Rust core (examples/explorer_replay.rs) with the same scripted
 compares every output in order: status JSON, ~/markers (every marker field; the harness listens, so
 they are built), NavigateToPose goals (frame, position, orientation,
 stamp), cancels, controller parameter get/set requests, keep-out commands, cliff timers and log
-lines, plus the frontier goals computed for every costmap (Q events). Nothing goes through ROS:
+lines, plus the frontier goals and reachable area computed for every costmap (Q events). Inputs
 time.monotonic, the node clock and the wall clock (mark names, UTC) follow the script. A scripted
 NavigateToPose server answers goals (accept / reject, at once, late or never; succeed / abort /
 never, cancel -> canceled) and fake controller parameter services answer get/set. Some scenarios
@@ -418,11 +418,13 @@ class Harness:
         grid = np.asarray(node.grid.data, dtype=np.int16).reshape(info.height, info.width)
         res, ox, oy = info.resolution, info.origin.position.x, info.origin.position.y
         rc = (int((xy[1] - oy) / res), int((xy[0] - ox) / res))
-        goals, seed, peeks = E.frontier_goals(grid, rc, node.free_max, node.pass_max, node.clear_max, node.min_cells,
-                                              node.standoff / res, node.goal_search / res, node.cost_weight,
-                                              node.peek_search / res, split_cells=node.frontier_split / res)
+        goals, seed, peeks, reach = E.frontier_goals(grid, rc, node.free_max, node.pass_max, node.clear_max,
+                                                     node.min_cells, node.standoff / res, node.goal_search / res,
+                                                     node.cost_weight, node.peek_search / res,
+                                                     split_cells=node.frontier_split / res)
         lst = lambda gs: [[int(g[0][0]), int(g[0][1]), float(g[1][0]), float(g[1][1]), int(g[2])] for g in gs]  # noqa: E731
-        return ['FQ', lst(goals), None if seed is None else [int(seed[0]), int(seed[1])], [rc[0], rc[1]], lst(peeks)]
+        return ['FQ', lst(goals), None if seed is None else [int(seed[0]), int(seed[1])], [rc[0], rc[1]], lst(peeks),
+                int(reach)]
 
     # ---- scripted Spin server (look-around turns) ----
     def server_spin(self, seq, fut):

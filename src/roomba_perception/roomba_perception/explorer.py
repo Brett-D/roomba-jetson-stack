@@ -179,6 +179,35 @@ def frontier_pieces(cells, split_cells):
     return [cells[j * n // k:(j + 1) * n // k] for j in range(k)]
 
 
+def reachable(grid, passable, seed):
+    """The passable cells connected to seed (bool array). 8-connected, except that a diagonal step
+    between two lethal cells (keep-out marks, walls) is no way through: Nav2's planner (navfn) only
+    spreads to the 4 neighbours, and in Isaac run 9 a ring of bump marks with diagonal gaps trapped
+    the robot while the explorer saw a way out. Past inscribed corners it still steps diagonally
+    (that inflation changes as the robot gets closer and sees better)."""
+    n, labels = cv2.connectedComponents(passable, connectivity=4)
+    lethal = grid >= 100
+    parent = list(range(n))
+
+    def root(a):
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]
+            a = parent[a]
+        return a
+    # diagonal neighbours (r, c) - (r + 1, c +/- 1), unless both corner cells are lethal
+    for a, b, blocked in ((labels[:-1, :-1], labels[1:, 1:], lethal[:-1, 1:] & lethal[1:, :-1]),
+                          (labels[:-1, 1:], labels[1:, :-1], lethal[:-1, :-1] & lethal[1:, 1:])):
+        ok = (a > 0) & (b > 0) & (a != b) & ~blocked
+        for x, y in set(zip(a[ok].tolist(), b[ok].tolist())):
+            rx, ry = root(x), root(y)
+            if rx != ry:
+                parent[rx] = ry
+    mine = root(labels[seed])
+    same = np.array([root(k) == mine for k in range(n)], dtype=bool)
+    same[0] = False
+    return same[labels]
+
+
 def frontier_goals(grid, robot_rc, free_max, pass_max, clear_max, min_cells, standoff_cells, search_cells,
                    cost_weight=0.0, peek_cells=0.0, groups=None, split_cells=0.0):
     """Reachable frontier groups with a goal cell parked in clear, known space next to each.
@@ -193,8 +222,9 @@ def frontier_goals(grid, robot_rc, free_max, pass_max, clear_max, min_cells, sta
     pieces (frontier_pieces), a spot each: one spot failing (a railing the camera misses in the
     way) doesn't drop a room's whole far side. groups: find_frontiers(grid, free_max, min_cells)
     if the caller has it already.
-    Returns (goals, seed, peeks): goals and peeks are lists of (goal_rc, piece centroid_rc, group
-    size), seed the robot's free cell (None if the robot isn't next to passable space).
+    Returns (goals, seed, peeks, reach_cells): goals and peeks are lists of (goal_rc, piece
+    centroid_rc, group size), seed the robot's free cell (None if the robot isn't next to passable
+    space), reach_cells how many cells it can reach (see reachable).
     """
     h, w = grid.shape
     passable = ((grid >= 0) & (grid <= pass_max)).astype(np.uint8)
@@ -210,9 +240,8 @@ def frontier_goals(grid, robot_rc, free_max, pass_max, clear_max, min_cells, sta
             seed = tuple(hits[k] + [r0, c0])
             break
     if seed is None:
-        return [], None, []
-    _, labels = cv2.connectedComponents(passable, connectivity=8)
-    reach = labels == labels[seed]
+        return [], None, [], 0
+    reach = reachable(grid, passable, seed)
     # Distance (cells) to the nearest unknown cell; outside the grid counts as unknown.
     known = np.pad((grid >= 0).astype(np.uint8), 1)
     d_unknown = cv2.distanceTransform(known, cv2.DIST_L2, 3)[1:-1, 1:-1]
@@ -242,7 +271,7 @@ def frontier_goals(grid, robot_rc, free_max, pass_max, clear_max, min_cells, sta
             if i is not None:
                 out.append((tuple(spot_rc[i]), (cy, cx), size))
             # else: no spot near it to look from
-    return goals, seed, peeks
+    return goals, seed, peeks, int(np.count_nonzero(reach))
 
 
 class Explorer(Node):
@@ -641,10 +670,10 @@ class Explorer(Node):
         robot_rc = (int((pose[1] - oy) / res), int((pose[0] - ox) / res))
         viz = self.pub_markers.get_subscription_count() > 0
         groups = find_frontiers(grid, self.free_max, self.min_cells) if viz else None
-        goals, seed, peeks = frontier_goals(grid, robot_rc, self.free_max, self.pass_max, self.clear_max,
-                                            self.min_cells, self.standoff / res, self.goal_search / res,
-                                            self.cost_weight, self.peek_search / res, groups,
-                                            self.frontier_split / res)
+        goals, seed, peeks, reach_cells = frontier_goals(grid, robot_rc, self.free_max, self.pass_max, self.clear_max,
+                                                         self.min_cells, self.standoff / res, self.goal_search / res,
+                                                         self.cost_weight, self.peek_search / res, groups,
+                                                         self.frontier_split / res)
         if seed is None:
             self.message = 'Robot is not in free space on the costmap; waiting…'
             return

@@ -456,17 +456,49 @@ fn best_spot(cells: &[(usize, usize)], penalty: &[f64], cy: f64, cx: f64, limit:
     best.map(|b| b.1)
 }
 
+
+/// The `passable` cells connected to `seed` (explorer.py reachable). 8-connected, except that a
+/// diagonal step between two lethal cells (keep-out marks, walls) is no way through: Nav2's planner
+/// (navfn) only spreads to the 4 neighbours, and in Isaac run 9 a ring of bump marks with diagonal
+/// gaps trapped the robot while the explorer saw a way out. Past inscribed corners it still steps
+/// diagonally (that inflation changes as the robot gets closer and sees better).
+pub fn reachable(grid: &[i8], passable: &[bool], w: usize, h: usize, seed: (usize, usize)) -> Vec<bool> {
+    let mut reach = vec![false; w * h];
+    let mut queue = VecDeque::from([seed]);
+    reach[seed.0 * w + seed.1] = true;
+    while let Some((rr, cc)) = queue.pop_front() {
+        for dr in -1i64..=1 {
+            for dc in -1i64..=1 {
+                let (nr, nc) = (rr as i64 + dr, cc as i64 + dc);
+                if nr < 0 || nc < 0 || nr >= h as i64 || nc >= w as i64 {
+                    continue;
+                }
+                let k = nr as usize * w + nc as usize;
+                if !passable[k] || reach[k] {
+                    continue;
+                }
+                if dr != 0 && dc != 0 && grid[rr * w + nc as usize] >= 100 && grid[nr as usize * w + cc] >= 100 {
+                    continue;
+                }
+                reach[k] = true;
+                queue.push_back((nr as usize, nc as usize));
+            }
+        }
+    }
+    reach
+}
+
 /// explorer.py frontier_goals: reachable frontier groups (long ones in pieces) with a goal cell
 /// parked in clear, known space next to each (or, in narrow places, the best reachable cell below
-/// inscribed), the robot's seed cell (None if it isn't next to passable space), and spots to look
-/// at the frontier groups it can't reach from.
+/// inscribed), the robot's seed cell (None if it isn't next to passable space), spots to look at
+/// the frontier groups it can't reach from, and how many cells it can reach.
 pub fn frontier_goals(
     grid: &[i8],
     w: usize,
     h: usize,
     robot: (i64, i64),
     p: &FrontierParams,
-) -> (Vec<FrontierGoal>, Option<(usize, usize)>, Vec<FrontierGoal>) {
+) -> (Vec<FrontierGoal>, Option<(usize, usize)>, Vec<FrontierGoal>, usize) {
     let passable: Vec<bool> = grid.iter().map(|&g| g >= 0 && (g as i64) <= p.pass_max).collect();
     let (r, c) = robot;
     let mut seed = None;
@@ -493,26 +525,9 @@ pub fn frontier_goals(
             break;
         }
     }
-    let Some(seed) = seed else { return (Vec::new(), None, Vec::new()) };
-    // The seed's 8-connected passable component.
-    let mut reach = vec![false; w * h];
-    let mut queue = VecDeque::from([seed]);
-    reach[seed.0 * w + seed.1] = true;
-    while let Some((rr, cc)) = queue.pop_front() {
-        for dr in -1i64..=1 {
-            for dc in -1i64..=1 {
-                let (nr, nc) = (rr as i64 + dr, cc as i64 + dc);
-                if nr < 0 || nc < 0 || nr >= h as i64 || nc >= w as i64 {
-                    continue;
-                }
-                let k = nr as usize * w + nc as usize;
-                if passable[k] && !reach[k] {
-                    reach[k] = true;
-                    queue.push_back((nr as usize, nc as usize));
-                }
-            }
-        }
-    }
+    let Some(seed) = seed else { return (Vec::new(), None, Vec::new(), 0) };
+    let reach = reachable(grid, &passable, w, h, seed);
+    let reach_cells = reach.iter().filter(|&&r| r).count();
     // Distance (cells) to the nearest unknown cell; outside the grid counts as unknown.
     let (w2, h2) = (w + 2, h + 2);
     let mut known = vec![0u8; w2 * h2];
@@ -569,7 +584,7 @@ pub fn frontier_goals(
             } // else: no spot near it to look from
         }
     }
-    (goals, Some(seed), peeks)
+    (goals, Some(seed), peeks, reach_cells)
 }
 
 // ---- the node's state machine ----
@@ -1417,7 +1432,8 @@ impl Explorer {
             peek_cells: self.p.peek_search / res,
             split_cells: self.p.frontier_split / res,
         };
-        let (goals, seed, peeks) = frontier_goals(&grid.data, w, h, robot, &fp);
+        let mut data = grid.data.clone();
+        let (goals, seed, peeks, reach_cells) = frontier_goals(&data, w, h, robot, &fp);
         if seed.is_none() {
             self.message = "Robot is not in free space on the costmap; waiting…".into();
             return;
@@ -2363,7 +2379,7 @@ mod tests {
             peek_cells: 30.0,
             split_cells: 0.0,
         };
-        let (goals, seed, peeks) = frontier_goals(&grid, w, h, (10, 3), &p);
+        let (goals, seed, peeks, _) = frontier_goals(&grid, w, h, (10, 3), &p);
         assert_eq!(seed, Some((10, 3)));
         assert_eq!(goals.len(), 1);
         assert!(peeks.is_empty());
@@ -2410,7 +2426,7 @@ mod tests {
         };
         // Passable (cost 80): reachable; the clear cells in the second room are near enough.
         let (grid, w, h) = two_rooms(80);
-        let (goals, _, _) = frontier_goals(&grid, w, h, (10, 5), &p(0.05, 0.0));
+        let (goals, _, _, _) = frontier_goals(&grid, w, h, (10, 5), &p(0.05, 0.0));
         assert_eq!(goals.len(), 1);
         // Without clear cells near the frontier (the second room inflated too), the old rule
         // dropped it; the fallback picks the best cell below inscribed.
@@ -2421,13 +2437,13 @@ mod tests {
             }
         }
         assert!(frontier_goals(&inflated, w, h, (10, 5), &p(0.0, 0.0)).0.is_empty());
-        let (goals, _, _) = frontier_goals(&inflated, w, h, (10, 5), &p(0.05, 0.0));
+        let (goals, _, _, _) = frontier_goals(&inflated, w, h, (10, 5), &p(0.05, 0.0));
         assert_eq!(goals.len(), 1);
         let g = goals[0].goal;
         assert!(inflated[g.0 * w + g.1] <= 98 && g.1 >= 19, "{g:?}");
         // Passage inscribed (cost 99): not reachable - no goal, but a spot to look at it from.
         let (grid, w, h) = two_rooms(99);
-        let (goals, _, peeks) = frontier_goals(&grid, w, h, (10, 5), &p(0.05, 30.0));
+        let (goals, _, peeks, _) = frontier_goals(&grid, w, h, (10, 5), &p(0.05, 30.0));
         assert!(goals.is_empty());
         assert_eq!(peeks.len(), 1);
         assert!(peeks[0].goal.1 <= 12, "the spot is on the robot's side: {:?}", peeks[0].goal);
@@ -2460,10 +2476,10 @@ mod tests {
             peek_cells: 0.0,
             split_cells,
         };
-        let (one, _, _) = frontier_goals(&grid, w, h, (5, 50), &p(0.0));
+        let (one, _, _, _) = frontier_goals(&grid, w, h, (5, 50), &p(0.0));
         assert_eq!(one.len(), 1);
         assert_eq!(one[0].centroid, (12.0, 49.5));
-        let (goals, _, _) = frontier_goals(&grid, w, h, (5, 50), &p(40.0));
+        let (goals, _, _, _) = frontier_goals(&grid, w, h, (5, 50), &p(40.0));
         // 98 cells / 40 -> 3 pieces of 32-33 cells, west to east; each keeps the group's size.
         assert_eq!(goals.len(), 3);
         assert_eq!(goals.iter().map(|g| g.centroid).collect::<Vec<_>>(), vec![(12.0, 16.5), (12.0, 49.0), (12.0, 82.0)]);
@@ -2981,6 +2997,49 @@ mod tests {
             io.ticks(&mut e, 24 + 22 * k, 45 + 22 * k);
         }
         assert_eq!(e.state(), State::Done);
+    }
+
+
+    #[test]
+    fn no_way_through_diagonal_gaps_between_lethal_cells() {
+        // A wall with only diagonal gaps between its cells (column 8 on even rows, 9 on odd ones):
+        // Nav2's planner can't get through, so the frontier beyond (column 15) is out of reach.
+        let (w, h) = (20usize, 10usize);
+        let house = |zigzag: i8| {
+            let mut grid = vec![0i8; w * h];
+            for r in 0..h {
+                for c in 0..w {
+                    grid[r * w + c] = if c >= 16 {
+                        -1
+                    } else if r == 0 || r == h - 1 || c == 0 {
+                        100
+                    } else if c == 8 + r % 2 {
+                        zigzag
+                    } else {
+                        0
+                    };
+                }
+            }
+            grid
+        };
+        let p = FrontierParams {
+            free_max: 40,
+            pass_max: 98,
+            clear_max: 15,
+            min_cells: 5,
+            standoff_cells: 3.0,
+            search_cells: 16.0,
+            cost_weight: 0.05,
+            peek_cells: 0.0,
+            split_cells: 0.0,
+        };
+        let (goals, _, _, reach) = frontier_goals(&house(100), w, h, (5, 2), &p);
+        assert!(goals.is_empty());
+        assert_eq!(reach, 60, "rows 1-8 of columns 1-7, and the four pockets at column 8");
+        // Inscribed (not lethal) corners: it steps through diagonally, as it did before.
+        let (goals, _, _, reach) = frontier_goals(&house(99), w, h, (5, 2), &p);
+        assert!(!goals.is_empty());
+        assert_eq!(reach, 112, "rows 1-8 of columns 1-15 but the zigzag");
     }
 
     #[test]

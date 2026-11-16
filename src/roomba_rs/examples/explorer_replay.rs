@@ -17,7 +17,7 @@
 //! ["SG", seq, target_yaw, sec, nanosec] / ["SC", seq] /
 //! ["MK", [[frame, stamp_ns, ns, id, type, action, [x, y, z, qw], [sx, sy, sz], [r, g, b, a], [[x, y, z], ...], text], ...]]
 //! (~/markers, a DELETEALL first) /
-//! ["FQ", [[goal_row, goal_col, centroid_row, centroid_col, size], ...], seed|null, [row, col], [peeks]]
+//! ["FQ", [[goal_row, goal_col, centroid_row, centroid_col, size], ...], seed|null, [row, col], [peeks], reach_cells]
 //! or ["FQ", null].
 use std::fs::File;
 use std::io::{self, BufRead, BufWriter, Read, Seek, SeekFrom, Write};
@@ -183,11 +183,11 @@ fn frontier_query(io: &mut Replay<impl Write>, p: &Params, grid: Option<&Grid>, 
         peek_cells: p.peek_search / res,
         split_cells: p.frontier_split / res,
     };
-    let (goals, seed, peeks) = frontier_goals(&grid.data, grid.width as usize, grid.height as usize, robot, &fp);
+    let (goals, seed, peeks, reach) = frontier_goals(&grid.data, grid.width as usize, grid.height as usize, robot, &fp);
     let list = |gs: &[roomba_rs::explorer::FrontierGoal]| -> Vec<Value> {
         gs.iter().map(|g| json!([g.goal.0, g.goal.1, g.centroid.0, g.centroid.1, g.size])).collect()
     };
-    json!(["FQ", list(&goals), seed.map(|s| json!([s.0, s.1])), [robot.0, robot.1], list(&peeks)])
+    json!(["FQ", list(&goals), seed.map(|s| json!([s.0, s.1])), [robot.0, robot.1], list(&peeks), reach])
 }
 
 fn main() -> anyhow::Result<()> {

@@ -400,32 +400,17 @@ pub fn frontier_report(cm: &CostGrid, robot: P2, overrides: &serde_json::Map<Str
     }
     let fp = explorer_frontier_params(res, overrides);
     let rc = (((robot[1] - cm.origin[1]) / res) as i64, ((robot[0] - cm.origin[0]) / res) as i64);
-    let (goals, seed, peeks) = frontier_goals(&cm.data, w, h, rc, &fp);
+    let (goals, seed, peeks, _) = frontier_goals(&cm.data, w, h, rc, &fp);
     // The robot's reachable component, as frontier_goals computes it.
     let passable: Vec<bool> = cm.data.iter().map(|&g| g >= 0 && (g as i64) <= fp.pass_max).collect();
-    let mut reach = vec![false; w * h];
-    if let Some(s) = seed {
-        let mut queue = std::collections::VecDeque::from([s]);
-        reach[s.0 * w + s.1] = true;
-        while let Some((r, c)) = queue.pop_front() {
-            for dr in -1i64..=1 {
-                for dc in -1i64..=1 {
-                    let (nr, nc) = (r as i64 + dr, c as i64 + dc);
-                    if nr < 0 || nc < 0 || nr >= h as i64 || nc >= w as i64 {
-                        continue;
-                    }
-                    let k = nr as usize * w + nc as usize;
-                    if passable[k] && !reach[k] {
-                        reach[k] = true;
-                        queue.push_back((nr as usize, nc as usize));
-                    }
-                }
-            }
-        }
-    }
+    let reach = match seed {
+        Some(s) => crate::explorer::reachable(&cm.data, &passable, w, h, s),
+        None => vec![false; w * h],
+    };
     let xy = |r: f64, c: f64| [cm.origin[0] + (c + 0.5) * res, cm.origin[1] + (r + 0.5) * res];
-    // Bottleneck cost from the robot to every known cell: the lowest possible highest cost along an
-    // 8-connected path through known cells (what a planner allowed up to that cost could reach).
+    // Bottleneck cost from the robot to every known cell: the lowest possible highest cost along a
+    // path through known cells (what a planner allowed up to that cost could reach; no diagonal
+    // step between two lethal cells, as in the explorer's reach).
     let mut bottleneck = vec![i32::MAX; w * h];
     if let Some(s) = seed {
         let mut heap = std::collections::BinaryHeap::new();
@@ -445,6 +430,9 @@ pub fn frontier_report(cm: &CostGrid, robot: P2, overrides: &serde_json::Map<Str
                     }
                     let n = nr as usize * w + nc as usize;
                     if cm.data[n] < 0 {
+                        continue;
+                    }
+                    if dr != 0 && dc != 0 && cm.data[r as usize * w + nc as usize] >= 100 && cm.data[nr as usize * w + c as usize] >= 100 {
                         continue;
                     }
                     let nb = b.max(cm.data[n] as i32);
