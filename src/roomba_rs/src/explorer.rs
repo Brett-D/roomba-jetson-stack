@@ -30,6 +30,11 @@ const DROP_CELL_M: f64 = 0.05;
 const DROP_TF_WAIT_S: f64 = 1.0;
 /// Drop clouds waiting for their transform at most (the oldest go first).
 const MAX_PENDING_DROPS: usize = 10;
+/// Person detections wait this long (s after their stamp) for the transform at their time, then
+/// are skipped.
+const PERSON_TF_WAIT_S: f64 = 1.0;
+/// Person detection messages waiting for their transform at most (the oldest go first).
+const MAX_PENDING_PERSONS: usize = 10;
 /// Cliff sensors (SensorState fields) and their direction on the Roomba (rad, left positive).
 pub const CLIFF_ANGLES: [(&str, f64); 4] =
     [("cliff_left", 1.05), ("cliff_front_left", 0.35), ("cliff_front_right", -0.35), ("cliff_right", -1.05)];
@@ -1085,8 +1090,11 @@ pub struct Explorer {
     unstuck_goal: Option<(f64, f64)>,
     progress: Option<(f64, f64, f64)>,
     unstuck_missing_logged: bool,
-    /// People the person detector saw lately: (time, x, y) in the map frame.
+    /// People the person detector saw lately: (time seen, x, y) in the map frame.
     persons: Vec<(f64, f64, f64)>,
+    /// Person detections (stamp ns, frame, points) waiting for the transform at their time.
+    pending_persons: Vec<(i64, String, Vec<[f64; 3]>)>,
+    persons_skipped: u64,
     /// Drop-off cells (DROP_CELL_M lattice in the map frame) -> clouds that had drop points there.
     drop_hits: HashMap<(i64, i64), i64>,
     /// Drop clouds (stamp ns, frame, points) waiting for the transform at their time.
@@ -1156,6 +1164,8 @@ impl Explorer {
             drop_hits: HashMap::new(),
             pending_drops: Vec::new(),
             drops_skipped: 0,
+            pending_persons: Vec::new(),
+            persons_skipped: 0,
             trap_next: f64::NEG_INFINITY,
             look_until: f64::NEG_INFINITY,
         };
@@ -1226,18 +1236,48 @@ impl Explorer {
     }
 
     /// People the person detector reports (/perception/person_detector/detections_3d): their
-    /// positions in `frame`, kept person_bump_window_s in the map frame.
-    pub fn on_persons(&mut self, frame: &str, points: &[[f64; 3]], io: &mut impl Io) {
+    /// positions in `frame` at `stamp_ns` (the camera image's time), placed with the transform at
+    /// that time and kept person_bump_window_s from it; a message whose transform isn't there yet
+    /// waits for it (up to PERSON_TF_WAIT_S), then is skipped. Stamp 0 (unset): now, the latest
+    /// transform.
+    pub fn on_persons(&mut self, frame: &str, stamp_ns: i64, points: &[[f64; 3]], io: &mut impl Io) {
         if self.p.person_bump_dist <= 0.0 || points.is_empty() {
             return;
         }
-        let Some((t, q)) = io.lookup(&self.p.map_frame, frame) else { return };
-        let now = io.now();
-        let r = rotation(q);
-        for p in points {
-            let (x, y) = to_frame(&r, t, p[0], p[1], p[2]);
-            self.persons.push((now, x, y));
+        self.pending_persons.push((stamp_ns, frame.to_string(), points.to_vec()));
+        if self.pending_persons.len() > MAX_PENDING_PERSONS {
+            self.pending_persons.remove(0);
         }
+        self.apply_persons(io);
+    }
+
+    /// The waiting person detections whose transform is there now (explorer.py _apply_persons).
+    fn apply_persons(&mut self, io: &mut impl Io) {
+        if self.pending_persons.is_empty() {
+            return;
+        }
+        let now = io.now();
+        let mut keep = Vec::new();
+        for (stamp, frame, points) in std::mem::take(&mut self.pending_persons) {
+            let seen = if stamp > 0 { stamp as f64 * 1e-9 } else { now };
+            match io.lookup_at(&self.p.map_frame, &frame, stamp) {
+                Some((t, q)) => {
+                    let r = rotation(q);
+                    for p in &points {
+                        let (x, y) = to_frame(&r, t, p[0], p[1], p[2]);
+                        self.persons.push((seen, x, y));
+                    }
+                }
+                None if now - seen > PERSON_TF_WAIT_S => {
+                    self.persons_skipped += 1;
+                    if self.persons_skipped == 1 {
+                        io.log(Level::Warn, "Person detections without a transform at their time: skipped".into());
+                    }
+                }
+                None => keep.push((stamp, frame, points)),
+            }
+        }
+        self.pending_persons = keep;
         let window = self.p.person_bump_window;
         self.persons.retain(|p| now - p.0 <= window);
         if self.persons.len() > 100 {
@@ -1250,6 +1290,7 @@ impl Explorer {
         if self.p.person_bump_dist <= 0.0 {
             return false;
         }
+        self.apply_persons(io);
         let window = self.p.person_bump_window;
         self.persons.retain(|p| now - p.0 <= window);
         if self.persons.is_empty() {
@@ -1579,6 +1620,7 @@ impl Explorer {
     pub fn tick(&mut self, io: &mut impl Io) {
         let now = io.now();
         self.apply_drops(io);
+        self.apply_persons(io);
         if let Some(call) = self.unstuck.filter(|c| now - c.sent > self.p.unstuck_call_timeout) {
             io.log(Level::Warn, format!("The unstuck skill did not finish within {:.0} s", self.p.unstuck_call_timeout));
             if call.accepted {
@@ -3420,7 +3462,7 @@ mod tests {
         let g = io.goals[0].clone();
         e.on_goal_response(g.seq, true, &mut io);
         // Someone 0.5 m ahead, seen a second before the hit: a leg, not a railing.
-        e.on_persons("base_link", &[[0.5, 0.0, 0.8]], &mut io);
+        e.on_persons("base_link", (io.t * 1e9) as i64, &[[0.5, 0.0, 0.8]], &mut io);
         io.t = 2.0;
         e.on_sensors(&Sensors { bump_left: true, ..Default::default() }, &mut io);
         e.on_sensors(&Sensors::default(), &mut io);
@@ -3428,10 +3470,47 @@ mod tests {
         assert!(io.logs.iter().any(|(_, m)| m == "Bumper hit at +29 deg with a person in front: not marked"), "{:?}", io.logs);
         // Someone behind it, or seen too long ago: marked, and counted towards skipping the goal.
         io.t = 6.0;
-        e.on_persons("base_link", &[[-0.5, 0.0, 0.8]], &mut io);
+        e.on_persons("base_link", 6_000_000_000, &[[-0.5, 0.0, 0.8]], &mut io);
         e.on_sensors(&Sensors { bump_left: true, ..Default::default() }, &mut io);
         assert_eq!(io.zones.len(), 1);
         assert!(io.cancels.is_empty(), "one bump counted, not two");
+    }
+
+    #[test]
+    fn person_detections_count_from_their_stamp_and_wait_for_their_transform() {
+        let mut io = TestIo::default();
+        let mut e = exploring(&mut io);
+        let g = io.goals[0].clone();
+        e.on_goal_response(g.seq, true, &mut io);
+        let ns = |t: f64| (t * 1e9) as i64;
+        let bump = |e: &mut Explorer, io: &mut TestIo| {
+            e.on_sensors(&Sensors { bump_left: true, ..Default::default() }, io);
+            e.on_sensors(&Sensors::default(), io);
+        };
+        // Seen 4 s before it arrives (person_bump_window_s 3): too old to excuse the hit.
+        io.t = 10.0;
+        e.on_persons("base_link", ns(6.0), &[[0.5, 0.0, 0.8]], &mut io);
+        bump(&mut e, &mut io);
+        assert_eq!(io.zones.len(), 1, "marked");
+        // Stamped after the newest transform: waits for it, then counts.
+        io.t = 20.5;
+        io.tf_until = ns(20.0);
+        e.on_persons("base_link", ns(20.4), &[[0.5, 0.0, 0.8]], &mut io);
+        assert_eq!(e.pending_persons.len(), 1);
+        io.tf_until = 0;
+        io.pose.0 += 0.3;
+        bump(&mut e, &mut io);
+        assert_eq!(io.zones.len(), 1, "not marked: someone in front");
+        assert!(e.pending_persons.is_empty());
+        // Never gets its transform: skipped PERSON_TF_WAIT_S after its stamp, with one warning.
+        io.tf_until = ns(30.0);
+        io.t = 30.5;
+        e.on_persons("base_link", ns(30.4), &[[0.5, 0.0, 0.8]], &mut io);
+        io.ticks(&mut e, 31, 31);
+        assert_eq!(e.pending_persons.len(), 1, "still waiting");
+        io.ticks(&mut e, 32, 32);
+        assert!(e.pending_persons.is_empty());
+        assert_eq!(io.warnings("Person detections without a transform"), 1);
     }
 
     #[test]

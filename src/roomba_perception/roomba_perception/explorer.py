@@ -95,6 +95,8 @@ GOAL_LABELS = {'frontier': 'goal: unmapped area', 'peek': 'goal: closer look', '
 DROP_CELL_M = 0.05  # lattice (m) of the drop-off cells it remembers, in the map frame
 DROP_TF_WAIT_S = 1.0  # a drop cloud waits this long (s after its stamp) for the transform at its time
 MAX_PENDING_DROPS = 10  # drop clouds waiting for their transform at most (the oldest go first)
+PERSON_TF_WAIT_S = 1.0  # person detections wait this long (s after their stamp) for their transform
+MAX_PENDING_PERSONS = 10  # person detection messages waiting for their transform at most
 
 try:
     from roomba_msgs.msg import SensorState
@@ -462,7 +464,9 @@ class Explorer(Node):
         self.goal_bumps = 0
         self.bumped = False
         self.bump_points = []        # (x, y, monotonic) of recent marks
-        self.persons = []            # (time, x, y) in the map frame of people the detector saw lately
+        self.persons = []            # (time seen, x, y) in the map frame of people the detector saw lately
+        self.pending_persons = []    # (stamp ns, frame, points) of person detections waiting for their transform
+        self.persons_skipped = 0
         self.drop_hits = {}          # drop-off cell (DROP_CELL_M lattice, map frame) -> clouds with drop points there
         self.pending_drops = []      # (stamp ns, frame, points) of drop clouds waiting for their transform
         self.drops_skipped = 0
@@ -578,30 +582,52 @@ class Explorer(Node):
         self.bumped = bumped
 
     def _on_persons(self, msg):
-        """People the person detector reports: kept person_bump_window_s in the map frame."""
+        stamp = msg.header.stamp.sec * 1000000000 + msg.header.stamp.nanosec
         points = [(d.bbox.center.position.x, d.bbox.center.position.y, d.bbox.center.position.z)
                   for d in msg.detections]
-        self._persons(msg.header.frame_id, points)
+        self._persons(msg.header.frame_id, stamp, points)
 
-    def _persons(self, frame, points):
+    def _persons(self, frame, stamp, points):
+        """People the person detector reports: their positions in `frame` at `stamp` (ns, the camera
+        image's time), placed with the transform at that time and kept person_bump_window_s from it;
+        a message whose transform isn't there yet waits for it (up to PERSON_TF_WAIT_S), then is
+        skipped. Stamp 0 (unset): now, the latest transform."""
         if self.person_bump_dist <= 0 or not points:
             return
-        tf = self._lookup(frame)
-        if tf is None:
+        self.pending_persons.append((stamp, frame, points))
+        del self.pending_persons[:-MAX_PENDING_PERSONS]
+        self._apply_persons()
+
+    def _apply_persons(self):
+        """The waiting person detections whose transform is there now."""
+        if not self.pending_persons:
             return
-        (tx, ty, _), q = tf
         now = self._now()
-        r = _rotation(q)
-        for px, py, pz in points:
-            x = r[0][0] * px + r[0][1] * py + r[0][2] * pz + tx
-            y = r[1][0] * px + r[1][1] * py + r[1][2] * pz + ty
-            self.persons.append((now, x, y))
+        keep = []
+        for stamp, frame, points in self.pending_persons:
+            seen = stamp * 1e-9 if stamp > 0 else now
+            tf = self._lookup(frame, stamp)
+            if tf is not None:
+                (tx, ty, _), q = tf
+                r = _rotation(q)
+                for px, py, pz in points:
+                    x = r[0][0] * px + r[0][1] * py + r[0][2] * pz + tx
+                    y = r[1][0] * px + r[1][1] * py + r[1][2] * pz + ty
+                    self.persons.append((seen, x, y))
+            elif now - seen > PERSON_TF_WAIT_S:
+                self.persons_skipped += 1
+                if self.persons_skipped == 1:
+                    self.get_logger().warn('Person detections without a transform at their time: skipped')
+            else:
+                keep.append((stamp, frame, points))
+        self.pending_persons = keep
         self.persons = [p for p in self.persons if now - p[0] <= self.person_bump_window][-100:]
 
     def _person_in_front(self, now):
         """Whether someone was seen in front of the robot within person_bump_dist_m lately."""
         if self.person_bump_dist <= 0:
             return False
+        self._apply_persons()
         self.persons = [p for p in self.persons if now - p[0] <= self.person_bump_window]
         if not self.persons:
             return False
@@ -859,6 +885,7 @@ class Explorer(Node):
     def _tick(self):
         now = self._now()
         self._apply_drops()
+        self._apply_persons()
         if self.sending is not None and now - self.sending[1] > self.response_timeout:
             self._no_response()
         elif self.spin is not None and now - self.spin[1] > (

@@ -547,7 +547,8 @@ fn main() -> Result<()> {
         "/perception/person_detector/detections_3d".keep_last(5),
         |s: &mut State, m: vision_msgs::msg::Detection3DArray| {
             let points: Vec<[f64; 3]> = m.detections.iter().map(|d| [d.bbox.center.position.x, d.bbox.center.position.y, d.bbox.center.position.z]).collect();
-            s.core.on_persons(&m.header.frame_id, &points, &mut s.io)
+            let stamp = m.header.stamp.sec as i64 * 1_000_000_000 + m.header.stamp.nanosec as i64;
+            s.core.on_persons(&m.header.frame_id, stamp, &points, &mut s.io)
         },
     )?;
     // Steady-clock timers: with a ROS-time (system clock) timer, a wait that ends for it just as the

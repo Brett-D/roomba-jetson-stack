@@ -73,10 +73,12 @@ def cloud_msg(frame, pts, stamp=0):
     return msg
 
 
-def detections_msg(frame, pts):
-    """Detection3DArray with a box centred at each point (as the person detector publishes it)."""
+def detections_msg(frame, pts, stamp=0):
+    """Detection3DArray with a box centred at each point (as the person detector publishes it),
+    stamped stamp (ns)."""
     msg = Detection3DArray()
     msg.header.frame_id = frame
+    msg.header.stamp.sec, msg.header.stamp.nanosec = divmod(int(stamp), 10**9)
     for x, y, z in pts:
         d = Detection3D()
         d.header.frame_id = frame
@@ -420,9 +422,10 @@ class Harness:
             self.ev('DR', frame, [[float(v) for v in row] for row in arr], int(stamp))
             self.subs['/perception/drops'](cloud_msg(frame, arr, stamp))
         elif kind == 'PD':
-            frame, pts = p
-            self.ev('PD', frame, [[float(v) for v in q] for q in pts])
-            self.subs['/perception/person_detector/detections_3d'](detections_msg(frame, pts))
+            frame, pts, *stamp = p    # stamp (ns): the camera image's time, default now
+            stamp = stamp[0] if stamp else self.ros
+            self.ev('PD', frame, [[float(v) for v in q] for q in pts], int(stamp))
+            self.subs['/perception/person_detector/detections_3d'](detections_msg(frame, pts, stamp))
         elif kind == 'Q':
             self.ev('Q', *(p or ()))
             self.py.append(self.frontier_query(p))
@@ -1352,6 +1355,37 @@ def sc_people_bump(h):
         return [] if adds and all(a['ttl_s'] == 60.0 for a in adds) else [f'marks: {adds}']
     h.checks = [lambda h: check_logs(h, 'with a person in front: not marked', 3), short_marks]
     return 400
+
+
+def sc_person_stamps(h):
+    """Person detections are placed with the transform at their stamp (the camera image's time) and
+    age from it: one stamped before the robot moved 1.5 m forward lands behind it (the hit is
+    marked); one stamped 4.6 s before the hit (person_bump_window_s 3) no longer counts (marked);
+    one newer than the TF waits for it and counts (not marked); one older than the TF cache is
+    skipped (one warning)."""
+    start_world(h, house(), cmd_at=None)
+    a, b, c = (0.5, 0.5, 0.0), (2.0, 0.5, 0.0), (2.0, 2.0, math.pi / 2)
+    ahead = [(0.6, 0.0, 0.8)]
+
+    def move(pose):
+        return lambda: (setattr(h.world, 'pose', pose), h.world.publish())
+
+    def bump(t):
+        h.inp(t, 'S', {'bump_left': True})
+        h.inp(t + 0.2, 'S', {})
+    h.inp(9.0, 'CALL', move(a))
+    h.inp(10.3, 'CALL', move(b))
+    h.inp(10.5, 'PD', ('base_link', ahead, ROS0 + 10 * 10**9))           # seen from a
+    bump(10.6)
+    h.inp(15.0, 'CALL', move(c))
+    h.inp(20.5, 'PD', ('base_link', ahead, ROS0 + 16 * 10**9))           # 4.6 s before the hit
+    bump(20.6)
+    h.inp(25.5, 'PD', ('base_link', ahead, ROS0 + 25_900_000_000))       # TF has it at 26 s
+    bump(26.5)
+    h.inp(30.5, 'PD', ('base_link', ahead, ROS0 + 5 * 10**9))            # older than the TF cache
+    h.checks = [lambda h: check_logs(h, 'with a person in front: not marked', 1),
+                lambda h: check_logs(h, 'Person detections without a transform at their time', 1)]
+    return 40
 
 
 def sc_bump_confirm(h):
