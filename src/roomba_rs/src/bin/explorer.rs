@@ -9,7 +9,8 @@
 //!             /perception/drops (drop-offs floor_obstacles saw)
 //!             /perception/person_detector/detections_3d (people the detector sees)
 //! Publishes:  ~/status (JSON, transient local), /perception/ignore_zones/command, ~/markers (how it
-//!             decides where to go; transient local, only while someone listens)
+//!             decides where to go; transient local, only while someone listens), ~/drops (the
+//!             drop-off cells it remembers, 1 Hz, for the global costmap's drop_layer)
 //! Uses:       navigate_to_pose action, /controller_server/get_parameters|set_parameters,
 //!             /unstuck_skill action (only with `unstuck_skill: true` and the `learned` build feature)
 
@@ -49,6 +50,7 @@ struct RosIo {
     pub_status: Publisher<std_msgs::msg::String>,
     pub_zone: Publisher<std_msgs::msg::String>,
     pub_markers: Publisher<visualization_msgs::msg::MarkerArray>,
+    pub_drops: Publisher<sensor_msgs::msg::PointCloud2>,
     cliff_timers: Vec<WorkerTimer<State>>,
     /// The learned unstuck skill (`unstuck_skill: true`) and its accepted calls by sequence number.
     #[cfg(feature = "learned")]
@@ -323,6 +325,26 @@ impl Io for RosIo {
         let markers = std::iter::once(clear).chain(specs.iter().map(|m| marker(m, &header))).collect();
         self.pub_markers.publish(visualization_msgs::msg::MarkerArray { markers }).ok();
     }
+
+    fn drops(&mut self, frame: &str, points: &[[f32; 3]]) {
+        let ns = self.node.get_clock().now().nsec;
+        let field = |name: &str, offset: u32| sensor_msgs::msg::PointField { name: name.into(), offset, datatype: 7, count: 1 };
+        let msg = sensor_msgs::msg::PointCloud2 {
+            header: std_msgs::msg::Header {
+                stamp: builtin_interfaces::msg::Time { sec: ns.div_euclid(1_000_000_000) as i32, nanosec: ns.rem_euclid(1_000_000_000) as u32 },
+                frame_id: frame.into(),
+            },
+            height: 1,
+            width: points.len() as u32,
+            fields: vec![field("x", 0), field("y", 4), field("z", 8)],
+            is_bigendian: false,
+            point_step: 12,
+            row_step: 12 * points.len() as u32,
+            data: points.iter().flat_map(|p| p.iter().flat_map(|v| v.to_le_bytes())).collect(),
+            is_dense: true,
+        };
+        self.pub_drops.publish(msg).ok();
+    }
 }
 
 fn marker(m: &MarkerSpec, header: &std_msgs::msg::Header) -> visualization_msgs::msg::Marker {
@@ -450,6 +472,7 @@ fn main() -> Result<()> {
         pub_status: node.create_publisher("~/status".qos(latched()))?,
         pub_zone: node.create_publisher("/perception/ignore_zones/command".keep_last(10))?,
         pub_markers: node.create_publisher("~/markers".qos(latched()))?,
+        pub_drops: node.create_publisher("~/drops".keep_last(2))?,
         cliff_timers: Vec::new(),
         #[cfg(feature = "learned")]
         unstuck: if params.unstuck_skill { Some(node.create_action_client::<Unstuck>("/unstuck_skill")?) } else { None },

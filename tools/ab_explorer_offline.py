@@ -2,7 +2,7 @@
 """Exact A/B of explorer: drives the Python node (roomba_perception/explorer.py, its callbacks called
 directly) and the Rust core (examples/explorer_replay.rs) with the same scripted input sequence and
 compares every output in order: status JSON, ~/markers (every marker field; the harness listens, so
-they are built), NavigateToPose goals (frame, position, orientation,
+they are built), ~/drops (the remembered drop-off cells), NavigateToPose goals (frame, position, orientation,
 stamp), cancels, controller parameter get/set requests, keep-out commands, cliff timers and log
 lines, plus the frontier goals and reachable area computed for every costmap (Q events). Inputs
 also include people the person detector reports (PD) and floor_obstacles' drop-off points (DR). Nothing goes through ROS:
@@ -99,7 +99,7 @@ class Outputs(list):
 # ---- fakes for the node's ROS interfaces ----
 
 class FakePub:
-    KINDS = {'~/status': 'ST', '/perception/ignore_zones/command': 'ZN', '~/markers': 'MK'}
+    KINDS = {'~/status': 'ST', '/perception/ignore_zones/command': 'ZN', '~/markers': 'MK', '~/drops': 'DC'}
 
     def __init__(self, topic):
         self.kind = self.KINDS[topic]
@@ -110,6 +110,9 @@ class FakePub:
     def publish(self, msg):
         if self.kind == 'MK':
             H.py.append(['MK', [marker_list(m) for m in msg.markers]])
+        elif self.kind == 'DC':
+            pts = np.frombuffer(bytes(msg.data), dtype='<f4').reshape(-1, 3)
+            H.py.append(['DC', msg.header.frame_id, [[float(v) for v in p] for p in pts]])
         else:
             H.py.append([self.kind, msg.data])
 

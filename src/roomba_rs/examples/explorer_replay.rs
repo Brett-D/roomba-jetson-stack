@@ -17,7 +17,7 @@
 //! ["GL", seq, frame, x, y, qz, qw, stamp_ns] / ["CN", seq] / ["GP"] / ["SP", value] / ["TM"] /
 //! ["SG", seq, target_yaw, sec, nanosec] / ["SC", seq] /
 //! ["MK", [[frame, stamp_ns, ns, id, type, action, [x, y, z, qw], [sx, sy, sz], [r, g, b, a], [[x, y, z], ...], text], ...]]
-//! (~/markers, a DELETEALL first) /
+//! (~/markers, a DELETEALL first) / ["DC", frame, [[x, y, z], ...]] (~/drops, float32) /
 //! ["FQ", [[goal_row, goal_col, centroid_row, centroid_col, size], ...], seed|null, [row, col], [peeks], reach_cells]
 //! or ["FQ", null].
 use std::fs::File;
@@ -153,6 +153,10 @@ impl<W: Write> Io for Replay<W> {
         };
         let all: Vec<Value> = std::iter::once(&clear).chain(specs.iter()).map(one).collect();
         self.emit(json!(["MK", all]));
+    }
+    fn drops(&mut self, frame: &str, points: &[[f32; 3]]) {
+        let pts: Vec<Value> = points.iter().map(|p| json!([p[0] as f64, p[1] as f64, p[2] as f64])).collect();
+        self.emit(json!(["DC", frame, pts]));
     }
 }
 

@@ -46,7 +46,9 @@ Publishes:  ~/status (String JSON, transient local), /perception/ignore_zones/co
             ~/markers (MarkerArray, map frame, transient local; only while someone listens): how it
             decides where to go - frontier groups, the spots it considered with distance and score
             (or why it skipped them), the chosen goal with an arrow from where it was chosen, spots
-            to look from, failed and visited spots, keep-out marks it sent, home
+            to look from, failed and visited spots, keep-out marks it sent, home;
+            ~/drops (PointCloud2, map frame, 1 Hz): the drop-off cells it remembers, for the
+            global costmap's drop_layer (marked again right after a costmap clear)
 Uses:       navigate_to_pose and spin actions, /controller_server parameters, TF map -> base frame
 """
 import json
@@ -68,7 +70,7 @@ from rclpy.action import ActionClient
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile
 from rclpy.time import Time
-from sensor_msgs.msg import BatteryState, PointCloud2
+from sensor_msgs.msg import BatteryState, PointCloud2, PointField
 from std_msgs.msg import String
 from tf2_ros import Buffer, TransformException, TransformListener
 from vision_msgs.msg import Detection3DArray
@@ -525,6 +527,9 @@ class Explorer(Node):
         self.pub_status = self.create_publisher(String, '~/status', latched)
         # How it decides where to go (only built while someone listens): see _marker_specs.
         self.pub_markers = self.create_publisher(MarkerArray, '~/markers', latched)
+        # The drop-offs it remembers, every second, for the global costmap's drop_layer: a costmap
+        # clear (navigation recoveries) wipes that layer, and this marks it again right after.
+        self.pub_drops = self.create_publisher(PointCloud2, '~/drops', 2)
         self.create_timer(1.0, self._tick)
         self._publish_status()
 
@@ -854,6 +859,20 @@ class Explorer(Node):
             self._returned(False)
         self._publish_status()
         self._publish_markers()
+        self._publish_drops()
+
+    def _publish_drops(self):
+        """~/drops: every drop-off cell it remembers (centres, map frame), as a PointCloud2."""
+        cells = self._drop_cells() if self.drop_clear > 0 else []
+        if not cells:
+            return
+        pts = np.array([((i + 0.5) * DROP_CELL_M, (j + 0.5) * DROP_CELL_M, 0.0) for i, j in cells], dtype=np.float32)
+        msg = PointCloud2(height=1, width=len(pts), is_dense=True, is_bigendian=False, point_step=12,
+                          row_step=12 * len(pts))
+        msg.header.frame_id, msg.header.stamp = self.map_frame, self.get_clock().now().to_msg()
+        msg.fields = [PointField(name=n, offset=4 * k, datatype=PointField.FLOAT32, count=1) for k, n in enumerate('xyz')]
+        msg.data = pts.tobytes()
+        self.pub_drops.publish(msg)
 
     def _next_frontier(self):
         if self.grid is None:

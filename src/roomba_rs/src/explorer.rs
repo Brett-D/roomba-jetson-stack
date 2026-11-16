@@ -909,6 +909,9 @@ pub trait Io {
     fn markers_wanted(&mut self) -> bool;
     /// ~/markers: a DELETEALL then `markers`, in `frame`, stamped by the node.
     fn markers(&mut self, frame: &str, markers: &[MarkerSpec]);
+    /// ~/drops: every drop-off cell the explorer remembers (centres, in `frame`), about 1 Hz, for
+    /// the global costmap's drop_layer (marked again right after a costmap clear).
+    fn drops(&mut self, frame: &str, points: &[[f32; 3]]);
     /// Whether the learned unstuck skill's action server is up (`unstuck_skill: true`; only the Rust
     /// node built with the `learned` feature has a client).
     fn unstuck_ready(&mut self) -> bool {
@@ -1587,6 +1590,18 @@ impl Explorer {
         }
         self.publish_status(io);
         self.publish_markers(io);
+        self.publish_drops(io);
+    }
+
+    /// ~/drops: every drop-off cell it remembers (explorer.py _publish_drops).
+    fn publish_drops(&mut self, io: &mut impl Io) {
+        let cells = if self.p.drop_clear > 0.0 { self.drop_cells() } else { Vec::new() };
+        if cells.is_empty() {
+            return;
+        }
+        let pts: Vec<[f32; 3]> =
+            cells.iter().map(|&(i, j)| [((i as f64 + 0.5) * DROP_CELL_M) as f32, ((j as f64 + 0.5) * DROP_CELL_M) as f32, 0.0]).collect();
+        io.drops(&self.p.map_frame, &pts);
     }
 
     fn next_frontier(&mut self, io: &mut impl Io) {
@@ -2820,6 +2835,7 @@ mod tests {
         unstuck_server: bool,
         unstuck_calls: Vec<(u64, Option<(f64, f64)>)>,
         unstuck_cancels: Vec<u64>,
+        drops: Vec<Vec<[f32; 3]>>,
     }
 
     impl Io for TestIo {
@@ -2874,6 +2890,10 @@ mod tests {
         fn markers(&mut self, frame: &str, markers: &[MarkerSpec]) {
             assert_eq!(frame, "map");
             self.markers.push(markers.to_vec());
+        }
+        fn drops(&mut self, frame: &str, points: &[[f32; 3]]) {
+            assert_eq!(frame, "map");
+            self.drops.push(points.to_vec());
         }
         fn unstuck_ready(&mut self) -> bool {
             self.unstuck_server
@@ -3416,6 +3436,29 @@ mod tests {
         e2.on_command("start", &mut io2);
         e2.tick(&mut io2);
         assert!(io2.goals[0].x > 0.85, "{:?}", io2.goals[0]);
+    }
+
+    #[test]
+    fn remembered_drops_are_sent_every_second_for_the_costmap() {
+        // A costmap clear (Nav2's recoveries) wipes the drop_layer: every tick, exploring or not,
+        // the explorer sends each drop-off cell it remembers, so the layer is marked again.
+        let mut io = TestIo::default();
+        let mut p = Params::load(&mut crate::watchdog::Defaults).unwrap();
+        p.look_steps = 0;
+        let mut e = open_room(&mut io, p);
+        io.ticks(&mut e, 1, 1);
+        assert!(io.drops.is_empty(), "nothing remembered yet");
+        let pts: Vec<[f32; 3]> = (1..19).map(|r| [0.5, (r as f64 * 0.1 + 0.05 - 1.05) as f32, 0.1]).collect();
+        e.on_drops("camera", &pts, &mut io);
+        io.ticks(&mut e, 2, 2);
+        assert!(io.drops.is_empty(), "a cell counts after drop_min_hits clouds");
+        e.on_drops("camera", &pts, &mut io);
+        io.ticks(&mut e, 3, 5);
+        assert_eq!(io.drops.len(), 3);
+        assert!(io.drops.iter().all(|d| d == &io.drops[0]));
+        let first = &io.drops[0];
+        assert_eq!(first.len(), 18);
+        assert!(first.iter().all(|q| q[0] == first[0][0] && q[2] == 0.0), "{first:?}");
     }
 
     #[test]
