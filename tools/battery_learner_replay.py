@@ -17,6 +17,7 @@ times everything by the frame stamps). The run:
      jump (a driver restart) is the same pack
   6. ~/pack_swapped with no swap detected: a new pack at 100 %, nothing learned from the old one
   7. the service call gives up (no hang) on a learner that stops answering (SIGSTOP) or exits
+  8. a discharge during which /battery_state goes stale (the learner paused) fails the accuracy check
 Needs rclpy, roomba_msgs and the built node (default: roomba_rs's install, `colcon build`).
 Writes only under --work (default ./battery_learner_replay).
 """
@@ -219,18 +220,33 @@ def main():
 
     worst = {}
 
-    def track(label, seconds=None, to=None):
-        """Discharge and record the worst |published - true| charge."""
-        err = 0.0
-        count = 0
+    def track(label, seconds=None, to=None, pause_at=None):
+        """Discharges, comparing the published charge with the truth every 50 frames. Returns (worst
+        |published - true| charge, frames): the worst is None once /battery_state has gone stale or
+        nothing was measured, since a discharge without telemetry must not pass as accurate.
+        pause_at: SIGSTOP the learner after that many frames (step 8 checks the stale case)."""
+        err, count, measured = 0.0, 0, 0
         while (seconds is not None and count < seconds) or (to is not None and sim['pack'].soc > to):
             frame(profile(sim['t']))
             count += 1
+            if count == pause_at:
+                os.kill(proc['p'].pid, signal.SIGSTOP)
             if count % 50 == 0:
                 m = latest()
-                if m is not None:
-                    err = max(err, abs(m.percentage - truth()))
+                if m is None:
+                    return None, count
+                err = max(err, abs(m.percentage - truth()))
+                measured += 1
+        if not measured:
+            return None, count
         worst[label] = err
+        return err, count
+
+    def tracked(label, limit, **kw):
+        err, frames = track(label, **kw)
+        if err is None:
+            check(False, f'{label}: /battery_state went stale after {frames} frames of the discharge')
+        check(err < limit, f'{label}: within {limit * 100:.0f} points of the truth (worst {err:.3f})')
         return err
 
     try:
@@ -249,8 +265,7 @@ def main():
         check('no saved charge: pack 1 starts at' in log_text(), 'logged the seeded start')
 
         print('2. discharge to 35 %, restart the node')
-        err = track('pack 1 (voltage-anchored)', to=0.35)
-        check(err < 0.06, f'tracks the truth within 6 points (worst {err:.3f})')
+        tracked('pack 1 (voltage-anchored)', 0.06, to=0.35)
         before = latest().percentage
         stop(signal.SIGINT)
         check(state()['pack']['id'] == 1, 'state saved at shutdown')
@@ -260,7 +275,7 @@ def main():
         check('continuing pack 1' in log_text(), 'logged "continuing pack 1"')
 
         print('3. discharge to 1 bar, swap with the node running')
-        track('pack 1 to 1 bar', to=0.15)
+        tracked('pack 1 to 1 bar', 0.06, to=0.15)
         spin(5.0)  # pack out: no frames (the node stops publishing gap_s + 1 s after the last one)
         check(latest(max_age=1.5) is None, 'no /battery_state while the pack is out')
         sim['t'] += 90.0
@@ -273,8 +288,7 @@ def main():
         check('pack 1 out at 1 bar' in text, 'learned from pack 1 (started from its voltage)')
 
         print('4. full discharge, swap while the node is off')
-        err = track('pack 2 (full, prior capacity)', to=0.15)
-        check(err < 0.08, f'tracks the truth within 8 points with the capacity not learned yet (worst {err:.3f})')
+        tracked('pack 2 (full, prior capacity)', 0.08, to=0.15)
         stop(signal.SIGTERM)
         sim['pack'] = Pack(1.0)
         sim['t'] += 600.0
@@ -291,8 +305,7 @@ def main():
               f'per-pack estimates {", ".join(f"{e:.0f}" for e in est)}')
 
         print('5. third pack to 50 %, a sensor gap without a jump')
-        err = track('pack 3 (learned)', to=0.5)
-        check(err < 0.04, f'tracks the truth within 4 points (worst {err:.3f})')
+        tracked('pack 3 (learned)', 0.04, to=0.5)
         sim['t'] += 30.0
         spin(0.5)
         repace()
@@ -330,6 +343,16 @@ def main():
         r = call_pack_swapped(wall_s=30.0)
         waited = time.monotonic() - t0
         check(r is None and waited < 1.0, f'learner gone: gave up at once ({waited:.2f} s)')
+
+        print('8. a discharge without /battery_state fails instead of scoring 0 (learner paused mid-track)')
+        start()
+        wait_battery(lambda m: True, 10, '/battery_state before the pause')
+        err, frames = track('paused learner', seconds=300 + int(8 * args.speed), pause_at=300)
+        # stale = max_age 2.5 s after the last message (at most 1 s before the pause), in frames
+        check(err is None and frames - 300 < 4.0 * args.speed,
+              f'stale /battery_state caught {frames - 300} frames after the pause (worst: {err})')
+        proc['p'].kill()
+        proc['p'].wait()
 
         print('\nPacks:')
         for r in s['history']:
