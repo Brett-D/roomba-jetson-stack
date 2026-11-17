@@ -60,7 +60,9 @@ class FakeDriver(Node):
         self.pub_sensors.publish(msg)
 
     def battery(self):
-        msg = BatteryState(voltage=18.2, percentage=0.56, serial_number=read('pack', ''))
+        pack = read('pack', '')
+        # battery_learner's format
+        msg = BatteryState(voltage=18.2, percentage=0.56, serial_number=f'pack {pack}' if pack else '')
         try:
             msg.capacity = float(read('capacity', 'nan'))
         except ValueError:

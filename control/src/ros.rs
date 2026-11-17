@@ -109,7 +109,7 @@ pub fn next_motor_command(want: bool, sent: Option<bool>, force_off: bool) -> Op
 }
 
 /// What the BATTERY panel shows from a battery_state message. serial_number and capacity come
-/// from battery_learner (the pack number and its learned Ah): without it they are empty / NaN.
+/// from battery_learner (the pack, "pack N", and its learned Ah): without it they are empty / NaN.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Battery {
     /// 0-100
@@ -131,7 +131,7 @@ pub fn parse_battery(lines: &[String]) -> Battery {
         // BatteryState.percentage is 0-1
         percentage: number("percentage").map(|p| round(if p <= 1.0 { p * 100.0 } else { p }.clamp(0.0, 100.0), 1)),
         voltage: number("voltage").filter(|v| *v > 0.0).map(|v| round(v, 2)),
-        pack: value("serial_number").filter(|s| !s.is_empty()),
+        pack: value("serial_number").map(|s| s.strip_prefix("pack ").unwrap_or(&s).trim().to_string()).filter(|s| !s.is_empty()),
         capacity_ah: number("capacity").filter(|c| *c > 0.0).map(|c| round(c, 2)),
     }
 }
@@ -657,7 +657,7 @@ mod tests {
     #[test]
     fn reads_battery_state() {
         let msg = |s: &str| s.lines().map(String::from).collect::<Vec<_>>();
-        let learned = msg("header:\n  frame_id: ''\nvoltage: 18.43000030517578\ncapacity: 4.119999885559082\npercentage: 0.5600000023841858\nserial_number: '5'\ncell_voltage: '<array type: float[0]>'");
+        let learned = msg("header:\n  frame_id: ''\nvoltage: 18.43000030517578\ncapacity: 4.119999885559082\npercentage: 0.5600000023841858\nserial_number: 'pack 5'\ncell_voltage: '<array type: float[0]>'");
         assert_eq!(parse_battery(&learned), Battery { percentage: Some(56.0), voltage: Some(18.43), pack: Some("5".into()), capacity_ah: Some(4.12) });
         // Without battery_learner: no pack number, capacity NaN
         let plain = msg("voltage: 18.4\ncapacity: .nan\npercentage: .nan\nserial_number: ''");
