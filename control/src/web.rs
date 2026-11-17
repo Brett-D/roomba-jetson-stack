@@ -144,10 +144,10 @@ fn route(app: &Arc<App>, rq: &mut Request, host: Option<&str>) -> Reply {
         ("/login", true, _) if authed => Reply::redirect("/"),
         ("/login", true, _) => login_page(200, None),
         ("/login", _, true) => login(app, rq, origin_ok),
+        // Like every POST: from another site, nothing changes (not even the cookie).
+        ("/logout", _, true) if !origin_ok => Reply::new(403, "text/plain; charset=utf-8", "Blocked by the origin check: log out from this page."),
         ("/logout", _, true) => {
-            if origin_ok {
-                app.sessions.lock().unwrap_or_else(|e| e.into_inner()).revoke(token.as_deref());
-            }
+            app.sessions.lock().unwrap_or_else(|e| e.into_inner()).revoke(token.as_deref());
             Reply::redirect("/login").with("Set-Cookie", &cookie_header("", 0))
         }
         ("/", true, _) if authed => Reply::new(200, "text/html; charset=utf-8", INDEX_HTML),

@@ -184,6 +184,9 @@ check "no stop_slam.sh" "$([ -e "$FAKE_DIR/force_stop_called" ] && echo called |
 check "start after shutdown" "$(post start)" 409
 
 echo "== logout and login backoff"
+check "logout from another site refused" "$(code -b "$JAR" -X POST -H "Origin: http://elsewhere.example" "$BASE/logout")" 403
+check "and its cookie left alone" "$(curl -s -o /dev/null -D - -b "$JAR" -X POST -H "Origin: http://elsewhere.example" "$BASE/logout" | grep -c -i '^set-cookie')" 0
+check "still logged in" "$(code -b "$JAR" "$BASE/api/status")" 200
 token=$(awk '$6 == "roomba_control" { print $7 }' "$JAR")
 check "logout" "$(code -b "$JAR" -c "$JAR" -X POST -H "$ORIGIN" "$BASE/logout")" 303
 check "the old session is gone" "$(code -H "Cookie: roomba_control=$token" "$BASE/api/status")" 401
