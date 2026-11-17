@@ -583,6 +583,11 @@ impl Learner {
                 Some(p) => self.restart_settling(p),
             });
         }
+        if self.state.last_stamp.is_some_and(|t| stamp < t) {
+            // The clock stepped back (now, or while the node was off): a detected swap's age can't
+            // be told any more, so the manual reset can no longer take it as recent.
+            self.state.detected_swap_stamp = None;
+        }
         self.last_stamp = Some(stamp);
         self.state.last_stamp = Some(stamp);
         self.last_voltage = v;
@@ -753,7 +758,7 @@ impl Learner {
         // Seconds (frame stamp time, persisted) since a detected swap, if within manual_merge_s;
         // right after a restart, before any frame, that is up to the last frame before it.
         let since_detected = match (self.state.detected_swap_stamp, self.state.last_stamp) {
-            (Some(swap), Some(now)) if now - swap <= self.p.manual_merge_s => Some(now - swap),
+            (Some(swap), Some(now)) if (0.0..=self.p.manual_merge_s).contains(&(now - swap)) => Some(now - swap),
             _ => None,
         };
         if let Some(since) = since_detected {
@@ -1438,6 +1443,32 @@ mod tests {
         run(&mut l, &mut sim, &mut t, 10.0, -1000.0);
         assert_eq!(l.state.pack.id, 2);
         assert!((l.state.pack.used_mah - used - 11.0 * i).abs() < 1e-9);
+    }
+
+    #[test]
+    fn clock_step_back_ends_the_swap_confirmation() {
+        let mut t = 0.0;
+        let mut sim = Sim { offset: 0.0, capacity: 2000.0, soc: 0.2, r: 0.2 };
+        let (mut l, _) = started(None, &sim, &mut t);
+        run(&mut l, &mut sim, &mut t, 60.0, -400.0);
+        t += 60.0;
+        sim.soc = 0.6;
+        run(&mut l, &mut sim, &mut t, 10.0, -400.0);
+        assert_eq!(l.state.pack.id, 2);
+        let saved = l.state.clone();
+        // The clock steps back an hour, then forward again to just after the detected swap: the
+        // confirmation window does not reopen.
+        t -= 3600.0;
+        run(&mut l, &mut sim, &mut t, 10.0, -400.0);
+        t += 3600.0;
+        run(&mut l, &mut sim, &mut t, 10.0, -400.0);
+        let (reply, _) = l.manual_swap(t);
+        assert!(reply.starts_with("new pack 3 at 100 %"), "{reply}");
+        // Nor when the clock went back while the node was off.
+        t -= 3600.0;
+        let (mut l2, _) = started(Some(saved), &sim, &mut t);
+        let (reply, _) = l2.manual_swap(t);
+        assert!(reply.starts_with("new pack 3 at 100 %"), "{reply}");
     }
 
     #[test]
