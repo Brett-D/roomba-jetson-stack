@@ -360,6 +360,15 @@ enum Kind {
 struct Pending {
     kind: Kind,
     readings: Vec<f64>,
+    /// mAh drawn over the settling frames' own intervals (not the gap before them), for the pack
+    /// in the robot once it is settled.
+    used_mah: f64,
+}
+
+impl Pending {
+    fn new(kind: Kind) -> Self {
+        Pending { kind, readings: Vec::new(), used_mah: 0.0 }
+    }
 }
 
 pub struct Learner {
@@ -478,7 +487,7 @@ impl Learner {
             state,
             fit: Vec::new(),
             fresh,
-            pending: Some(Pending { kind: Kind::Startup { saved: saved_ocv }, readings: Vec::new() }),
+            pending: Some(Pending::new(Kind::Startup { saved: saved_ocv })),
             last_stamp: None,
             last_current_ma: 0.0,
             last_voltage: f64::NAN,
@@ -559,7 +568,7 @@ impl Learner {
         }
         if gap && self.pending.is_none() {
             let gap_s = dt.unwrap_or(0.0);
-            self.pending = Some(Pending { kind: Kind::Gap { before: self.ocv, gap_s }, readings: Vec::new() });
+            self.pending = Some(Pending::new(Kind::Gap { before: self.ocv, gap_s }));
         }
         self.last_stamp = Some(stamp);
         self.state.last_stamp = Some(stamp);
@@ -569,10 +578,18 @@ impl Learner {
 
         if let Some(pending) = &mut self.pending {
             pending.readings.push(ocv_now);
+            if let Some(dt) = dt.filter(|_| !gap) {
+                pending.used_mah += -(i + prev_i) / 2.0 * dt / 3600.0;
+            }
             if pending.readings.len() >= self.p.settle_samples.max(1) {
                 let pending = self.pending.take().unwrap();
                 let m = median(&pending.readings);
                 self.resolve(pending.kind, m, unix, &mut out);
+                // The settling frames were drawn from the pack now in the robot, whichever it is.
+                let capacity = self.capacity_mah();
+                let pack = &mut self.state.pack;
+                pack.used_mah += pending.used_mah;
+                pack.soc = (pack.soc - pending.used_mah / capacity).clamp(0.0, 1.0);
                 self.ocv = Some(m);
                 self.state.last_ocv = Some(m);
                 self.rest_since = None;
@@ -723,7 +740,7 @@ impl Learner {
             self.fresh = false;
             // The next readings settle the voltage without a swap check: the button may come while
             // the pack is out, and the new pack's voltage jump must not count as another swap.
-            self.pending = Some(Pending { kind: Kind::Gap { before: None, gap_s: 0.0 }, readings: Vec::new() });
+            self.pending = Some(Pending::new(Kind::Gap { before: None, gap_s: 0.0 }));
             self.rest_since = None;
         }
         self.state.detected_swap_stamp = None;
@@ -967,6 +984,9 @@ mod tests {
         logs
     }
 
+    /// mAh `started` counts: its 5 frames at 0.2 A are 4 intervals (the first frame has none before it).
+    const STARTED_MAH: f64 = 4.0 * 200.0 / 3600.0;
+
     fn started(state: Option<State>, sim: &Sim, t: &mut f64) -> (Learner, Vec<String>) {
         let mut l = Learner::new(params(), state, *t);
         let mut logs = Vec::new();
@@ -1105,10 +1125,11 @@ mod tests {
         let (mut l, _) = started(None, &sim, &mut t);
         run(&mut l, &mut sim, &mut t, 60.0, -400.0);
         let saved = l.state.clone();
-        // Restart with the same pack: continues where it was.
+        // Restart with the same pack: continues where it was (less what it drew while settling).
         let (l2, logs) = started(Some(saved.clone()), &sim, &mut t);
         assert_eq!(l2.state.pack.id, 1);
-        assert!((l2.estimate().unwrap().soc - saved.pack.soc).abs() < 1e-9);
+        assert!((l2.state.pack.used_mah - saved.pack.used_mah - STARTED_MAH).abs() < 1e-9);
+        assert!((l2.estimate().unwrap().soc - (saved.pack.soc - STARTED_MAH / 2000.0)).abs() < 1e-9);
         assert!(logs[0].starts_with("continuing pack 1 at"), "{logs:?}");
         // The Jetson was off while the pack was swapped.
         sim.soc = 1.0;
@@ -1297,6 +1318,30 @@ mod tests {
     }
 
     #[test]
+    fn settling_frames_are_counted() {
+        let mut t = 0.0;
+        let mut sim = Sim { offset: 0.0, capacity: 2000.0, soc: 0.6, r: 0.2 };
+        let (mut l, _) = started(None, &sim, &mut t);
+        assert!((l.state.pack.used_mah - STARTED_MAH).abs() < 1e-9);
+        run(&mut l, &mut sim, &mut t, 100.0, -1000.0);
+        // A 30 s gap without a jump (a driver restart): of the 100 frames after it, the first one's
+        // interval spans the gap; the other 99, the 4 settling ones included, all count.
+        let (used, soc) = (l.state.pack.used_mah, l.state.pack.soc);
+        t += 30.0;
+        run(&mut l, &mut sim, &mut t, 100.0, -1000.0);
+        assert_eq!(l.state.pack.id, 1);
+        let drawn = 99.0 * 1000.0 / 3600.0;
+        assert!((l.state.pack.used_mah - used - drawn).abs() < 1e-9, "{}", l.state.pack.used_mah - used);
+        assert!((l.state.pack.soc - (soc - drawn / 2000.0)).abs() < 1e-9);
+        // After a swap, the settling frames count for the new pack: 9 intervals of 10 frames.
+        t += 60.0;
+        sim.soc = 1.0;
+        run(&mut l, &mut sim, &mut t, 10.0, -1000.0);
+        assert_eq!(l.state.pack.id, 2);
+        assert!((l.state.pack.used_mah - 9.0 * 1000.0 / 3600.0).abs() < 1e-9, "{}", l.state.pack.used_mah);
+    }
+
+    #[test]
     fn old_outliers_stay_out_of_the_curve() {
         let mut l = Learner::new(params(), None, 0.0);
         let bin = bin_of(18.0);
@@ -1360,7 +1405,7 @@ mod tests {
         let (l2, _) = started(Some(loaded), &sim, &mut t);
         assert_eq!(l2.curve(), l.curve());
         assert_eq!(l2.capacity_mah(), l.capacity_mah());
-        assert!((l2.estimate().unwrap().soc - l.state.pack.soc).abs() < 1e-9);
+        assert!((l2.estimate().unwrap().soc - (l.state.pack.soc - STARTED_MAH / l.capacity_mah())).abs() < 1e-9);
         // CSV: header + one line per sample (every 10 s)
         for s in &samples[..3] {
             append_sample(&dir, s).unwrap();
