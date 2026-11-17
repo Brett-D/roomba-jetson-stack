@@ -2,8 +2,8 @@
 
   python tools/markers/make_markers.py [--out markers.pdf] [--count 10] [--size_mm 150]
 
-One marker per Letter page: ID 0 is the robot's home / start spot, the others go one or two per
-room. DICT_4X4_50 (RTAB-Map Marker/Dictionary 0); --size_mm must match the launch argument
+One marker per Letter page: ID 0 is the robot's home / start spot (the important one); optional
+others go one per floor in a central open area. DICT_4X4_50 (RTAB-Map Marker/Dictionary 0); --size_mm must match the launch argument
 marker_length (metres). Needs opencv-contrib (cv2.aruco) and matplotlib.
 """
 import argparse
@@ -29,7 +29,7 @@ def page(pdf, dictionary, marker_id, size_mm):
     ax.imshow(cv2.aruco.generateImageMarker(dictionary, marker_id, 600, borderBits=1),
               cmap="gray", vmin=0, vmax=255, interpolation="nearest")
     ax.axis("off")
-    name = "HOME / START SPOT" if marker_id == 0 else f"ROOM MARKER {marker_id}"
+    name = "HOME / START SPOT" if marker_id == 0 else f"CENTRAL MARKER {marker_id}"
     fig.text(0.5, 0.93, f"ID {marker_id}", ha="center", fontsize=40, weight="bold")
     fig.text(0.5, 0.895, name, ha="center", fontsize=16)
     fig.text(0.5, 0.86, f"Roomba navigation marker  -  ArUco DICT_4X4_50  -  {size_mm:g} mm",
@@ -50,7 +50,7 @@ def page(pdf, dictionary, marker_id, size_mm):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default="markers.pdf")
-    ap.add_argument("--count", type=int, default=10)
+    ap.add_argument("--count", type=int, default=3)
     ap.add_argument("--size_mm", type=float, default=150.0)
     a = ap.parse_args()
     dictionary = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
