@@ -16,7 +16,7 @@ mod web;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 const MAX_ACTIVE_REQUESTS: usize = 64;
@@ -140,6 +140,8 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<(Config, bool), 
 pub struct App {
     pub cfg: Config,
     pub ctl: Mutex<robot::Ctl>,
+    /// Signalled when `ctl` changes in a way a waiting thread cares about (motor commands, power-off).
+    pub ctl_cv: Condvar,
     pub sessions: Mutex<auth::Sessions>,
     pub limiter: Mutex<auth::Limiter>,
     /// One password check at a time (scrypt is deliberately slow, and so is a wrong answer).
@@ -152,6 +154,7 @@ impl App {
         App {
             cfg,
             ctl: Mutex::new(robot::Ctl::default()),
+            ctl_cv: Condvar::new(),
             sessions: Mutex::new(auth::Sessions::new(ttl)),
             limiter: Mutex::new(auth::Limiter::default()),
             login_gate: Mutex::new(()),
@@ -214,6 +217,10 @@ fn main() {
     {
         let app = Arc::clone(&app);
         std::thread::Builder::new().name("ros-monitor".into()).spawn(move || ros::supervise(app)).expect("monitor thread");
+    }
+    {
+        let app = Arc::clone(&app);
+        std::thread::Builder::new().name("motors".into()).spawn(move || ros::motor_worker(app)).expect("motor thread");
     }
     let active = Arc::new(AtomicUsize::new(0));
     for rq in server.incoming_requests() {

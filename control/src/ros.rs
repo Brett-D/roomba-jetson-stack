@@ -3,9 +3,13 @@
 //! OI mode (roomba/mode) and hazards (roomba/sensors) those need, and the BATTERY panel
 //! (battery_state, and battery_learner's pack_swapped service for NEW PACK).
 //!
-//! The driver reports no motor state, so VACUUM ARMED shows the commanded state. It disarms by
-//! itself when the robot stack stops, the OI mode leaves Safe / Full (the Roomba stops its motors
-//! then) or a cliff or wheel drop is reported (then it also sends all-off, for Full mode).
+//! The driver reports no motor state, so VACUUM ARMED shows the commanded state. One thread sends
+//! every motor command, one at a time, so the last command sent is always the one wanted now: an
+//! OFF asked for while an ON is on its way follows it. It disarms by itself when the robot stack
+//! stops, the OI mode leaves Safe / Full (the Roomba stops its motors then) or a cliff or wheel drop
+//! is reported (then it also sends all-off, for Full mode). After a failed command the state is
+//! unknown: hazards stay watched and OFF is retried until it goes out. At the page's start the
+//! state is unknown too (a restart leaves the robot running), so it begins by sending OFF.
 
 use std::io::{BufRead, BufReader};
 use std::process::Child;
@@ -25,7 +29,9 @@ pub struct Tone {
 }
 
 /// The sounds as tested on the robot. sound_events uses songs 0 (hello), 1 (uh-oh) and 2 (done);
-/// each press defines its song before playing it, so sharing the slots is fine.
+/// each press defines its song before playing it, so sharing the slots is fine. The 500-series OI
+/// takes song numbers 0-4 (Song, opcode 140: "Song Number (0 - 4)"; roomba_driver_rs checks 0-4)
+/// and CHATTER in slot 4 was played on this Roomba 550.
 pub const TONES: &[Tone] = &[
     Tone { key: "ow", song: 2, notes: &[96, 91, 86, 81, 76], durations: &[3, 3, 3, 4, 12] },
     // 30 is a rest
@@ -42,10 +48,15 @@ const CLI_TIMEOUT_S: u64 = 15;
 pub struct RosState {
     /// roomba/mode while the driver runs (the monitor's latest message).
     pub mode: Option<String>,
-    /// VACUUM ARMED as commanded (vacuum, main brush and side brush on).
-    pub armed: bool,
-    /// Switching on (true) or off (false).
-    pub vac_pending: Option<bool>,
+    /// VACUUM ARMED: whether the page wants the vacuum, main brush and side brush on, the last
+    /// state it sent successfully (None: unknown), the command on its way, an OFF to send even if
+    /// the state looks off already, and when to retry after a failure.
+    pub vac_want: bool,
+    pub vac_sent: Option<bool>,
+    pub vac_sending: Option<bool>,
+    vac_force_off: bool,
+    vac_retry_at: Option<Instant>,
+    vac_failures: u32,
     pub vac_note: Option<(bool, String, Instant)>,
     pub tone_pending: Option<&'static str>,
     pub tone_last: Option<(&'static str, bool, String, Instant)>,
@@ -58,6 +69,43 @@ pub struct RosState {
     learner_checking: bool,
     pub pack_pending: bool,
     pub pack_last: Option<(bool, String, Instant)>,
+}
+
+impl RosState {
+    /// Armed: ON went out and is still wanted.
+    pub fn armed(&self) -> bool {
+        self.vac_want && self.vac_sent == Some(true) && self.vac_sending.is_none()
+    }
+
+    /// What VACUUM ARMED is switching to: the command on its way, or the next one (while a driver
+    /// runs to take it).
+    pub fn vac_pending(&self, driver: bool) -> Option<bool> {
+        self.vac_sending.or_else(|| {
+            let due = self.vac_retry_at.is_none_or(|t| Instant::now() >= t);
+            next_motor_command(self.vac_want, self.vac_sent, self.vac_force_off).filter(|_| driver && due)
+        })
+    }
+
+    /// The last command failed (or the page just started) and OFF hasn't gone out since.
+    pub fn vac_unknown(&self) -> bool {
+        self.vac_sent.is_none() && self.vac_sending.is_none()
+    }
+
+    /// Hazards are watched while the motors are (or may be) on.
+    fn vac_maybe_on(&self) -> bool {
+        self.vac_want || self.vac_sending == Some(true) || self.vac_sent != Some(false)
+    }
+}
+
+/// The motor command that brings the motors to what the page wants (None: nothing to send).
+pub fn next_motor_command(want: bool, sent: Option<bool>, force_off: bool) -> Option<bool> {
+    if force_off {
+        Some(false)
+    } else if sent != Some(want) {
+        Some(want)
+    } else {
+        None
+    }
 }
 
 /// What the BATTERY panel shows from a battery_state message. serial_number and capacity come
@@ -174,7 +222,6 @@ fn check_learner(app: &Arc<App>, learner: bool) {
     }
 }
 
-
 fn join(v: &[u8]) -> String {
     v.iter().map(u8::to_string).collect::<Vec<_>>().join(", ")
 }
@@ -282,92 +329,157 @@ fn play(app: &App, tone: &'static Tone) {
 }
 
 pub fn request_vacuum(app: &Arc<App>, arm: bool) -> Result<String, String> {
-    let driver = !robot::drivers(app).is_empty();
     if arm {
         if let Some(why) = unavailable(app) {
             return Err(why);
         }
     }
     let mut ctl = robot::lock(app);
-    if ctl.ros.vac_pending.is_some() {
-        return Err("VACUUM ARMED is still switching.".into());
+    let r = &mut ctl.ros;
+    if arm {
+        if r.armed() {
+            return Ok("Already armed.".into());
+        }
+        if r.vac_sending.is_some() || r.vac_force_off || r.vac_sent != Some(false) {
+            return Err("VACUUM ARMED is still switching (or switching off after a failure): try again in a moment.".into());
+        }
+        r.vac_want = true;
+        r.vac_note = None;
+    } else {
+        // An explicit OFF goes out even if the motors look off already.
+        r.vac_want = false;
+        r.vac_force_off = true;
+        r.vac_retry_at = None;
     }
-    if arm && ctl.ros.armed {
-        return Ok("Already armed.".into());
-    }
-    if !arm && !driver {
-        ctl.ros.armed = false;
-        return Ok("Vacuum off (the robot stack isn't running).".into());
-    }
-    ctl.ros.vac_pending = Some(arm);
     drop(ctl);
-    let app2 = Arc::clone(app);
-    let spawned = std::thread::Builder::new().name("vacuum".into()).spawn(move || switch_vacuum(&app2, arm));
-    if spawned.is_err() {
-        robot::lock(app).ros.vac_pending = None;
-        return Err("Cannot start a thread.".into());
-    }
+    app.ctl_cv.notify_all();
     Ok(if arm { "Arming: vacuum and brushes on…".into() } else { "Vacuum and brushes off…".into() })
 }
 
-fn switch_vacuum(app: &App, arm: bool) {
-    let r = cmd::run(&motors_cmd(&app.cfg.ros_setup, arm), Duration::from_secs(CLI_TIMEOUT_S + 10));
-    let result = published(&r);
-    eprintln!("vacuum {}: {:?}", if arm { "on" } else { "off" }, result);
-    let mut ctl = robot::lock(app);
-    ctl.ros.vac_pending = None;
-    let now = Instant::now();
-    match result {
-        Err(e) => ctl.ros.vac_note = Some((false, format!("Couldn't switch the vacuum {}: {e}", if arm { "on" } else { "off" }), now)),
-        Ok(()) if !arm => {
-            ctl.ros.armed = false;
-            ctl.ros.vac_note = Some((true, "Vacuum and brushes off.".into(), now));
-        }
-        Ok(()) if !matches!(ctl.ros.mode.as_deref(), Some("safe" | "full")) => {
-            ctl.ros.vac_note = Some((false, "The OI mode left Safe / Full while arming: not armed.".into(), now));
-        }
-        Ok(()) => {
-            ctl.ros.armed = true;
-            ctl.ros.vac_note = Some((true, "Armed: vacuum, main brush and side brush on.".into(), now));
-            if ctl.ros.tone_pending.is_none() {
-                ctl.ros.tone_pending = Some("armed");
-                drop(ctl);
-                play(app, &TONES[1]);
+/// Sends every motor command, one at a time, until the motors are as the page wants them.
+pub fn motor_worker(app: Arc<App>) {
+    loop {
+        let driver = !robot::drivers(&app).is_empty();
+        let target = {
+            let mut ctl = robot::lock(&app);
+            let r = &mut ctl.ros;
+            let due = r.vac_retry_at.is_none_or(|t| Instant::now() >= t);
+            match next_motor_command(r.vac_want, r.vac_sent, r.vac_force_off) {
+                Some(target) if driver && due => {
+                    r.vac_sending = Some(target);
+                    r.vac_force_off = false;
+                    Some(target)
+                }
+                _ => {
+                    // Requests wake this up; the driver and retries are checked twice a second.
+                    let _ = app.ctl_cv.wait_timeout(ctl, Duration::from_millis(500));
+                    None
+                }
             }
+        };
+        let Some(target) = target else { continue };
+        let r = cmd::run(&motors_cmd(&app.cfg.ros_setup, target), Duration::from_secs(CLI_TIMEOUT_S + 10));
+        let result = published(&r);
+        eprintln!("vacuum {}: {result:?}", if target { "on" } else { "off" });
+        let mut play_armed = false;
+        {
+            let mut ctl = robot::lock(&app);
+            let safe = matches!(ctl.ros.mode.as_deref(), Some("safe" | "full"));
+            let tone_free = ctl.ros.tone_pending.is_none();
+            let r = &mut ctl.ros;
+            let now = Instant::now();
+            r.vac_sending = None;
+            let reason_shown = r.vac_note.as_ref().is_some_and(|(ok, _, at)| !ok && now.duration_since(*at) < Duration::from_secs(30));
+            match result {
+                Ok(()) => {
+                    let was_unknown = r.vac_sent.is_none();
+                    r.vac_sent = Some(target);
+                    r.vac_retry_at = None;
+                    r.vac_failures = 0;
+                    if target && r.vac_want && !safe {
+                        r.vac_want = false;
+                        r.vac_note = Some((false, "The OI mode left Safe / Full while arming: switching off.".into(), now));
+                    } else if target && r.vac_want {
+                        r.vac_note = Some((true, "Armed: vacuum, main brush and side brush on.".into(), now));
+                        if tone_free {
+                            r.tone_pending = Some("armed");
+                            play_armed = true;
+                        }
+                    } else if !target && !reason_shown {
+                        let text = if was_unknown { "Vacuum and brushes off (their state was unknown)." } else { "Vacuum and brushes off." };
+                        r.vac_note = Some((true, text.into(), now));
+                    }
+                }
+                Err(e) => {
+                    // Unknown now: give up arming, keep watching hazards, retry OFF (3 s, doubling up to a minute).
+                    r.vac_sent = None;
+                    r.vac_want = false;
+                    r.vac_failures += 1;
+                    r.vac_retry_at = Some(now + Duration::from_secs(3 << r.vac_failures.min(5).saturating_sub(1)).min(Duration::from_secs(60)));
+                    let what = if target { "on" } else { "off" };
+                    r.vac_note = Some((false, format!("Couldn't switch the vacuum {what}: {e}. Its state is unknown: retrying OFF."), now));
+                }
+            }
+        }
+        app.ctl_cv.notify_all();
+        if play_armed {
+            play(&app, &TONES[1]);
         }
     }
 }
 
-/// All-off before the robot is stopped (stop and shut down), whether or not the page armed it.
+/// All-off before the robot is stopped (stop and shut down), whether or not the page armed it:
+/// waits until OFF has gone out after anything already on its way (at most 40 s).
 pub fn vacuum_off_before_stop(app: &App) {
-    let r = cmd::run(&motors_cmd(&app.cfg.ros_setup, false), Duration::from_secs(CLI_TIMEOUT_S + 10));
-    let result = published(&r);
-    eprintln!("vacuum off before the stop: {result:?}");
     let mut ctl = robot::lock(app);
-    ctl.ros.armed = false;
+    ctl.ros.vac_want = false;
+    ctl.ros.vac_force_off = true;
+    ctl.ros.vac_retry_at = None;
+    app.ctl_cv.notify_all();
+    let deadline = Instant::now() + Duration::from_secs(40);
+    let result = loop {
+        let r = &ctl.ros;
+        if r.vac_sending.is_none() && !r.vac_force_off && r.vac_sent == Some(false) {
+            break Ok(());
+        }
+        if r.vac_sending.is_none() && !r.vac_force_off && r.vac_sent.is_none() {
+            break Err("OFF failed");
+        }
+        if Instant::now() > deadline {
+            break Err("no answer in 40 s");
+        }
+        ctl = app.ctl_cv.wait_timeout(ctl, Duration::from_millis(500)).unwrap_or_else(|e| e.into_inner()).0;
+    };
+    eprintln!("vacuum off before the stop: {result:?}");
     let note = match result {
         Ok(()) => (true, "Vacuum and brushes off (robot stopping).".to_string()),
-        Err(e) => (false, format!("Vacuum off before the stop failed: {e}")),
+        Err(e) => (false, format!("Vacuum off before the stop: {e}.")),
     };
     ctl.ros.vac_note = Some((note.0, note.1, Instant::now()));
 }
 
-fn auto_disarm(app: &Arc<App>, reason: &str, send_off: bool) {
+/// A hazard, a mode change or the stack stopping: off, with the reason shown. `publish`: send OFF
+/// (a hazard in Full mode); else the Roomba has stopped its motors itself.
+fn auto_disarm(app: &Arc<App>, reason: &str, publish: bool) {
     let mut ctl = robot::lock(app);
-    if !ctl.ros.armed {
+    let r = &mut ctl.ros;
+    // Already disarmed if nothing wants the motors on and an OFF follows any ON (each hazard
+    // message repeats the hazard).
+    let on_unanswered = !r.vac_force_off && (r.vac_sending == Some(true) || (r.vac_sending.is_none() && r.vac_sent == Some(true)));
+    if !r.vac_want && !on_unanswered {
         return;
     }
-    ctl.ros.armed = false;
-    ctl.ros.vac_note = Some((false, format!("Disarmed: {reason}."), Instant::now()));
-    drop(ctl);
-    eprintln!("vacuum disarmed: {reason}");
-    if send_off {
-        let app2 = Arc::clone(app);
-        let _ = std::thread::Builder::new().name("vacuum-off".into()).spawn(move || {
-            let r = cmd::run(&motors_cmd(&app2.cfg.ros_setup, false), Duration::from_secs(CLI_TIMEOUT_S + 10));
-            eprintln!("vacuum off after a hazard: {:?}", published(&r));
-        });
+    r.vac_want = false;
+    if publish {
+        r.vac_force_off = true;
+        r.vac_retry_at = None;
+    } else if r.vac_sending.is_none() {
+        r.vac_sent = Some(false);
     }
+    r.vac_note = Some((false, format!("Disarmed: {reason}."), Instant::now()));
+    drop(ctl);
+    app.ctl_cv.notify_all();
+    eprintln!("vacuum disarmed: {reason}");
 }
 
 const HAZARDS: [&str; 6] = ["wheel_drop_left", "wheel_drop_right", "cliff_left", "cliff_front_left", "cliff_front_right", "cliff_right"];
@@ -465,20 +577,28 @@ pub fn supervise(app: Arc<App>) {
     let (mut mode, mut sensors, mut battery) = (Monitor::new(), Monitor::new(), Monitor::new());
     loop {
         let driver = !robot::drivers(&app).is_empty();
-        let (power_on, armed) = {
+        let (power_on, watch_hazards) = {
             let ctl = robot::lock(&app);
-            (ctl.power == Power::On, ctl.ros.armed || ctl.ros.vac_pending == Some(true))
+            (ctl.power == Power::On, ctl.ros.vac_maybe_on())
         };
         mode.keep(driver && power_on, &app, Kind::Mode);
-        sensors.keep(driver && power_on && armed, &app, Kind::Sensors);
+        sensors.keep(driver && power_on && watch_hazards, &app, Kind::Sensors);
         battery.keep(driver && power_on, &app, Kind::Battery);
         if !driver {
-            {
-                let mut ctl = robot::lock(&app);
-                ctl.ros.mode = None;
-                ctl.ros.battery = None;
-            }
             auto_disarm(&app, "robot stack stopped", false);
+            // No driver: the motors are off (the driver stops them when it ends) and nothing can be
+            // sent; a driver that starts finds them off.
+            let mut ctl = robot::lock(&app);
+            let r = &mut ctl.ros;
+            r.mode = None;
+            r.battery = None;
+            if r.vac_sending.is_none() {
+                r.vac_want = false;
+                r.vac_sent = Some(false);
+                r.vac_force_off = false;
+                r.vac_retry_at = None;
+                r.vac_failures = 0;
+            }
         }
         check_learner(&app, power_on && learner_running(&app));
         std::thread::sleep(Duration::from_secs(1));
@@ -516,6 +636,22 @@ mod tests {
         assert_eq!(service_response("waiting for service to become available...\n"), None);
         let lines: Vec<String> = ["oi_mode: 2", "cliff_front_left: true", "wheel_drop_left: false", "  cliff_left: true"].map(String::from).into();
         assert_eq!(hazards(&lines), ["cliff_front_left"], "only top-level fields");
+    }
+
+    #[test]
+    fn the_last_motor_command_is_the_one_wanted() {
+        assert_eq!(next_motor_command(false, None, false), Some(false), "unknown (start, failure): OFF");
+        assert_eq!(next_motor_command(true, Some(false), false), Some(true));
+        assert_eq!(next_motor_command(true, Some(true), false), None);
+        assert_eq!(next_motor_command(false, Some(true), false), Some(false), "a hazard after ON");
+        assert_eq!(next_motor_command(false, Some(false), true), Some(false), "an explicit OFF always goes out");
+        let mut r = RosState { vac_want: true, vac_sent: Some(false), vac_sending: Some(true), ..Default::default() };
+        assert!(!r.armed() && r.vac_maybe_on(), "arming: hazards watched");
+        r.vac_sending = None;
+        r.vac_sent = Some(true);
+        assert!(r.armed());
+        r.vac_sent = None;
+        assert!(r.vac_unknown() && r.vac_maybe_on(), "after a failure: unknown, still watched");
     }
 
     #[test]

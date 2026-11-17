@@ -36,8 +36,13 @@ wait_for() {   # expression, value, seconds
     return 1
 }
 post() { code -b "$JAR" -X POST -H "$ORIGIN" "$BASE/api/$1"; }
+# VACUUM ARMED takes a new command once the last one has gone out (the switch is disabled till then).
+settled() { wait_for 'd["vacuum"]["pending"]' null 40; }
 # The last driver.jsonl entry of a kind, as JSON with the fields given (python expression on e).
 last_entry() { python3 -c 'import json,sys; es=[json.loads(l) for l in open(sys.argv[1]) if l.strip()]; es=[e for e in es if e["kind"]==sys.argv[2]]; e=es[-1] if es else None; print(json.dumps(eval(sys.argv[3])) if e else "none")' "$LOG" "$1" "$2"; }
+# The vacuum states the motor commands logged after line $1 went through (repeats collapsed).
+vac_seq() { python3 -c 'import json,sys; es=[json.loads(l) for l in open(sys.argv[1]).readlines()[int(sys.argv[2]):] if l.strip()]; v=[e["vacuum"] for e in es if e["kind"]=="motors"]; print(json.dumps([x for i,x in enumerate(v) if i==0 or v[i-1]!=x]))' "$LOG" "$1"; }
+lines() { wc -l < "$LOG"; }
 wait_entry() {   # kind, expression, value, seconds
     local i
     for i in $(seq 1 $(($4 * 2))); do [ "$(last_entry "$1" "$2")" = "$3" ] && return 0; sleep 0.5; done
@@ -123,7 +128,7 @@ kill "$LEARNER"
 wait_for 'd["pack_swap"]["available"]' false 10
 
 echo "== VACUUM ARMED"
-check "arm" "$(post vacuum/arm)" 202
+settled; check "arm" "$(post vacuum/arm)" 202
 wait_for 'd["vacuum"]["armed"]' true 40
 check "motors on" "$(last_entry motors '[e["main_brush"], e["side_brush"], e["vacuum"], e["use_pwm"]]')" '[true, true, true, false]'
 wait_for 'd["tones"]["pending"]' null 40
@@ -139,7 +144,7 @@ rm -f "$FAKE_DIR/hazard"
 
 echo "== disarmed when the OI mode leaves Safe / Full"
 sleep 1
-post vacuum/arm > /dev/null
+settled; post vacuum/arm > /dev/null
 wait_for 'd["vacuum"]["armed"]' true 40
 echo 'passive' > "$FAKE_DIR/mode"
 wait_for 'd["vacuum"]["armed"]' false 15
@@ -148,14 +153,27 @@ echo 'safe' > "$FAKE_DIR/mode"
 wait_for 'd["ros"]["available"]' true 15
 
 echo "== switched off by hand"
-post vacuum/arm > /dev/null
+settled; post vacuum/arm > /dev/null
 wait_for 'd["vacuum"]["armed"]' true 40
 check "disarm" "$(post vacuum/disarm)" 202
 wait_for 'd["vacuum"]["armed"]' false 40
+settled
 check "all off" "$(last_entry motors '[e["main_brush"], e["side_brush"], e["vacuum"]]')" '[false, false, false]'
 
+echo "== a cliff while arming: OFF follows the ON"
+echo 'cliff_right' > "$FAKE_DIR/hazard"
+settled
+n0=$(lines)
+check "arm" "$(post vacuum/arm)" 202
+wait_for '"cliff right" in ((d["vacuum"]["note"] or {}).get("message") or "")' true 40
+wait_for 'd["vacuum"]["pending"]' null 40
+check "disarmed" "$(st 'd["vacuum"]["armed"]')" false
+check "on, then off" "$(vac_seq "$n0")" '[true, false]'
+rm -f "$FAKE_DIR/hazard"
+
 echo "== vacuum off before the robot stops"
-post vacuum/arm > /dev/null
+sleep 1
+settled; post vacuum/arm > /dev/null
 wait_for 'd["vacuum"]["armed"]' true 40
 check "stop" "$(post stop)" 202
 wait_for 'd["robot"]["state"]' stopped 60
@@ -163,20 +181,48 @@ off_at=$(last_entry motors 'e["t"] if not e["vacuum"] else None')
 check "all off before SIGTERM" "$(python3 -c "print($off_at < $(cat "$FAKE_DIR/sigterm_at"))")" True
 check "disarmed" "$(st 'd["vacuum"]["armed"]')" false
 
+echo "== stopped while arming: the OFF waits for the ON, then SIGTERM"
+post start > /dev/null
+wait_for 'd["robot"]["state"]' running 15
+wait_for 'd["ros"]["available"]' true 40
+rm -f "$FAKE_DIR/sigterm_at"
+settled
+n0=$(lines)
+check "arm" "$(post vacuum/arm)" 202
+check "stop at once" "$(post stop)" 202
+wait_for 'd["robot"]["state"]' stopped 60
+check "on, then off" "$(vac_seq "$n0")" '[true, false]'
+off_at=$(last_entry motors 'e["t"] if not e["vacuum"] else None')
+check "all off before SIGTERM" "$(python3 -c "print($off_at < $(cat "$FAKE_DIR/sigterm_at"))")" True
+check "disarmed" "$(st 'd["vacuum"]["armed"]')" false
+
 echo "== disarmed when the driver goes away"
 post start > /dev/null
 wait_for 'd["robot"]["state"]' running 15
-post vacuum/arm > /dev/null
+settled; post vacuum/arm > /dev/null
 wait_for 'd["vacuum"]["armed"]' true 40
 kill "$DRIVER"
 wait_for 'd["vacuum"]["armed"]' false 15
 check_has "why" "$(st 'd["vacuum"]["note"]["message"]')" "robot stack stopped"
 check "sounds unavailable" "$(st 'd["ros"]["available"], d["ros"]["reason"]')" '[false, "Waiting for roomba_driver\u2026"]'
 
-echo "== shut down (dry run) switches the vacuum off first"
+echo "== the page restarted while armed: the state is unknown, so OFF goes out"
 driver_up
 wait_for 'd["ros"]["available"]' true 40
-post vacuum/arm > /dev/null
+settled; post vacuum/arm > /dev/null
+wait_for 'd["vacuum"]["armed"]' true 40
+kill "$SERVER"
+wait "$SERVER" 2>/dev/null
+n0=$(lines)
+server_up
+wait_for '"state was unknown" in ((d["vacuum"]["note"] or {}).get("message") or "")' true 40
+check "off" "$(vac_seq "$n0")" '[false]'
+check "not armed" "$(st 'd["vacuum"]["armed"], d["vacuum"]["unknown"]')" '[false, false]'
+
+echo "== shut down (dry run) switches the vacuum off first"
+wait_for 'd["ros"]["available"]' true 40
+sleep 1
+settled; post vacuum/arm > /dev/null
 wait_for 'd["vacuum"]["armed"]' true 40
 rm -f "$FAKE_DIR/sigterm_at"
 check "shutdown" "$(post shutdown)" 202

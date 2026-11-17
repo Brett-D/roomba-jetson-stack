@@ -177,8 +177,9 @@ pub fn status(app: &App, host: Option<&str>) -> Value {
         "sound": {"muted": cfg.sound_mute_file.exists()},
         "ros": {"driver": driver, "mode": ctl.ros.mode.clone(), "available": ros_unavailable.is_none(), "reason": ros_unavailable},
         "vacuum": {
-            "armed": ctl.ros.armed,
-            "pending": ctl.ros.vac_pending.map(|on| if on { "arm" } else { "disarm" }),
+            "armed": ctl.ros.armed(),
+            "pending": ctl.ros.vac_pending(driver).map(|on| if on { "arm" } else { "disarm" }),
+            "unknown": driver && ctl.ros.vac_unknown(),
             "note": ctl.ros.vac_note.as_ref().map(|(ok, m, t)| json!({"ok": ok, "message": m, "ago_s": now.duration_since(*t).as_secs()})),
         },
         "battery": ctl.ros.battery.as_ref().map(|(b, t)| json!({

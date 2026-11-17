@@ -273,7 +273,10 @@ On a phone, "Add to Home Screen" adds it as an app.
   - It can be armed only while the robot runs and the OI mode is Safe or Full; otherwise the page says why.
   - The driver doesn't report the motors, so the switch shows what the page commanded. It disarms by itself
     when the robot stack stops, the OI mode leaves Safe / Full (the Roomba stops its motors then) or a cliff or
-    wheel drop is reported (it also sends all-off then, for Full mode).
+    wheel drop is reported (it also sends all-off then, for Full mode), including while it is still arming.
+  - Motor commands go out one at a time, so an OFF asked for while an ON is on its way follows it.
+  - If a command fails, or the page has just started (a restart can leave a robot running), the state is
+    unknown: the switch shows UNKNOWN, hazards stay watched and all-off is sent (and retried) until it goes out.
 - **SOUND** panel:
   - AUTO SOUND (toggle): MUTE creates `~/.config/roomba/sound_muted`, which keeps the `sound_events` node quiet.
   - Push-buttons OW, ARMED, CHATTER, HELLO and UH-OH: each press defines its song and plays it
@@ -295,7 +298,7 @@ On a phone, "Add to Home Screen" adds it as an app.
   **RESET LAYOUT** restores it. On a phone the panels stack.
 
 The page talks to ROS only through the `ros2` CLI (`ros2 service call`, `ros2 topic pub`, `ros2 service list`,
-and `ros2 topic echo` of `roomba/mode` and `battery_state`, plus `roomba/sensors` while the vacuum is armed).
+and `ros2 topic echo` of `roomba/mode` and `battery_state`, plus `roomba/sensors` while the vacuum may be on).
 A sound or a vacuum switch takes a few seconds while the CLI starts.
 
 Power-on is physical: apply power, and the Jetson boots and brings the page back by itself. The page logs to the

@@ -125,8 +125,9 @@ function render() {
   const ros = st.ros;
   if (p && p.startsWith('vacuum/') && (vac.pending || vac.armed === (p === 'vacuum/arm'))) pending = null;
   const vacMoving = !!vac.pending || (!!pendingOp() && pendingOp().startsWith('vacuum/'));
+  const vacUnknown = !!vac.unknown && !vacMoving;
   const vs = $('vac');
-  vs.dataset.pos = vacMoving ? 'mid' : (vac.armed ? 'up' : 'down');
+  vs.dataset.pos = vacMoving || vacUnknown ? 'mid' : (vac.armed ? 'up' : 'down');
   vs.setAttribute('aria-checked', String(vac.armed));
   vs.setAttribute('aria-busy', String(vacMoving));
   const vacOpen = $('vac-guarded').classList.contains('open');
@@ -135,9 +136,10 @@ function render() {
   if (vac.armed && !vacOpen) openGuard('vac', false);
   $('vac-guard').disabled = vacMoving || (!vac.armed && !ros.available);
   $('vac-guard').title = !vac.armed && !ros.available ? ros.reason : '';
-  cls($('l-vac'), vac.armed ? 'g' : (vacMoving ? 'a' : null), vacMoving);
+  cls($('l-vac'), vac.armed ? 'g' : (vacMoving || vacUnknown ? 'a' : null), vacMoving || vacUnknown);
   let vacText;
   if (vacMoving) vacText = vac.pending === 'disarm' || (pendingOp() || '').endsWith('disarm') ? 'VACUUM: SWITCHING OFF…' : 'VACUUM: ARMING…';
+  else if (vacUnknown) vacText = 'VACUUM: STATE UNKNOWN: RETRYING OFF. HAZARDS ARE STILL WATCHED.';
   else if (vac.armed) vacText = 'VACUUM: ARMED (VACUUM, MAIN AND SIDE BRUSH ON). CLOSE THE GUARD OR FLIP DOWN TO SWITCH OFF.';
   else if (!ros.available) vacText = `VACUUM: UNAVAILABLE: ${ros.reason}`;
   else vacText = 'VACUUM: OFF. LIFT THE GUARD AND FLIP UP TO ARM.';
@@ -226,6 +228,7 @@ function render() {
   else ann('a-mode', mode === 'safe' || mode === 'full' ? 'g' : 'a', mode.toUpperCase());
   if (vac.armed) ann('a-vac', 'g', 'ARMED');
   else if (vacMoving) ann('a-vac', 'a', vac.pending === 'disarm' ? 'SWITCHING OFF' : 'ARMING', true);
+  else if (vacUnknown) ann('a-vac', 'a', 'UNKNOWN', true);
   else if (!ros.available && r.state !== 'stopped') ann('a-vac', 'a', !ros.driver ? 'NO DRIVER' : (mode && mode !== 'safe' && mode !== 'full' ? mode.toUpperCase() + ' MODE' : 'WAITING'));
   else ann('a-vac', null, 'OFF');
   ann('a-cam', st.camera ? 'g' : 'r', st.camera ? 'PRESENT' : 'MISSING');
