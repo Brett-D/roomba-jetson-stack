@@ -758,7 +758,8 @@ function keyDrive() {
   setDrive(x * 0.7, y);
 }
 document.addEventListener('keydown', (ev) => {
-  if (!(ev.key in DRIVE_KEYS) || !R.canDrive || ev.target.tagName === 'INPUT') return;
+  // Not in the 3-view: it has no drive controls (and its dividers use the arrow keys).
+  if (!(ev.key in DRIVE_KEYS) || !R.canDrive || ev.target.tagName === 'INPUT' || tab() === 'mfd') return;
   ev.preventDefault();
   R.keys.add(ev.key);
   keyDrive();
@@ -1035,6 +1036,8 @@ function initMfd() {
       mfdApply();
     });
     sp.addEventListener('keydown', (e) => {
+      // Arrow keys here resize (or do nothing): they must not reach the drive keys.
+      if (e.key in DRIVE_KEYS) e.stopPropagation();
       const keys = phone.matches ? { ArrowDown: 20, ArrowUp: -20 } : { ArrowRight: 20, ArrowLeft: -20 };
       const step = keys[e.key];
       const a = openView(i, -1);
