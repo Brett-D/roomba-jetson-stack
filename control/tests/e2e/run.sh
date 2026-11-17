@@ -251,6 +251,29 @@ check "power stays on" "$(st 'd["power"], d["last"]["ok"]')" '["on", false]'
 check_has "failure message" "$(st 'd["last"]["message"]')" "Power-off failed: sudo: a password is required"
 stop_instance
 
+echo "== a second copy leaves the running one's motor commands alone"
+start_instance
+# A motor command of the running page on its way: its own process group, listed in the registry.
+setsid bash -c 'sleep 60; true' /roomba/cleaning_motors-e2e > /dev/null 2>&1 < /dev/null &
+MOTOR=$!
+mkdir -p "$FAKE_DIR/state" && echo "$MOTOR" > "$FAKE_DIR/state/motor-commands"
+sleep 0.3
+second() {   # a second copy with the same state directory, listening on $1: its exit code
+    timeout 5 "$BIN" --listen "$1" --auth-file "$AUTH" --pid-file "$FAKE_DIR/robot.pid" --log-file "$FAKE_DIR/robot.log" \
+        --start-cmd /bin/false --force-stop-cmd /bin/false --launch-match none-2 --driver-match none-2 --learner-match none-2 \
+        --serial-dev "$FAKE_DIR/no-such-tty" --ros-setup false --state-dir "$FAKE_DIR/state" --dry-run-poweroff >> "$FAKE_DIR/second.log" 2>&1
+    echo $?
+}
+motor() { [ -e "/proc/$MOTOR" ] && [ "$(awk '{print $3}' "/proc/$MOTOR/stat")" != Z ] && echo running || echo killed; }
+check "a copy on the same port exits" "$(second "127.0.0.1:$PORT")" 1
+check "without touching the motor command" "$(motor)" running
+check "a copy on another port exits too (the state directory is locked)" "$(second "127.0.0.1:$((PORT + 3))")" 1
+check "the motor command still runs" "$(motor)" running
+check "and is still listed" "$(cat "$FAKE_DIR/state/motor-commands")" "$MOTOR"
+kill "$MOTOR"
+wait "$MOTOR" 2>/dev/null
+stop_instance
+
 echo "== instance D: [::] takes IPv6 and IPv4"
 LISTEN="[::]:$PORT" start_instance
 check "logged" "$(grep -c "listening on \[::\]:$PORT (IPv6 and IPv4)" "$FAKE_DIR/server.log")" 1

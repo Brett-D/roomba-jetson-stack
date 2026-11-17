@@ -194,17 +194,11 @@ fn main() {
         println!("{} ({:?}, via {:?}): {}", out.link.as_str(), out.link, via, out.message);
         std::process::exit(if out.link == comms::Link::Responding { 0 } else { 1 });
     }
-    // A restart or crash of this service leaves a motor command on its way running (KillMode=
-    // process): kill it before this run's first motor command (the OFF for the unknown state), or
-    // an ON it was still waiting to send could follow that OFF. The robot launch is left alone.
-    let killed = cmd::kill_leftover_groups(&ros::motor_registry(&app.cfg), ros::MOTOR_MARKER);
-    if !killed.is_empty() {
-        eprintln!("killed motor commands left by the previous run (process groups {killed:?})");
-    }
     if !Path::new(&app.cfg.auth_file).exists() {
         eprintln!("warning: {} doesn't exist: nobody can log in (set the password with set_password)", app.cfg.auth_file.display());
     }
-    // [::]: IPv6 and IPv4 (see http.rs), or IPv4 only without IPv6.
+    // [::]: IPv6 and IPv4 (see http.rs), or IPv4 only without IPv6. First, so a copy that can't
+    // listen (the port is taken: the page already runs) ends before touching anything.
     let ipv6 = if app.cfg.ipv6 { http::Ipv6::Use } else { http::Ipv6::Off };
     let listeners = match http::bind(&app.cfg.listen, ipv6) {
         Ok(l) => l,
@@ -213,8 +207,24 @@ fn main() {
             std::process::exit(1);
         }
     };
+    // One page per state directory: a second copy (another port, a test) must not take over the
+    // motor commands of the one that runs.
+    let _state_lock = match cmd::lock_dir(&app.cfg.state_dir) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    };
     for (_, what) in &listeners {
         eprintln!("roomba-control listening on {what}");
+    }
+    // A restart or crash of this service leaves a motor command on its way running (KillMode=
+    // process): kill it before this run's first motor command (the OFF for the unknown state), or
+    // an ON it was still waiting to send could follow that OFF. The robot launch is left alone.
+    let killed = cmd::kill_leftover_groups(&ros::motor_registry(&app.cfg), ros::MOTOR_MARKER);
+    if !killed.is_empty() {
+        eprintln!("killed motor commands left by the previous run (process groups {killed:?})");
     }
     {
         let app = Arc::clone(&app);

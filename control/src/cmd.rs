@@ -1,11 +1,12 @@
 //! Running the configured shell commands (start, forced stop, power-off, ROS queries) and looking
 //! at other processes through /proc.
 
-use std::io::Read;
+use std::io::{self, Read, Write};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -41,34 +42,86 @@ pub fn run(cmd: &str, timeout: Duration) -> CmdResult {
 /// motor commands, which must arrive in order). While it runs, its group ID is listed in
 /// `registry`, so that if this service ends meanwhile (a restart, a crash; systemd's
 /// KillMode=process leaves children running) the next start can kill it: `kill_leftover_groups`.
+/// The command waits behind a gate until it is listed (on disk): ended before that, the gate's
+/// end closes and it never runs; if it can't be listed, it is killed instead of run.
 pub fn run_killing(cmd: &str, timeout: Duration, registry: &Path) -> CmdResult {
     run_inner(cmd, timeout, Some(registry))
 }
 
-fn run_inner(cmd: &str, timeout: Duration, registry: Option<&Path>) -> CmdResult {
-    let kill_on_timeout = registry.is_some();
-    let mut command = Command::new("bash");
-    if kill_on_timeout {
-        command.process_group(0);
+/// The write end of a gated child's fd 3: `release` lets its command run; dropped unreleased
+/// (closed), the child exits without running it.
+struct Gate(std::fs::File);
+
+impl Gate {
+    fn release(mut self) -> io::Result<()> {
+        self.0.write_all(b"go\n")
     }
-    command.arg("-lc").arg(format!("exec 2>&1\n{cmd}")).stdin(Stdio::null()).stdout(Stdio::piped());
+}
+
+fn pipe() -> io::Result<(OwnedFd, OwnedFd)> {
+    let mut fds = [0; 2];
+    // SAFETY: pipe2 fills both descriptors, which the OwnedFds then own.
+    if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: two fresh descriptors from pipe2.
+    Ok(unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) })
+}
+
+/// The `bash -lc` child of `run`. `gated`: in its own process group, waiting before the command
+/// for a line on fd 3, which the returned Gate gives.
+fn spawn_bash(cmd: &str, gated: bool) -> io::Result<(Child, Option<Gate>)> {
+    let script = if gated {
+        format!("read -r -u 3 _ || exit 125\nexec 3<&-\nexec 2>&1\n{cmd}")
+    } else {
+        format!("exec 2>&1\n{cmd}")
+    };
+    let mut command = Command::new("bash");
+    command.arg("-lc").arg(script).stdin(Stdio::null()).stdout(Stdio::piped());
     if let Some(home) = std::env::var_os("HOME") {
         command.current_dir(home);
     }
-    // SAFETY: prctl is async-signal-safe; it only changes this (child) process's capabilities.
+    let gate = if gated { Some(pipe()?) } else { None };
+    let gate_fd = gate.as_ref().map(|(read, _)| read.as_raw_fd());
+    if gated {
+        command.process_group(0);
+    }
+    // SAFETY: prctl, fcntl and dup2 are async-signal-safe and only change this (child) process.
     unsafe {
-        command.pre_exec(|| {
+        command.pre_exec(move || {
             libc::prctl(libc::PR_CAP_AMBIENT, libc::PR_CAP_AMBIENT_CLEAR_ALL as libc::c_ulong, 0, 0, 0);
+            if let Some(fd) = gate_fd {
+                // The gate's read end as fd 3, kept across exec (dup2 clears close-on-exec).
+                let ok = if fd == 3 { libc::fcntl(3, libc::F_SETFD, 0) == 0 } else { libc::dup2(fd, 3) == 3 };
+                if !ok {
+                    return Err(io::Error::last_os_error());
+                }
+            }
             Ok(())
         });
     }
-    let mut child = match command.spawn() {
+    let child = command.spawn()?;
+    // Our read end closes here: the child has its own.
+    Ok((child, gate.map(|(_read, write)| Gate(std::fs::File::from(write)))))
+}
+
+fn run_inner(cmd: &str, timeout: Duration, registry: Option<&Path>) -> CmdResult {
+    let kill_on_timeout = registry.is_some();
+    let fail = |output: String| CmdResult { code: None, timed_out: false, output };
+    let (mut child, gate) = match spawn_bash(cmd, registry.is_some()) {
         Ok(c) => c,
-        Err(e) => return CmdResult { code: None, timed_out: false, output: format!("cannot run bash: {e}") },
+        Err(e) => return fail(format!("cannot run bash: {e}")),
     };
     let pgid = child.id() as i32;
-    if let Some(r) = registry {
-        update_registry(r, pgid, true);
+    if let (Some(r), Some(gate)) = (registry, gate) {
+        // Listed on disk before it may run: a restart from here on finds and kills it.
+        if let Err(e) = update_registry(r, pgid, true).and_then(|()| gate.release()) {
+            // SAFETY: kill(2) on the process group this child leads (process_group(0)).
+            unsafe { libc::kill(-pgid, libc::SIGKILL) };
+            let _ = child.wait();
+            let _ = update_registry(r, pgid, false);
+            return fail(format!("not run: cannot record it in {}: {e}", r.display()));
+        }
     }
     let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
     let (done_tx, done_rx) = mpsc::channel();
@@ -114,7 +167,9 @@ fn run_inner(cmd: &str, timeout: Duration, registry: Option<&Path>) -> CmdResult
         }
     };
     if let Some(r) = registry {
-        update_registry(r, pgid, false);
+        if let Err(e) = update_registry(r, pgid, false) {
+            eprintln!("cannot update {}: {e}", r.display());
+        }
     }
     // Something the command left in the background may still hold the pipe: don't wait for it.
     let _ = done_rx.recv_timeout(Duration::from_secs(1));
@@ -128,8 +183,9 @@ fn read_registry(registry: &Path) -> Vec<i32> {
     std::fs::read_to_string(registry).unwrap_or_default().lines().filter_map(|l| l.trim().parse().ok()).filter(|p| *p > 1).collect()
 }
 
-/// Adds or removes a process group ID in the registry file (one per line).
-fn update_registry(registry: &Path, pgid: i32, add: bool) {
+/// Adds or removes a process group ID in the registry file (one per line): written whole and
+/// synced, then renamed over the old list, so it is never half a list.
+fn update_registry(registry: &Path, pgid: i32, add: bool) -> io::Result<()> {
     let _g = REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
     let mut ids = read_registry(registry);
     ids.retain(|&p| p != pgid);
@@ -137,12 +193,14 @@ fn update_registry(registry: &Path, pgid: i32, add: bool) {
         ids.push(pgid);
     }
     if let Some(dir) = registry.parent() {
-        let _ = std::fs::create_dir_all(dir);
+        std::fs::create_dir_all(dir)?;
     }
     let text: String = ids.iter().map(|p| format!("{p}\n")).collect();
-    if let Err(e) = std::fs::write(registry, text) {
-        eprintln!("cannot write {}: {e}", registry.display());
-    }
+    let tmp = registry.with_extension("tmp");
+    let mut f = std::fs::File::create(&tmp)?;
+    f.write_all(text.as_bytes())?;
+    f.sync_all()?;
+    std::fs::rename(&tmp, registry)
 }
 
 /// The process group of a process (/proc/PID/stat, field 5).
@@ -173,6 +231,19 @@ pub fn kill_leftover_groups(registry: &Path, marker: &str) -> Vec<i32> {
     }
     let _ = std::fs::remove_file(registry);
     killed
+}
+
+/// An exclusive lock on DIR/lock, held while the returned file is open (for the life of the
+/// process: it is close-on-exec, so no child keeps it). Err if another process holds it.
+pub fn lock_dir(dir: &Path) -> Result<std::fs::File, String> {
+    std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+    let path = dir.join("lock");
+    let f = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(&path).map_err(|e| format!("cannot open {}: {e}", path.display()))?;
+    // SAFETY: flock on the descriptor this File owns.
+    if unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        return Err(format!("{} is locked by another roomba-control ({}): not starting a second one on it", dir.display(), path.display()));
+    }
+    Ok(f)
 }
 
 /// Single-quoted for bash.
@@ -298,6 +369,62 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("roomba-control-test-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_motor_command_that_cannot_be_recorded_never_runs() {
+        let dir = scratch("unrecorded");
+        let marker = dir.join("ran");
+        std::fs::write(dir.join("file"), "").unwrap();
+        let registry = dir.join("file").join("groups"); // under a file: can't be written
+        let r = run_killing(&format!("touch {}", shell_quote(marker.to_str().unwrap())), Duration::from_secs(5), &registry);
+        assert!(!r.ok() && r.output.contains("cannot record"), "{}", r.output);
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(!marker.exists(), "it ran");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_gated_command_waits_and_never_runs_if_the_gate_closes() {
+        let dir = scratch("gate");
+        let marker = dir.join("ran");
+        let touch = format!("touch {}", shell_quote(marker.to_str().unwrap()));
+        // As when the service ends between starting a motor command and recording it.
+        let (mut child, gate) = spawn_bash(&touch, true).unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(!marker.exists(), "waits for the gate");
+        drop(gate);
+        assert_eq!(child.wait().unwrap().code(), Some(125));
+        assert!(!marker.exists());
+        let (mut child, gate) = spawn_bash(&touch, true).unwrap();
+        gate.unwrap().release().unwrap();
+        assert!(child.wait().unwrap().success() && marker.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn one_process_at_a_time_holds_the_state_directory() {
+        let dir = scratch("lock");
+        let first = lock_dir(&dir).unwrap();
+        assert!(lock_dir(&dir).unwrap_err().contains("locked by another roomba-control"));
+        drop(first);
+        // A child that another test is starting may hold a copy of the descriptor until it execs.
+        let again = (0..50).find_map(|_| {
+            let l = lock_dir(&dir).ok();
+            if l.is_none() {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            l
+        });
+        assert!(again.is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn a_restart_kills_the_motor_commands_left_running() {
         let dir = std::env::temp_dir().join(format!("roomba-control-test-kill-{}", std::process::id()));
@@ -312,7 +439,7 @@ mod tests {
         let mut ours = group("cleaning_motors-test");
         let mut other = group("something-else");
         for c in [&ours, &other] {
-            update_registry(&registry, c.id() as i32, true);
+            update_registry(&registry, c.id() as i32, true).unwrap();
         }
         std::thread::sleep(Duration::from_millis(200));
         let killed = kill_leftover_groups(&registry, "cleaning_motors-test");

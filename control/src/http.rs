@@ -536,5 +536,9 @@ mod tests {
         assert_eq!(ls.len(), 2, "{:?}", ls.iter().map(|l| &l.1).collect::<Vec<_>>());
         assert_eq!(ls[1].0.local_addr().unwrap(), SocketAddr::from(([0, 0, 0, 0], port)));
         assert!(reachable(SocketAddr::from(([127, 0, 0, 1], port))) && reachable(format!("[::1]:{port}").parse().unwrap()));
+        // IPv6-only, and another process has IPv4 on the port: an error, not IPv6 only.
+        let other = TcpListener::bind("0.0.0.0:0").unwrap();
+        let port = other.local_addr().unwrap().port();
+        assert_eq!(bind(&format!("[::]:{port}"), Ipv6::V6Only).map(|_| ()).unwrap_err().kind(), ErrorKind::AddrInUse);
     }
 }
