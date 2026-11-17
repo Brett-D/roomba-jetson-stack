@@ -1,10 +1,11 @@
 """Printable ArUco markers for RTAB-Map landmarks (vslam.launch.py markers:=true).
 
-  python tools/markers/make_markers.py [--out markers.pdf] [--count 10] [--size_mm 150]
+  python tools/markers/make_markers.py [--out markers.pdf] [--count 3] [--size_mm 150]
 
 One marker per Letter page: ID 0 is the robot's home / start spot (the important one); optional
-others go one per floor in a central open area. DICT_4X4_50 (RTAB-Map Marker/Dictionary 0); --size_mm must match the launch argument
-marker_length (metres). Needs opencv-contrib (cv2.aruco) and matplotlib.
+others go one per floor in a central open area. DICT_4X4_50 (RTAB-Map Marker/Dictionary 0);
+--size_mm must match the launch argument marker_length (metres). Needs opencv-contrib (cv2.aruco,
+OpenCV 4.6 or newer) and matplotlib.
 """
 import argparse
 
@@ -16,18 +17,31 @@ import matplotlib.pyplot as plt  # noqa: E402
 from matplotlib.backends.backend_pdf import PdfPages  # noqa: E402
 
 W_IN, H_IN = 8.5, 11.0
+# The marker sits in the band between the scale bar / notes (below BAND_LO) and the headers (above
+# BAND_HI), with at least MARGIN_IN of white page around it.
+BAND_LO, BAND_HI, MARGIN_IN = 2.2, 9.2, 0.5
+MAX_SIZE_MM = min(BAND_HI - BAND_LO, W_IN - 2 * MARGIN_IN) * 25.4
+MIN_SIZE_MM = 30.0
 
 
 def mm(v):
     return v / 25.4
 
 
+def marker_image(dictionary, marker_id, pixels):
+    # generateImageMarker arrived in OpenCV 4.7; 4.6 (the documented PC environment) has drawMarker
+    gen = getattr(cv2.aruco, "generateImageMarker", None)
+    if gen is not None:
+        return gen(dictionary, marker_id, pixels, borderBits=1)
+    return cv2.aruco.drawMarker(dictionary, marker_id, pixels, borderBits=1)
+
+
 def page(pdf, dictionary, marker_id, size_mm):
     fig = plt.figure(figsize=(W_IN, H_IN))
     s = mm(size_mm)
-    ax = fig.add_axes([(W_IN - s) / 2 / W_IN, 3.0 / H_IN, s / W_IN, s / H_IN])
-    ax.imshow(cv2.aruco.generateImageMarker(dictionary, marker_id, 600, borderBits=1),
-              cmap="gray", vmin=0, vmax=255, interpolation="nearest")
+    y0 = BAND_LO + (BAND_HI - BAND_LO - s) / 2
+    ax = fig.add_axes([(W_IN - s) / 2 / W_IN, y0 / H_IN, s / W_IN, s / H_IN])
+    ax.imshow(marker_image(dictionary, marker_id, 600), cmap="gray", vmin=0, vmax=255, interpolation="nearest")
     ax.axis("off")
     name = "HOME / START SPOT" if marker_id == 0 else f"CENTRAL MARKER {marker_id}"
     fig.text(0.5, 0.93, f"ID {marker_id}", ha="center", fontsize=40, weight="bold")
@@ -53,6 +67,11 @@ def main():
     ap.add_argument("--count", type=int, default=3)
     ap.add_argument("--size_mm", type=float, default=150.0)
     a = ap.parse_args()
+    if not MIN_SIZE_MM <= a.size_mm <= MAX_SIZE_MM:
+        ap.error(f"--size_mm must be between {MIN_SIZE_MM:g} and {MAX_SIZE_MM:.0f} mm to fit a Letter page "
+                 f"with a white margin")
+    if not 1 <= a.count <= 50:
+        ap.error("--count must be 1-50 (DICT_4X4_50 has IDs 0-49)")
     dictionary = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
     with PdfPages(a.out) as pdf:
         for i in range(a.count):
