@@ -149,8 +149,9 @@ node = pd.PersonDetector()
 buf = node.tf_buffer
 buf.lookup_transform = lambda target, source, t, timeout=None: buf.lookup_transform_core(target, source, t)
 published = []
-for name in ('pub_img', 'pub_2d', 'pub_3d', 'pub_ignored', 'pub_markers'):
-    getattr(node, name).publish = (lambda n: lambda m: published.append((n, m)))(name)
+for name in ('pub_img', 'pub_2d', 'pub_3d', 'pub_ignored', 'pub_markers', 'pub_objects'):
+    if getattr(node, name, None) is not None:   # pub_objects: models with classes that are not people
+        getattr(node, name).publish = (lambda n: lambda m: published.append((n, m)))(name)
 annotate = [True]
 node.pub_img.get_subscription_count = lambda: 1 if annotate[0] else 0
 
@@ -190,8 +191,8 @@ def rust_next(kind, timeout=120):
 
 
 stats = dict(frames=0, py_only=0, rust_only=0, in_equal=0, out_equal=0, dets=0, d2_equal=0, d3_equal=0,
-             ig_equal=0, mk_equal=0, img_frames=0, img_equal=0, jpeg_equal=0, src_equal=0, stats_equal=0,
-             stats_events=0, frames_with_dets=0, ignored=0)
+             ig_equal=0, ob_equal=0, objects=0, mk_equal=0, img_frames=0, img_equal=0, jpeg_equal=0,
+             src_equal=0, stats_equal=0, stats_events=0, frames_with_dets=0, ignored=0)
 src_count = {}
 reasons = {}
 jpeg_diffs = []
@@ -208,7 +209,7 @@ def note(kind, detail):
 
 def py_frame(stamp):
     """The Python node's published messages for one frame, as person_replay prints them."""
-    out = {'d2': [], 'd3': [], 'ig': [], 'mk': [], 'jpeg': None}
+    out = {'d2': [], 'd3': [], 'ig': [], 'ob': [], 'mk': [], 'jpeg': None}
     for name, m in published:
         if name == 'pub_2d':
             for d in m.detections:
@@ -216,8 +217,8 @@ def py_frame(stamp):
                 out['d2'].append([[d.bbox.center.position.x, d.bbox.center.position.y], [d.bbox.size_x, d.bbox.size_y],
                                   r.class_id, r.score])
                 assert ns(d.header.stamp) == stamp and len(d.results) == 1 and d.bbox.center.theta == 0.0
-        elif name in ('pub_3d', 'pub_ignored'):
-            key = 'd3' if name == 'pub_3d' else 'ig'
+        elif name in ('pub_3d', 'pub_ignored', 'pub_objects'):
+            key = {'pub_3d': 'd3', 'pub_ignored': 'ig', 'pub_objects': 'ob'}[name]
             for d in m.detections:
                 c, s, r = d.bbox.center, d.bbox.size, d.results[0]
                 assert r.pose.pose.position == c.position and c.orientation.w == 1.0 and ns(d.header.stamp) == stamp
@@ -246,11 +247,12 @@ def compare(stamp, py, rs):
     n = len(py['d2'])
     stats['dets'] += n
     stats['frames_with_dets'] += n > 0
-    for key in ('d2', 'd3', 'ig', 'mk'):
-        if py[key] == rs[key]:
+    stats['objects'] += len(py['ob'])
+    for key in ('d2', 'd3', 'ig', 'ob', 'mk'):
+        if py[key] == rs.get(key, []):
             stats[key + '_equal'] += 1
         else:
-            note(key, {'stamp': stamp, 'py': py[key], 'rust': rs[key]})
+            note(key, {'stamp': stamp, 'py': py[key], 'rust': rs.get(key)})
     for d in py['ig']:
         reasons[d[4]] = reasons.get(d[4], 0) + 1
     stats['ignored'] += len(py['ig'])

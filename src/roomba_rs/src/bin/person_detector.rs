@@ -7,7 +7,8 @@
 //! Subscribes: /camera/left/image_rect_color, /camera/depth/image_rect_raw, /camera/right/image_rect_mono
 //!             (exact-time synchronized), /camera/{left,right}/camera_info, /rtabmap/map,
 //!             /perception/ignore_zones, /rtabmap/localization_pose, ~/floor_grid, /tf, /tf_static
-//! Publishes:  ~/annotated/compressed, ~/detections_2d, ~/detections_3d, ~/ignored_3d, ~/markers
+//! Publishes:  ~/annotated/compressed, ~/detections_2d, ~/detections_3d, ~/ignored_3d, ~/markers,
+//!             ~/objects_3d (classes that are not people, e.g. railings; see `person_classes`)
 //!
 //! The executor thread only receives (and synchronizes) messages; a worker thread runs the frames in
 //! arrival order, so TF keeps arriving while a frame waits for its transform (as with tf2_ros'
@@ -115,6 +116,8 @@ struct Pubs {
     d2: Publisher<vision_msgs::msg::Detection2DArray>,
     d3: Publisher<vision_msgs::msg::Detection3DArray>,
     ignored: Publisher<vision_msgs::msg::Detection3DArray>,
+    /// Only when some configured class is not a person.
+    objects: Option<Publisher<vision_msgs::msg::Detection3DArray>>,
     markers: Publisher<visualization_msgs::msg::MarkerArray>,
 }
 
@@ -184,6 +187,9 @@ fn publish(pubs: &Pubs, header: &std_msgs::msg::Header, out: FrameOutput) {
     pubs.d2.publish(vision_msgs::msg::Detection2DArray { header: header.clone(), detections }).ok();
     pubs.d3.publish(det3d_array(header, &out.det3d)).ok();
     pubs.ignored.publish(det3d_array(header, &out.ignored)).ok();
+    if let Some(objects) = &pubs.objects {
+        objects.publish(det3d_array(header, &out.objects)).ok();
+    }
     if !out.markers.is_empty() {
         let markers = out.markers.iter().map(|m| marker(header, m)).collect();
         pubs.markers.publish(visualization_msgs::msg::MarkerArray { markers }).ok();
@@ -266,6 +272,9 @@ fn main() -> Result<()> {
     let conf_threshold = d.get("conf_threshold", defaults.conf_threshold)?;
     let nms_threshold = d.get("nms_threshold", defaults.nms_threshold)?;
     let classes: Arc<[i64]> = d.get("classes", Arc::from(defaults.classes.as_slice()))?;
+    let strings = |v: &[String]| -> Arc<[Arc<str>]> { v.iter().map(|s| Arc::from(s.as_str())).collect() };
+    let class_names: Arc<[Arc<str>]> = d.get("class_names", strings(&defaults.class_names))?;
+    let person_classes: Arc<[Arc<str>]> = d.get("person_classes", strings(&defaults.person_classes))?;
     let jpeg_quality = d.get("jpeg_quality", defaults.jpeg_quality)?;
     let min_depth_pixels = d.get("min_depth_pixels", defaults.min_depth_pixels)?;
     let map_frame: Arc<str> = d.get("map_frame", Arc::from(defaults.map_frame.as_str()))?;
@@ -274,6 +283,8 @@ fn main() -> Result<()> {
         conf_threshold,
         nms_threshold,
         classes: classes.to_vec(),
+        class_names: class_names.iter().map(|s| s.to_string()).collect(),
+        person_classes: person_classes.iter().map(|s| s.to_string()).collect(),
         jpeg_quality,
         min_depth_pixels,
         map_frame: map_frame.to_string(),
@@ -299,6 +310,7 @@ fn main() -> Result<()> {
         }
     };
 
+    let has_objects = det.has_objects();
     let queue = Arc::new(Queue::default());
     let push = |q: &Arc<Queue>| {
         let q = Arc::clone(q);
@@ -311,6 +323,7 @@ fn main() -> Result<()> {
         d2: node.create_publisher("~/detections_2d".keep_last(5))?,
         d3: node.create_publisher("~/detections_3d".keep_last(5))?,
         ignored: node.create_publisher("~/ignored_3d".keep_last(5))?,
+        objects: if has_objects { Some(node.create_publisher("~/objects_3d".keep_last(5))?) } else { None },
         markers: node.create_publisher("~/markers".keep_last(5))?,
     };
 

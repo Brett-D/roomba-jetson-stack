@@ -19,7 +19,13 @@ Publishes:
   ~/detections_3d          vision_msgs/Detection3DArray (relevant only; left optical frame, meters)
   ~/ignored_3d             vision_msgs/Detection3DArray (ignored: in an ignore zone or behind
                            occupied map cells; Detection3D.id holds the reason)
+  ~/objects_3d             vision_msgs/Detection3DArray (detections of classes that are not people,
+                           e.g. railings; only when the model has such classes, never ignore-filtered)
   ~/markers                visualization_msgs/MarkerArray (labeled 3D markers; ignored in gray)
+
+Models: `classes` are the class ids to detect; `class_names` the model's names (default the 80 COCO
+names of the stock engine); only `person_classes` (default person, cat, dog) are people, the rest go
+to ~/objects_3d. Launch profiles: config/person_models.yaml (person_model:=...).
 
 Ignore filtering needs TF to the map frame (RTAB-Map + cuVSLAM). Without a map or TF,
 nothing is ignored, so obstacle avoidance never loses a person because of missing data.
@@ -61,6 +67,10 @@ COCO_NAMES = [
     'bed', 'dining table', 'toilet', 'tv', 'laptop', 'mouse', 'remote', 'keyboard', 'cell phone',
     'microwave', 'oven', 'toaster', 'sink', 'refrigerator', 'book', 'clock', 'vase', 'scissors',
     'teddy bear', 'hair drier', 'toothbrush']
+# The classes the people outputs handle by default.
+PERSON_CLASSES = ['person', 'cat', 'dog']
+# Box colour (BGR) of a detection that is not a person (a railing) in the annotated image.
+OBJECT_COLOR = (255, 0, 255)
 
 
 class _Cuda:
@@ -154,13 +164,27 @@ class PersonDetector(Node):
         self.conf = float(self.declare_parameter('conf_threshold', 0.45).value)
         self.nms = float(self.declare_parameter('nms_threshold', 0.5).value)
         self.class_ids = [int(c) for c in self.declare_parameter('classes', [0]).value]
+        # The model's class names in output order (class id = index), and the classes that are
+        # people (or pets): those go to detections_3d / ignored_3d / markers, which the explorer and
+        # the web app treat as people. Other detected classes (a railing) go to objects_3d only.
+        self.names = list(self.declare_parameter('class_names', COCO_NAMES).value)
+        person_names = set(self.declare_parameter('person_classes', PERSON_CLASSES).value)
         self.jpeg_quality = int(self.declare_parameter('jpeg_quality', 80).value)
         self.min_depth_px = int(self.declare_parameter('min_depth_pixels', 15).value)
 
+        bad = [c for c in self.class_ids if not 0 <= c < len(self.names)]
+        if bad:
+            raise RuntimeError(f'class id {bad[0]} is not one of the {len(self.names)} class_names '
+                               f'(0..{len(self.names) - 1})')
         self.yolo = TrtYolo(engine)
+        if self.yolo.out.shape[1] - 4 != len(self.names):
+            raise RuntimeError(f'{engine}: the engine has {self.yolo.out.shape[1] - 4} classes but class_names '
+                               f'lists {len(self.names)}')
+        self.person_ids = {c for c in self.class_ids if self.names[c] in person_names}
+        objects = [self.names[c] for c in self.class_ids if c not in self.person_ids]
         self.get_logger().info(
             f'Loaded {engine} (input {self.yolo.in_w}x{self.yolo.in_h}); classes '
-            f'{[COCO_NAMES[c] for c in self.class_ids]}')
+            f'{[self.names[c] for c in self.class_ids]}' + (f'; not people (objects_3d): {objects}' if objects else ''))
 
         self.left_info = None
         self.baseline = None
@@ -180,6 +204,7 @@ class PersonDetector(Node):
         self.pub_2d = self.create_publisher(Detection2DArray, '~/detections_2d', 5)
         self.pub_3d = self.create_publisher(Detection3DArray, '~/detections_3d', 5)
         self.pub_ignored = self.create_publisher(Detection3DArray, '~/ignored_3d', 5)
+        self.pub_objects = self.create_publisher(Detection3DArray, '~/objects_3d', 5) if objects else None
         self.pub_markers = self.create_publisher(MarkerArray, '~/markers', 5)
 
         # Ignore filtering (zones + line of sight on the 2D map).
@@ -378,13 +403,15 @@ class PersonDetector(Node):
         header = color_msg.header
         arr2d, arr3d = Detection2DArray(header=header), Detection3DArray(header=header)
         ignored3d, markers = Detection3DArray(header=header), MarkerArray()
+        objects3d = Detection3DArray(header=header)
         annotated = bgr.copy() if self.pub_img.get_subscription_count() > 0 else None
         if annotated is not None and self.grid_on:
             self._draw_grid(annotated, color_msg.header, fx, fy, cx, cy)
-        tf_map = self._map_transform(header) if dets else None
+        tf_map = self._map_transform(header) if any(d[5] in self.person_ids for d in dets) else None
 
         for k, (x1, y1, x2, y2, score, cls) in enumerate(dets):
-            name = COCO_NAMES[cls] if cls < len(COCO_NAMES) else str(cls)
+            name = self.names[cls] if cls < len(self.names) else str(cls)
+            person = cls in self.person_ids
             z, source, (u, v) = self._distance(depth, gray, right, (x1, y1, x2, y2), fx)
             reason = None
 
@@ -399,7 +426,8 @@ class PersonDetector(Node):
 
             if z is not None:
                 X, Y = (u - cx) * z / fx, (v - cy) * z / fy
-                reason = self._ignore_reason(tf_map, (X, Y, z))
+                if person:
+                    reason = self._ignore_reason(tf_map, (X, Y, z))
                 d3 = Detection3D(header=header)
                 d3.bbox.center.position.x, d3.bbox.center.position.y, d3.bbox.center.position.z = X, Y, z
                 d3.bbox.center.orientation.w = 1.0
@@ -411,12 +439,17 @@ class PersonDetector(Node):
                 hyp3.pose.pose.position = d3.bbox.center.position
                 d3.results.append(hyp3)
                 d3.id = reason or ''  # why it was ignored (empty for active detections)
-                (ignored3d if reason else arr3d).detections.append(d3)
-                text = f'{name} {z:.2f} m' + (f' ({reason})' if reason else '')
-                markers.markers.extend(self._markers(header, k, X, Y, z, text, ignored=bool(reason)))
+                if not person:
+                    objects3d.detections.append(d3)
+                else:
+                    (ignored3d if reason else arr3d).detections.append(d3)
+                    text = f'{name} {z:.2f} m' + (f' ({reason})' if reason else '')
+                    markers.markers.extend(self._markers(header, k, X, Y, z, text, ignored=bool(reason)))
 
             if annotated is not None:
-                if reason:
+                if not person:
+                    color = OBJECT_COLOR
+                elif reason:
                     color = (110, 110, 110)
                 else:
                     color = {'depth': (0, 220, 0), 'stereo': (0, 200, 255), 'none': (200, 200, 200)}[source]
@@ -428,11 +461,13 @@ class PersonDetector(Node):
                 ty = max(y1, th + 8)
                 cv2.rectangle(annotated, (x1, ty - th - 8), (x1 + tw + 8, ty), color, -1)
                 cv2.putText(annotated, label, (x1 + 4, ty - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
-                            (255, 255, 255) if reason else (0, 0, 0), 2, cv2.LINE_AA)
+                            (255, 255, 255) if reason or not person else (0, 0, 0), 2, cv2.LINE_AA)
 
         self.pub_2d.publish(arr2d)
         self.pub_3d.publish(arr3d)
         self.pub_ignored.publish(ignored3d)
+        if self.pub_objects is not None:
+            self.pub_objects.publish(objects3d)
         if markers.markers:
             self.pub_markers.publish(markers)
         if annotated is not None:

@@ -119,6 +119,13 @@ fn params(v: &Value) -> Params {
     if let Some(c) = v["classes"].as_array() {
         p.classes = c.iter().filter_map(Value::as_i64).collect();
     }
+    let strings = |k: &str, d: &mut Vec<String>| {
+        if let Some(a) = v[k].as_array() {
+            *d = a.iter().filter_map(Value::as_str).map(String::from).collect();
+        }
+    };
+    strings("class_names", &mut p.class_names);
+    strings("person_classes", &mut p.person_classes);
     i("jpeg_quality", &mut p.jpeg_quality);
     i("min_depth_pixels", &mut p.min_depth_pixels);
     s("map_frame", &mut p.map_frame);
@@ -191,6 +198,7 @@ fn main() -> anyhow::Result<()> {
                     "d2": o.det2d.iter().map(|d| json!([d.center, d.size, d.class_id, d.score])).collect::<Vec<_>>(),
                     "d3": d3(&o.det3d),
                     "ig": d3(&o.ignored),
+                    "ob": d3(&o.objects),
                     "mk": o.markers.iter().map(|m| json!([m.ns, m.id, m.kind, m.position, m.scale, m.color.map(f64::from), m.text])).collect::<Vec<_>>(),
                     "img_crc": o.annotated.as_ref().map(|a| crc32(&a.data)),
                     "jpeg": o.jpeg.as_ref().map(|j| base64(j)),

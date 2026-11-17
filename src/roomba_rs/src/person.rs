@@ -31,9 +31,12 @@ pub const COCO_NAMES: [&str; 80] = [
     "teddy bear", "hair drier", "toothbrush",
 ];
 
-/// Python's name lookup: COCO name, or the id as text past the list.
-pub fn class_name(cls: i64) -> String {
-    usize::try_from(cls).ok().and_then(|c| COCO_NAMES.get(c)).map_or_else(|| cls.to_string(), |n| n.to_string())
+/// The classes the people outputs handle by default (COCO person, cat, dog).
+pub const PERSON_CLASSES: [&str; 3] = ["person", "cat", "dog"];
+
+/// Python's name lookup: the class's name, or the id as text past the list.
+pub fn class_name(names: &[String], cls: i64) -> String {
+    usize::try_from(cls).ok().and_then(|c| names.get(c)).map_or_else(|| cls.to_string(), |n| n.clone())
 }
 
 /// Node parameters (names and defaults of the Python node).
@@ -43,6 +46,11 @@ pub struct Params {
     pub conf_threshold: f64,
     pub nms_threshold: f64,
     pub classes: Vec<i64>,
+    /// The model's class names in output order (class id = index); default the 80 COCO names.
+    pub class_names: Vec<String>,
+    /// Classes that are people (or pets): detections_3d / ignored_3d / markers, which the explorer
+    /// and the web app treat as people. Other detected classes (a railing) go to objects_3d.
+    pub person_classes: Vec<String>,
     pub jpeg_quality: i64,
     pub min_depth_pixels: i64,
     pub map_frame: String,
@@ -64,6 +72,8 @@ impl Default for Params {
             conf_threshold: 0.45,
             nms_threshold: 0.5,
             classes: vec![0],
+            class_names: COCO_NAMES.iter().map(|s| s.to_string()).collect(),
+            person_classes: PERSON_CLASSES.iter().map(|s| s.to_string()).collect(),
             jpeg_quality: 80,
             min_depth_pixels: 15,
             map_frame: "map".into(),
@@ -208,12 +218,17 @@ pub struct MarkerOut {
 
 pub const MARKER_LIFETIME_NS: u32 = 400_000_000;
 
+/// Box colour (BGR) of a detection that is not a person (a railing) in the annotated image.
+pub const OBJECT_COLOR: [i32; 3] = [255, 0, 255];
+
 /// Everything one frame publishes (header = the color image's).
 #[derive(Clone, Debug, Default)]
 pub struct FrameOutput {
     pub det2d: Vec<Det2d>,
     pub det3d: Vec<Det3d>,
     pub ignored: Vec<Det3d>,
+    /// Located detections of the other classes (objects_3d; never ignore-filtered).
+    pub objects: Vec<Det3d>,
     pub markers: Vec<MarkerOut>,
     /// Where each detection's distance came from (not published; for tests and the A/B).
     pub sources: Vec<Source>,
@@ -515,6 +530,8 @@ pub struct Detector {
     in_h: usize,
     out_rows: usize,
     out_n: usize,
+    /// Configured class ids that are people (params.person_classes).
+    person_ids: Vec<i64>,
     stereo: StereoBm,
     left_p: Option<[f64; 12]>,
     baseline: Option<f64>,
@@ -532,17 +549,27 @@ pub struct Detector {
 impl Detector {
     /// Loads the engine (TrtYolo). Returns the detector and the startup log line.
     pub fn new(params: Params) -> Result<(Self, Log), String> {
-        if let Some(c) = params.classes.iter().find(|&&c| !(0..80).contains(&c)) {
-            return Err(format!("class id {c} is not a COCO class (0..79)"));
+        let n_names = params.class_names.len() as i64;
+        if let Some(c) = params.classes.iter().find(|&&c| !(0..n_names).contains(&c)) {
+            return Err(format!("class id {c} is not one of the {n_names} class_names (0..{})", n_names - 1));
         }
         let engine = TrtEngine::load(&params.engine_path)?;
         let (inp, out) = (engine.input_info().dims.clone(), engine.output_info().dims.clone());
         if inp.len() != 4 || inp[1] != 3 || out.len() != 3 || out[1] < 5 || params.classes.iter().any(|&c| c + 4 >= out[1]) {
             return Err(format!("{}: expected input (1, 3, H, W) and output (1, 4+C, N) with the configured classes, got {inp:?} and {out:?}", params.engine_path));
         }
+        if out[1] - 4 != n_names {
+            return Err(format!("{}: the engine has {} classes but class_names lists {n_names}", params.engine_path, out[1] - 4));
+        }
         let (in_h, in_w) = (inp[2] as usize, inp[3] as usize);
-        let names: Vec<String> = params.classes.iter().map(|&c| format!("'{}'", COCO_NAMES[c as usize])).collect();
-        let log = (Level::Info, format!("Loaded {} (input {in_w}x{in_h}); classes [{}]", params.engine_path, names.join(", ")));
+        let quoted = |ids: &[i64]| ids.iter().map(|&c| format!("'{}'", params.class_names[c as usize])).collect::<Vec<_>>().join(", ");
+        let person_ids: Vec<i64> = params.classes.iter().copied().filter(|&c| params.person_classes.contains(&params.class_names[c as usize])).collect();
+        let object_ids: Vec<i64> = params.classes.iter().copied().filter(|c| !person_ids.contains(c)).collect();
+        let mut text = format!("Loaded {} (input {in_w}x{in_h}); classes [{}]", params.engine_path, quoted(&params.classes));
+        if !object_ids.is_empty() {
+            text += &format!("; not people (objects_3d): [{}]", quoted(&object_ids));
+        }
+        let log = (Level::Info, text);
         let stereo = StereoBm::new(160, 15).ok_or("StereoBM_create failed")?;
         let los = GridLineOfSight::new(params.occupied_threshold, params.min_blocking_cells);
         let d = Detector {
@@ -553,6 +580,7 @@ impl Detector {
             in_h,
             out_rows: out[1] as usize,
             out_n: out[2] as usize,
+            person_ids,
             stereo,
             left_p: None,
             baseline: None,
@@ -570,6 +598,11 @@ impl Detector {
 
     pub fn engine(&self) -> &TrtEngine {
         &self.engine
+    }
+
+    /// Whether some configured class is not a person (objects_3d is published).
+    pub fn has_objects(&self) -> bool {
+        self.params.classes.iter().any(|c| !self.person_ids.contains(c))
     }
 
     pub fn on_left_info(&mut self, p: [f64; 12]) {
@@ -810,10 +843,11 @@ impl Detector {
         if let Some(img) = annotated.as_mut().filter(|_| self.grid_on) {
             self.draw_grid(img, f, fx, fy, cx, cy, tf);
         }
-        let tf_map = if dets.is_empty() { None } else { self.map_transform(f, tf, clock, logs) };
+        let tf_map = if dets.iter().any(|d| self.person_ids.contains(&d.cls)) { self.map_transform(f, tf, clock, logs) } else { None };
 
         for (k, det) in dets.iter().enumerate() {
-            let name = class_name(det.cls);
+            let name = class_name(&self.params.class_names, det.cls);
+            let person = self.person_ids.contains(&det.cls);
             let score = det.score as f64;
             let (z, source, (u, v)) = self.distance(f, det, fx);
             out.sources.push(source);
@@ -827,42 +861,42 @@ impl Detector {
             let mut reason = None;
             if let Some(z) = z {
                 let (x, y) = ((u - cx) * z / fx, (v - cy) * z / fy);
-                reason = self.ignore_reason(tf_map.as_ref(), [x, y, z]);
-                let d3 = Det3d {
-                    position: [x, y, z],
-                    size: [(x2 - x1) as f64 * z / fx, (y2 - y1) as f64 * z / fy, 0.3],
-                    class_id: name.clone(),
-                    score,
-                    id: reason.clone().unwrap_or_default(),
-                };
-                if reason.is_some() { out.ignored.push(d3) } else { out.det3d.push(d3) }
-                let mut text = format!("{name} {} m", fixed(z, 2));
-                if let Some(r) = &reason {
-                    text += &format!(" ({r})");
+                let size = [(x2 - x1) as f64 * z / fx, (y2 - y1) as f64 * z / fy, 0.3];
+                if person {
+                    reason = self.ignore_reason(tf_map.as_ref(), [x, y, z]);
+                    let d3 = Det3d { position: [x, y, z], size, class_id: name.clone(), score, id: reason.clone().unwrap_or_default() };
+                    if reason.is_some() { out.ignored.push(d3) } else { out.det3d.push(d3) }
+                    let mut text = format!("{name} {} m", fixed(z, 2));
+                    if let Some(r) = &reason {
+                        text += &format!(" ({r})");
+                    }
+                    let ignored = reason.is_some();
+                    out.markers.push(MarkerOut {
+                        ns: "people",
+                        id: 2 * k as i32,
+                        kind: MARKER_SPHERE,
+                        position: [x, y, z],
+                        scale: [0.25; 3],
+                        color: if ignored { [0.5, 0.5, 0.5, 0.6] } else { [0.1, 0.9, 0.2, 0.8] },
+                        text: String::new(),
+                    });
+                    out.markers.push(MarkerOut {
+                        ns: "people_labels",
+                        id: 2 * k as i32 + 1,
+                        kind: MARKER_TEXT_VIEW_FACING,
+                        position: [x, y - 0.35, z],
+                        scale: [0.0, 0.0, 0.18],
+                        color: [1.0; 4],
+                        text,
+                    });
+                } else {
+                    out.objects.push(Det3d { position: [x, y, z], size, class_id: name.clone(), score, id: String::new() });
                 }
-                let ignored = reason.is_some();
-                out.markers.push(MarkerOut {
-                    ns: "people",
-                    id: 2 * k as i32,
-                    kind: MARKER_SPHERE,
-                    position: [x, y, z],
-                    scale: [0.25; 3],
-                    color: if ignored { [0.5, 0.5, 0.5, 0.6] } else { [0.1, 0.9, 0.2, 0.8] },
-                    text: String::new(),
-                });
-                out.markers.push(MarkerOut {
-                    ns: "people_labels",
-                    id: 2 * k as i32 + 1,
-                    kind: MARKER_TEXT_VIEW_FACING,
-                    position: [x, y - 0.35, z],
-                    scale: [0.0, 0.0, 0.18],
-                    color: [1.0; 4],
-                    text,
-                });
             }
 
             if let Some(img) = annotated.as_mut() {
                 let color = match (&reason, source) {
+                    _ if !person => OBJECT_COLOR,
                     (Some(_), _) => [110, 110, 110],
                     (None, Source::Depth) => [0, 220, 0],
                     (None, Source::Stereo) => [0, 200, 255],
@@ -880,11 +914,10 @@ impl Detector {
                 let ((tw, th), _) = ocv::text_size(&label, FONT_HERSHEY_SIMPLEX, 0.6, 2);
                 let ty = y1.max(th + 8);
                 ocv::rectangle(img, (x1, ty - th - 8), (x1 + tw + 8, ty), color, FILLED, LINE_8);
-                let text_color = if reason.is_some() { [255, 255, 255] } else { [0, 0, 0] };
+                let text_color = if reason.is_some() || !person { [255, 255, 255] } else { [0, 0, 0] };
                 ocv::put_text(img, &label, (x1 + 4, ty - 5), FONT_HERSHEY_SIMPLEX, 0.6, text_color, 2, LINE_AA);
             }
         }
-
         if let Some(img) = annotated {
             out.jpeg = ocv::imencode_jpeg(&img, self.params.jpeg_quality as i32);
             out.annotated = Some(img);
