@@ -170,6 +170,24 @@ wait_for 'd["vacuum"]["armed"]' false 40
 settled
 check "all off" "$(last_entry motors '[e["main_brush"], e["side_brush"], e["vacuum"]]')" '[false, false, false]'
 
+echo "== switched off while the ON waits: DISARMING at once, OFF right after the ON"
+settled
+touch "$FAKE_DIR/motors_unplugged"   # the ON command waits for the driver (up to 8 s)
+sleep 2
+n0=$(lines)
+check "arm" "$(post vacuum/arm)" 202
+sleep 1
+check "arming" "$(st 'd["vacuum"]["pending"]')" arm
+check "OFF accepted while arming" "$(post vacuum/disarm)" 202
+check "DISARMING while the ON is on its way" "$(st 'd["vacuum"]["pending"], d["vacuum"]["armed"]')" '["disarm", false]'
+sleep 2
+rm -f "$FAKE_DIR/motors_unplugged"   # the ON goes out, then the OFF
+wait_for 'd["vacuum"]["pending"]' null 40
+check "ON, then OFF" "$(vac_seq "$n0")" '[true, false]'
+gap=$(python3 -c 'import json,sys; es=[json.loads(l) for l in open(sys.argv[1]).readlines()[int(sys.argv[2]):] if l.strip()]; m=[e for e in es if e["kind"]=="motors"]; on=max(e["t"] for e in m if e["vacuum"]); print(min(e["t"] for e in m if not e["vacuum"] and e["t"] > on) - on)' "$LOG" "$n0")
+check "OFF right after the ON (< 6 s)" "$(python3 -c "print($gap < 6)")" True
+check "off" "$(st 'd["vacuum"]["armed"], d["vacuum"]["pending"]')" '[false, null]'
+
 echo "== a slow ARMED sound doesn't hold up the OFF"
 echo 8 > "$FAKE_DIR/song_delay"
 settled

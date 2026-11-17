@@ -79,8 +79,12 @@ impl RosState {
     }
 
     /// What VACUUM ARMED is switching to: the command on its way, or the next one (while a driver
-    /// runs to take it).
+    /// runs to take it). An OFF asked for while an ON is on its way shows at once (DISARMING): it
+    /// goes out right after that ON.
     pub fn vac_pending(&self, driver: bool) -> Option<bool> {
+        if self.vac_sending == Some(true) && (self.vac_force_off || !self.vac_want) {
+            return Some(false);
+        }
         self.vac_sending.or_else(|| {
             let due = self.vac_retry_at.is_none_or(|t| Instant::now() >= t);
             next_motor_command(self.vac_want, self.vac_sent, self.vac_force_off).filter(|_| driver && due)
@@ -361,10 +365,17 @@ pub fn request_vacuum(app: &Arc<App>, arm: bool) -> Result<String, String> {
         r.vac_want = true;
         r.vac_note = None;
     } else {
-        // An explicit OFF goes out even if the motors look off already.
+        // Always accepted, also while arming: an explicit OFF goes out even if the motors look off
+        // already, and right after an ON that is on its way.
+        let after_on = r.vac_sending == Some(true);
         r.vac_want = false;
         r.vac_force_off = true;
         r.vac_retry_at = None;
+        if after_on {
+            drop(ctl);
+            app.ctl_cv.notify_all();
+            return Ok("Disarming: the OFF goes out right after the ON on its way…".into());
+        }
     }
     drop(ctl);
     app.ctl_cv.notify_all();
@@ -681,6 +692,11 @@ mod tests {
         assert_eq!(next_motor_command(false, Some(false), true), Some(false), "an explicit OFF always goes out");
         let mut r = RosState { vac_want: true, vac_sent: Some(false), vac_sending: Some(true), ..Default::default() };
         assert!(!r.armed() && r.vac_maybe_on(), "arming: hazards watched");
+        assert_eq!(r.vac_pending(true), Some(true), "ARMING");
+        (r.vac_want, r.vac_force_off) = (false, true);
+        assert_eq!(r.vac_pending(true), Some(false), "switched off while arming: DISARMING at once");
+        assert_eq!(next_motor_command(r.vac_want, Some(true), r.vac_force_off), Some(false), "the OFF right after the ON");
+        (r.vac_want, r.vac_force_off) = (true, false);
         r.vac_sending = None;
         r.vac_sent = Some(true);
         assert!(r.armed());

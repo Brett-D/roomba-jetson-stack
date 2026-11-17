@@ -55,6 +55,14 @@ function shuttingDown() {
   return !!st && (st.power !== 'on' || (!!busy && (busy.op === 'shutdown' || busy.then_poweroff)));
 }
 
+// VACUUM ARMED on its way on (an ON command or the request for it) or off (an OFF, which wins).
+function vacTransition() {
+  const vac = st.vacuum;
+  const p = pendingOp();
+  const disarming = vac.pending === 'disarm' || p === 'vacuum/disarm';
+  return { arming: !disarming && (vac.pending === 'arm' || p === 'vacuum/arm'), disarming };
+}
+
 function pendingOp() {
   if (pending && Date.now() - pending.at > 8000) pending = null;
   return pending && pending.op;
@@ -126,22 +134,27 @@ function render() {
   // VACUUM ARMED (commanded state: the driver doesn't report the motors)
   const vac = st.vacuum;
   const ros = st.ros;
-  if (p && p.startsWith('vacuum/') && (vac.pending || vac.armed === (p === 'vacuum/arm'))) pending = null;
-  const vacMoving = !!vac.pending || (!!pendingOp() && pendingOp().startsWith('vacuum/'));
+  if (p === 'vacuum/arm' && (vac.pending || vac.armed)) pending = null;
+  if (p === 'vacuum/disarm' && (vac.pending === 'disarm' || (!vac.armed && !vac.pending))) pending = null;
+  const { arming, disarming } = vacTransition();
+  const vacMoving = arming || disarming;
   const vacUnknown = !!vac.unknown && !vacMoving;
+  // Switching off is always possible, also while arming: the OFF goes out right after the ON.
+  const canOff = vac.armed || arming;
   const vs = $('vac');
   vs.dataset.pos = vacMoving || vacUnknown ? 'mid' : (vac.armed ? 'up' : 'down');
   vs.setAttribute('aria-checked', String(vac.armed));
   vs.setAttribute('aria-busy', String(vacMoving));
   const vacOpen = $('vac-guarded').classList.contains('open');
-  vs.disabled = !vacOpen || vacMoving || (!vac.armed && !ros.available);
-  if (!vac.armed && !ros.available && !vacMoving) closeGuard('vac');
-  if (vac.armed && !vacOpen) openGuard('vac', false);
-  $('vac-guard').disabled = vacMoving || (!vac.armed && !ros.available);
-  $('vac-guard').title = !vac.armed && !ros.available ? ros.reason : '';
+  vs.disabled = !vacOpen || disarming || (!canOff && (vacMoving || !ros.available));
+  if (!canOff && !ros.available && !vacMoving) closeGuard('vac');
+  if (canOff && !vacOpen) openGuard('vac', false);
+  $('vac-guard').disabled = disarming || (!canOff && (vacMoving || !ros.available));
+  $('vac-guard').title = !canOff && !ros.available ? ros.reason : '';
   cls($('l-vac'), vac.armed ? 'g' : (vacMoving || vacUnknown ? 'a' : null), vacMoving || vacUnknown);
   let vacText;
-  if (vacMoving) vacText = vac.pending === 'disarm' || (pendingOp() || '').endsWith('disarm') ? 'VACUUM: SWITCHING OFF…' : 'VACUUM: ARMING…';
+  if (disarming) vacText = 'VACUUM: DISARMING… (THE OFF GOES OUT RIGHT AFTER ANY COMMAND ON ITS WAY)';
+  else if (arming) vacText = 'VACUUM: ARMING… FLIP DOWN OR CLOSE THE GUARD TO SWITCH OFF.';
   else if (vacUnknown) vacText = 'VACUUM: STATE UNKNOWN: RETRYING OFF. HAZARDS ARE STILL WATCHED.';
   else if (vac.armed) vacText = 'VACUUM: ARMED (VACUUM, MAIN AND SIDE BRUSH ON). CLOSE THE GUARD OR FLIP DOWN TO SWITCH OFF.';
   else if (!ros.available) vacText = `VACUUM: UNAVAILABLE: ${ros.reason}`;
@@ -151,7 +164,8 @@ function render() {
   vm.textContent = vacText;
   vm.classList.toggle('err', !!vac.note && !vac.note.ok && vac.note.ago_s < 30);
   vm.classList.toggle('warn', !vac.armed && !ros.available);
-  $('vac-state').textContent = vac.armed ? 'Armed' : (ros.available ? 'Off' : 'Off. Unavailable: ' + ros.reason);
+  $('vac-state').textContent = disarming ? 'Disarming' : arming ? 'Arming: flip down to switch off'
+    : vac.armed ? 'Armed' : (ros.available ? 'Off' : 'Off. Unavailable: ' + ros.reason);
 
   // SOUND: tone buttons
   const tones = st.tones;
@@ -230,7 +244,7 @@ function render() {
   else if (!mode) ann('a-mode', 'a', 'WAITING', true);
   else ann('a-mode', mode === 'safe' || mode === 'full' ? 'g' : 'a', mode.toUpperCase());
   if (vac.armed) ann('a-vac', 'g', 'ARMED');
-  else if (vacMoving) ann('a-vac', 'a', vac.pending === 'disarm' ? 'SWITCHING OFF' : 'ARMING', true);
+  else if (vacMoving) ann('a-vac', 'a', disarming ? 'DISARMING' : 'ARMING', true);
   else if (vacUnknown) ann('a-vac', 'a', 'UNKNOWN', true);
   else if (!ros.available && r.state !== 'stopped') ann('a-vac', 'a', !ros.driver ? 'NO DRIVER' : (mode && mode !== 'safe' && mode !== 'full' ? mode.toUpperCase() + ' MODE' : 'WAITING'));
   else ann('a-vac', null, 'OFF');
@@ -252,7 +266,7 @@ function render() {
     `DISK ${d ? gb(d.free_bytes) : '—'}`,
     `LINK ${linkVal}`,
     `OI ${mode ? mode.toUpperCase() : '—'}`,
-    `VAC ${vac.armed ? 'ARMED' : 'OFF'}`,
+    `VAC ${disarming ? 'DISARMING' : arming ? 'ARMING' : vac.armed ? 'ARMED' : 'OFF'}`,
     `SND ${muted ? 'MUTED' : 'ON'}`,
     `BAT ${pct == null ? '—' : pct.toFixed(0) + '%'}${bat && bat.voltage != null ? ' ' + bat.voltage.toFixed(1) + ' V' : ''}`,
   ];
@@ -416,8 +430,8 @@ function openGuard(name, autoClose = true) {
   clearTimeout(guardTimers[name]);
   if (autoClose) {
     guardTimers[name] = setTimeout(() => {
-      // An armed vacuum switch keeps its guard up (closing it switches the vacuum off).
-      if (name === 'vac' && st && st.vacuum.armed) return;
+      // An armed (or arming) vacuum switch keeps its guard up (closing it switches the vacuum off).
+      if (name === 'vac' && st && (st.vacuum.armed || vacTransition().arming)) return;
       closeGuard(name);
     }, GUARD_CLOSE_MS);
   }
@@ -605,13 +619,13 @@ document.addEventListener('DOMContentLoaded', () => {
   });
   $('vac-guard').addEventListener('click', () => {
     if (!guardOpen('vac')) { openGuard('vac'); return; }
-    // Closing the guard over an armed switch pushes it off, as on a real panel.
-    if (st && (st.vacuum.armed || st.vacuum.pending === 'arm')) act('vacuum/disarm');
+    // Closing the guard over an armed (or arming) switch pushes it off, as on a real panel.
+    if (st && (st.vacuum.armed || vacTransition().arming)) act('vacuum/disarm');
     closeGuard('vac');
   });
   $('vac').addEventListener('click', () => {
     if (!st || !guardOpen('vac')) return;
-    act(st.vacuum.armed ? 'vacuum/disarm' : 'vacuum/arm');
+    act(st.vacuum.armed || vacTransition().arming ? 'vacuum/disarm' : 'vacuum/arm');
     openGuard('vac');
   });
   $('pack-guard').addEventListener('click', () => { if (guardOpen('pack')) closeGuard('pack'); else openGuard('pack'); });

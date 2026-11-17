@@ -270,7 +270,8 @@ On a phone, "Add to Home Screen" adds it as an app.
   - The result reads "OK: voltage …", "No reply: Roomba asleep, press Clean until its lights come on", or
     "Port missing: check the USB-serial cable".
 - **VACUUM ARMED**: lift the yellow guard and flip the switch up to run the vacuum, main brush and side brush
-  (`roomba/cleaning_motors`); the ARMED sound plays. Flip it down, or close the guard, to switch them off.
+  (`roomba/cleaning_motors`); the ARMED sound plays. Flip it down, or close the guard, to switch them off: that
+  works at any time, also while it is still arming (DISARMING blinks, and the OFF goes out right after the ON).
   - It can be armed only while the robot runs and the OI mode is Safe or Full; otherwise the page says why.
   - The driver doesn't report the motors, so the switch shows what the page commanded. It disarms by itself
     when the robot stack stops, the OI mode leaves Safe / Full (the Roomba stops its motors then) or a cliff or
