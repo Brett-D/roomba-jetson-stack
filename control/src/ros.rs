@@ -1,6 +1,7 @@
 //! The page's ROS side, through the ros2 CLI (this binary has no ROS libraries): the SOUND panel's
-//! tone buttons (roomba/define_song with play), VACUUM ARMED (roomba/cleaning_motors), and the
-//! driver's OI mode (roomba/mode) and hazards (roomba/sensors) those need.
+//! tone buttons (roomba/define_song with play), VACUUM ARMED (roomba/cleaning_motors), the driver's
+//! OI mode (roomba/mode) and hazards (roomba/sensors) those need, and the BATTERY panel
+//! (battery_state, and battery_learner's pack_swapped service for NEW PACK).
 //!
 //! The driver reports no motor state, so VACUUM ARMED shows the commanded state. It disarms by
 //! itself when the robot stack stops, the OI mode leaves Safe / Full (the Roomba stops its motors
@@ -49,7 +50,130 @@ pub struct RosState {
     pub tone_pending: Option<&'static str>,
     pub tone_last: Option<(&'static str, bool, String, Instant)>,
     last_press: Option<Instant>,
+    /// The latest battery_state while the driver runs, and when it came.
+    pub battery: Option<(Battery, Instant)>,
+    /// Whether /battery_learner/pack_swapped exists (None: not checked, or no battery_learner).
+    pub learner_service: Option<bool>,
+    learner_checked: Option<Instant>,
+    learner_checking: bool,
+    pub pack_pending: bool,
+    pub pack_last: Option<(bool, String, Instant)>,
 }
+
+/// What the BATTERY panel shows from a battery_state message. serial_number and capacity come
+/// from battery_learner (the pack number and its learned Ah): without it they are empty / NaN.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Battery {
+    /// 0-100
+    pub percentage: Option<f64>,
+    pub voltage: Option<f64>,
+    pub pack: Option<String>,
+    pub capacity_ah: Option<f64>,
+}
+
+/// One `ros2 topic echo` BatteryState message (top-level `key: value` lines).
+pub fn parse_battery(lines: &[String]) -> Battery {
+    let value = |key: &str| {
+        lines.iter().find_map(|l| l.strip_prefix(key)?.strip_prefix(':').map(|v| v.trim().trim_matches(|c| c == '\'' || c == '"').to_string()))
+    };
+    let number = |key: &str| value(key).and_then(|v| v.parse::<f64>().ok()).filter(|v| v.is_finite());
+    // float32 fields: round off the float32 noise (0.5600000023841858)
+    let round = |v: f64, places: i32| (v * 10f64.powi(places)).round() / 10f64.powi(places);
+    Battery {
+        // BatteryState.percentage is 0-1
+        percentage: number("percentage").map(|p| round(if p <= 1.0 { p * 100.0 } else { p }.clamp(0.0, 100.0), 1)),
+        voltage: number("voltage").filter(|v| *v > 0.0).map(|v| round(v, 2)),
+        pack: value("serial_number").filter(|s| !s.is_empty()),
+        capacity_ah: number("capacity").filter(|c| *c > 0.0).map(|c| round(c, 2)),
+    }
+}
+
+pub const PACK_SERVICE: &str = "/battery_learner/pack_swapped";
+
+/// battery_learner processes (not the ros2 CLI calling its service).
+pub fn learner_running(app: &App) -> bool {
+    cmd::processes().iter().any(|p| p.cmdline.contains(&app.cfg.learner_match) && !p.cmdline.contains("bin/ros2 "))
+}
+
+/// Why NEW PACK is unavailable right now (None: available).
+pub fn pack_unavailable(app: &App) -> Option<String> {
+    let stack = robot::launches(app).any() || !robot::drivers(app).is_empty();
+    let learner = learner_running(app);
+    let ctl = robot::lock(app);
+    if ctl.power != Power::On {
+        return Some("The Jetson is shutting down.".into());
+    }
+    if !stack {
+        return Some("Robot stack not running.".into());
+    }
+    if !learner {
+        return Some("battery_learner isn't running (not installed yet?).".into());
+    }
+    match ctl.ros.learner_service {
+        None => Some(format!("Looking for {PACK_SERVICE}…")),
+        Some(false) => Some(format!("No {PACK_SERVICE} service.")),
+        Some(true) => None,
+    }
+}
+
+pub fn request_pack(app: &Arc<App>) -> Result<String, String> {
+    if let Some(why) = pack_unavailable(app) {
+        return Err(why);
+    }
+    let mut ctl = robot::lock(app);
+    if ctl.ros.pack_pending {
+        return Err("Still telling battery_learner…".into());
+    }
+    ctl.ros.pack_pending = true;
+    drop(ctl);
+    let app2 = Arc::clone(app);
+    let spawned = std::thread::Builder::new().name("new-pack".into()).spawn(move || {
+        let call = format!("{} && exec timeout {CLI_TIMEOUT_S} ros2 service call {PACK_SERVICE} std_srvs/srv/Trigger", app2.cfg.ros_setup);
+        let r = cmd::run(&call, Duration::from_secs(CLI_TIMEOUT_S + 10));
+        let (ok, message) = service_response(&r.output).unwrap_or_else(|| (false, format!("No answer from {PACK_SERVICE}.")));
+        eprintln!("new pack: {} {message}", if ok { "ok" } else { "FAILED" });
+        let mut ctl = robot::lock(&app2);
+        ctl.ros.pack_pending = false;
+        ctl.ros.pack_last = Some((ok, message, Instant::now()));
+    });
+    if spawned.is_err() {
+        robot::lock(app).ros.pack_pending = false;
+        return Err("Cannot start a thread.".into());
+    }
+    Ok("Telling battery_learner about the new pack…".into())
+}
+
+/// Looks for the pack_swapped service (ros2 service list): when battery_learner appears, then every
+/// minute (every 10 s while it is missing).
+fn check_learner(app: &Arc<App>, learner: bool) {
+    let mut ctl = robot::lock(app);
+    if !learner {
+        ctl.ros.learner_service = None;
+        ctl.ros.learner_checked = None;
+        return;
+    }
+    let every = if ctl.ros.learner_service == Some(true) { Duration::from_secs(60) } else { Duration::from_secs(10) };
+    if ctl.ros.learner_checking || ctl.ros.learner_checked.is_some_and(|t| t.elapsed() < every) {
+        return;
+    }
+    ctl.ros.learner_checking = true;
+    drop(ctl);
+    let app2 = Arc::clone(app);
+    let spawned = std::thread::Builder::new().name("learner-check".into()).spawn(move || {
+        let r = cmd::run(&format!("{} && exec timeout {CLI_TIMEOUT_S} ros2 service list", app2.cfg.ros_setup), Duration::from_secs(CLI_TIMEOUT_S + 10));
+        let found = r.ok().then(|| r.output.lines().any(|l| l.trim() == PACK_SERVICE));
+        let mut ctl = robot::lock(&app2);
+        ctl.ros.learner_checking = false;
+        ctl.ros.learner_checked = Some(Instant::now());
+        if found.is_some() {
+            ctl.ros.learner_service = found;
+        }
+    });
+    if spawned.is_err() {
+        robot::lock(app).ros.learner_checking = false;
+    }
+}
+
 
 fn join(v: &[u8]) -> String {
     v.iter().map(u8::to_string).collect::<Vec<_>>().join(", ")
@@ -260,6 +384,7 @@ pub fn hazards(lines: &[String]) -> Vec<&'static str> {
 enum Kind {
     Mode,
     Sensors,
+    Battery,
 }
 
 fn spawn_monitor(app: &Arc<App>, kind: Kind) -> Option<Child> {
@@ -268,6 +393,7 @@ fn spawn_monitor(app: &Arc<App>, kind: Kind) -> Option<Child> {
         // and misses the mode published at the driver's start.
         Kind::Mode => "ros2 topic echo --qos-durability transient_local --qos-reliability reliable --field data /roomba/mode",
         Kind::Sensors => "ros2 topic echo --qos-reliability best_effort /roomba/sensors",
+        Kind::Battery => "ros2 topic echo --qos-reliability best_effort --no-arr /battery_state",
     };
     let mut child = cmd::spawn_piped(&format!("{} && exec {echo}", app.cfg.ros_setup)).ok()?;
     let out = child.stdout.take()?;
@@ -293,6 +419,11 @@ fn spawn_monitor(app: &Arc<App>, kind: Kind) -> Option<Child> {
                     msg.clear();
                 }
                 Kind::Sensors => msg.push(line),
+                Kind::Battery if line == "---" => {
+                    robot::lock(&app).ros.battery = Some((parse_battery(&msg), Instant::now()));
+                    msg.clear();
+                }
+                Kind::Battery => msg.push(line),
             }
         }
     });
@@ -328,10 +459,10 @@ impl Monitor {
     }
 }
 
-/// Runs for the life of the page: the mode monitor while a driver runs, the hazard monitor while
-/// armed, and disarming when the stack stops.
+/// Runs for the life of the page: the mode and battery monitors while a driver runs, the hazard
+/// monitor while armed, disarming when the stack stops, and the battery_learner service check.
 pub fn supervise(app: Arc<App>) {
-    let (mut mode, mut sensors) = (Monitor::new(), Monitor::new());
+    let (mut mode, mut sensors, mut battery) = (Monitor::new(), Monitor::new(), Monitor::new());
     loop {
         let driver = !robot::drivers(&app).is_empty();
         let (power_on, armed) = {
@@ -340,10 +471,16 @@ pub fn supervise(app: Arc<App>) {
         };
         mode.keep(driver && power_on, &app, Kind::Mode);
         sensors.keep(driver && power_on && armed, &app, Kind::Sensors);
+        battery.keep(driver && power_on, &app, Kind::Battery);
         if !driver {
-            robot::lock(&app).ros.mode = None;
+            {
+                let mut ctl = robot::lock(&app);
+                ctl.ros.mode = None;
+                ctl.ros.battery = None;
+            }
             auto_disarm(&app, "robot stack stopped", false);
         }
+        check_learner(&app, power_on && learner_running(&app));
         std::thread::sleep(Duration::from_secs(1));
     }
 }
@@ -379,5 +516,15 @@ mod tests {
         assert_eq!(service_response("waiting for service to become available...\n"), None);
         let lines: Vec<String> = ["oi_mode: 2", "cliff_front_left: true", "wheel_drop_left: false", "  cliff_left: true"].map(String::from).into();
         assert_eq!(hazards(&lines), ["cliff_front_left"], "only top-level fields");
+    }
+
+    #[test]
+    fn reads_battery_state() {
+        let msg = |s: &str| s.lines().map(String::from).collect::<Vec<_>>();
+        let learned = msg("header:\n  frame_id: ''\nvoltage: 18.43000030517578\ncapacity: 4.119999885559082\npercentage: 0.5600000023841858\nserial_number: '5'\ncell_voltage: '<array type: float[0]>'");
+        assert_eq!(parse_battery(&learned), Battery { percentage: Some(56.0), voltage: Some(18.43), pack: Some("5".into()), capacity_ah: Some(4.12) });
+        // Without battery_learner: no pack number, capacity NaN
+        let plain = msg("voltage: 18.4\ncapacity: .nan\npercentage: .nan\nserial_number: ''");
+        assert_eq!(parse_battery(&plain), Battery { percentage: None, voltage: Some(18.4), pack: None, capacity_ah: None });
     }
 }

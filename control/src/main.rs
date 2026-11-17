@@ -1,8 +1,9 @@
 //! roomba-control: the always-on control page of the robot's Jetson (port 80, started at boot by
 //! systemd; see scripts/install_control_page.sh). Log in with the robot web app's password, then
 //! start / stop the robot stack (scripts/run_robot.sh auto, SIGTERM to its launch), check the
-//! Roomba's serial link, arm the vacuum, play sounds on the Roomba, watch the Jetson's health, the
-//! robot log and the robot page's camera / map / depth views (port 8080), and shut the Jetson down.
+//! Roomba's serial link, arm the vacuum, play sounds on the Roomba, see the battery and tell
+//! battery_learner about a new pack, watch the Jetson's health, the robot log and the robot page's
+//! camera / map / depth views (port 8080), and shut the Jetson down.
 //! No ROS libraries: it runs while the robot stack is off and reaches ROS through the ros2 CLI.
 
 mod auth;
@@ -38,6 +39,7 @@ pub struct Config {
     pub camera_usb: (String, String),
     pub launch_match: String,
     pub driver_match: String,
+    pub learner_match: String,
     pub ros_setup: String,
     pub disk_path: PathBuf,
     /// The sound_events node stays silent while this file exists.
@@ -70,6 +72,7 @@ roomba-control --check-comms  run COMMS CHECK once and print the result
   --launch-match TEXT      command-line text of a robot launch (ros2 launch roomba_bringup)
   --driver-match TEXT      command-line text of a Roomba driver process (lib/roomba_driver:
                            the installed Rust or Python driver, not a build of it)
+  --learner-match TEXT     command-line text of the battery_learner process (battery_learner)
   --sound-mute-file FILE   SOUND switch: this file exists while the Roomba is muted
                            ($HOME/.config/roomba/sound_muted, read live by sound_events)
   --ros-setup CMD          bash to set up ROS for the comms check over ROS
@@ -88,7 +91,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<(Config, bool), 
             "--check-comms" => check = true,
             "--listen" | "--robot-ws" | "--start-cmd" | "--force-stop-cmd" | "--poweroff-cmd" | "--pid-file" | "--log-file"
             | "--auth-file" | "--stop-timeout-s" | "--start-timeout-s" | "--session-ttl-s" | "--robot-web-port"
-            | "--driver-config" | "--serial-dev" | "--camera-usb" | "--launch-match" | "--driver-match" | "--ros-setup" | "--sound-mute-file" => {
+            | "--driver-config" | "--serial-dev" | "--camera-usb" | "--launch-match" | "--driver-match" | "--learner-match" | "--ros-setup" | "--sound-mute-file" => {
                 let val = it.next().ok_or_else(|| format!("{a} needs a value"))?;
                 v.insert(a[2..].to_string(), val);
             }
@@ -124,6 +127,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<(Config, bool), 
         camera_usb,
         launch_match: v.remove("launch-match").unwrap_or_else(|| "ros2 launch roomba_bringup".into()),
         driver_match: v.remove("driver-match").unwrap_or_else(|| "lib/roomba_driver".into()),
+        learner_match: v.remove("learner-match").unwrap_or_else(|| "battery_learner".into()),
         ros_setup: v
             .remove("ros-setup")
             .unwrap_or_else(|| format!("source /opt/ros/jazzy/setup.bash && source {}", q(ws.join("install/setup.bash")))),

@@ -169,6 +169,42 @@ function render() {
   tm.classList.toggle('warn', !ros.available);
   tm.classList.toggle('err', ros.available && !tones.pending && !!tones.last && !tones.last.ok && tones.last.ago_s < 60);
 
+  // BATTERY (pack number and learned capacity come from battery_learner, when it runs)
+  const bat = st.battery;
+  const pct = bat && bat.percentage != null ? bat.percentage : null;
+  const level = pct == null ? '' : pct < 20 ? 'r' : pct < 40 ? 'a' : 'g';
+  const lit = pct == null ? 0 : Math.max(pct > 0 ? 1 : 0, Math.round(pct / 10));
+  document.querySelectorAll('#batt-meter .gauge-cells i').forEach((c, i) => { c.className = i < lit ? 'on ' + level : ''; });
+  $('batt-pct').textContent = pct == null ? '—' : `${pct.toFixed(0)}%`;
+  $('batt-pct').classList.toggle('stale', !!bat && bat.age_s > 10);
+  const meter = $('batt-meter');
+  if (pct == null) { meter.removeAttribute('aria-valuenow'); meter.setAttribute('aria-valuetext', 'unknown'); }
+  else { meter.setAttribute('aria-valuenow', pct.toFixed(0)); meter.setAttribute('aria-valuetext', `${pct.toFixed(0)} percent`); }
+  $('batt-v').textContent = bat && bat.voltage != null ? `${bat.voltage.toFixed(2)} V` : '—';
+  $('batt-pack').textContent = !bat || !bat.pack ? '—' : (/^\d+$/.test(bat.pack) ? `PACK ${bat.pack}` : bat.pack.toUpperCase());
+  $('batt-cap').textContent = bat && bat.capacity_ah != null ? `${bat.capacity_ah.toFixed(2)} Ah` : '—';
+  $('batt-cap').title = bat && bat.capacity_ah != null ? 'Capacity learned by battery_learner' : 'Learned by battery_learner (not running, or not learned yet)';
+
+  // NEW PACK (battery_learner's pack_swapped service)
+  const ps = st.pack_swap;
+  if (p === 'battery/new_pack' && ps.pending) pending = null;
+  const packSending = ps.pending || pendingOp() === 'battery/new_pack';
+  const np = $('newpack');
+  np.classList.toggle('sending', packSending);
+  np.disabled = !guardOpen('pack') || !ps.available || packSending;
+  if (!ps.available && !packSending) closeGuard('pack');
+  $('pack-guard').disabled = !ps.available || packSending;
+  $('pack-guard').title = ps.available ? '' : ps.reason;
+  let packText;
+  if (packSending) packText = 'NEW PACK: TELLING BATTERY_LEARNER…';
+  else if (ps.last && ps.last.ago_s < 60) packText = `NEW PACK: ${ps.last.ok ? '' : 'FAILED: '}${ps.last.message}`;
+  else if (!ps.available) packText = `NEW PACK UNAVAILABLE: ${ps.reason}`;
+  else packText = 'NEW PACK: AFTER SWAPPING THE BATTERY, LIFT THE GUARD AND PRESS';
+  const pm = $('pack-msg');
+  pm.textContent = packText;
+  pm.classList.toggle('warn', !ps.available && !packSending && !(ps.last && ps.last.ago_s < 60));
+  pm.classList.toggle('err', !packSending && !!ps.last && !ps.last.ok && ps.last.ago_s < 60);
+
   // Message line: what's happening, else the last result
   if (busy) say(`${busy.message} (${busy.elapsed_s} s)`, 'warn');
   else if (st.last) say(st.last.message, st.last.ok ? null : 'err');
@@ -212,6 +248,7 @@ function render() {
     `OI ${mode ? mode.toUpperCase() : '—'}`,
     `VAC ${vac.armed ? 'ARMED' : 'OFF'}`,
     `SND ${muted ? 'MUTED' : 'ON'}`,
+    `BAT ${pct == null ? '—' : pct.toFixed(0) + '%'}${bat && bat.voltage != null ? ' ' + bat.voltage.toFixed(1) + ' V' : ''}`,
   ];
   $('hud').textContent = 'SYS \u25b8 ' + parts.join(' \u00b7 ');
 
@@ -335,6 +372,7 @@ async function act(op) {
 const GUARDS = {
   sd: { box: 'guarded', guard: 'guard', sw: 'sd', state: 'sd-state', closed: 'Guard closed', open: 'Guard lifted: flip the switch to shut down' },
   vac: { box: 'vac-guarded', guard: 'vac-guard', sw: 'vac', state: null, closed: '', open: '' },
+  pack: { box: 'pack-guarded', guard: 'pack-guard', sw: 'newpack', state: null, closed: '', open: '' },
 };
 const guardTimers = {};
 
@@ -375,7 +413,162 @@ function confirmShutdown() {
   dlg.showModal();
 }
 
+// ---------- layout: collapsible panels and draggable sizes, saved per device ----------
+// Tap a panel's header plate to collapse it to its title bar. Drag the grips below the panels
+// (and, on a wide screen, the splitter beside the control column) to resize; double-click a grip
+// to reset it. Sizes are kept separately for the wide and the phone layout.
+const LAYOUT_KEY = 'roomba-control.layout.v1';
+const PANELS = ['master', 'sound', 'batt', 'ann', 'disp', 'log'];
+const wide = window.matchMedia('(min-width: 980px)');
+const SIDE_MIN = 280;
+let layout = loadLayout();
+let frameAutoHeight = 0;   // the robot page's content height, from its messages (phone layout)
+
+function defaultLayout() { return { collapsed: {}, h: { wide: {}, narrow: {} }, side: null }; }
+
+function loadLayout() {
+  try {
+    const l = JSON.parse(localStorage.getItem(LAYOUT_KEY));
+    if (l && l.collapsed && l.h && l.h.wide && l.h.narrow) return l;
+  } catch (e) { /* none saved, or private mode */ }
+  return defaultLayout();
+}
+
+function saveLayout() {
+  try { localStorage.setItem(LAYOUT_KEY, JSON.stringify(layout)); } catch (e) { /* private mode */ }
+}
+
+function mode() { return wide.matches ? 'wide' : 'narrow'; }
+function body(name) { return $(name + '-body'); }
+
+function applyLayout() {
+  for (const name of PANELS) {
+    const panel = $('panel-' + name);
+    const collapsed = !!layout.collapsed[name];
+    panel.classList.toggle('collapsed', collapsed);
+    panel.querySelector('.plate-toggle').setAttribute('aria-expanded', String(!collapsed));
+    const h = layout.h[mode()][name];
+    const b = body(name);
+    // On a wide screen the display always fills the window's height.
+    const sized = !!h && !(name === 'disp' && wide.matches);
+    b.style.height = sized ? h + 'px' : '';
+    b.classList.toggle('sized', sized);
+  }
+  const lay = $('layout');
+  lay.classList.toggle('disp-collapsed', !!layout.collapsed.disp);
+  if (layout.side && wide.matches) lay.style.setProperty('--side-w', clampSide(layout.side) + 'px');
+  else lay.style.removeProperty('--side-w');
+  applyFrameHeight();
+}
+
+function clampSide(w) { return Math.round(Math.max(SIDE_MIN, Math.min(w, window.innerWidth - 360))); }
+
+// Phone layout: the frame follows the robot page's height unless its panel was sized by hand.
+function applyFrameHeight() {
+  const frame = $('frame');
+  const auto = !wide.matches && !layout.h.narrow.disp && frameAutoHeight > 0;
+  frame.style.height = auto ? frameAutoHeight + 'px' : '';
+}
+
+function togglePanel(name) {
+  layout.collapsed[name] = !layout.collapsed[name];
+  saveLayout();
+  applyLayout();
+}
+
+// Drag with mouse, pen or touch: pointer capture keeps the drag even over the robot frame.
+function dragger(el, onStart, onMove, onEnd) {
+  el.addEventListener('pointerdown', (ev) => {
+    if (ev.button !== 0) return;
+    ev.preventDefault();
+    try { el.setPointerCapture(ev.pointerId); } catch (e) { /* synthetic */ }
+    const start = onStart(ev);
+    if (!start) return;
+    el.classList.add('dragging');
+    document.body.classList.add('resizing');
+    document.body.style.cursor = getComputedStyle(el).cursor;
+    const move = (e) => onMove(start, e);
+    const up = () => {
+      el.removeEventListener('pointermove', move);
+      el.removeEventListener('pointerup', up);
+      el.removeEventListener('pointercancel', up);
+      el.classList.remove('dragging');
+      document.body.classList.remove('resizing');
+      document.body.style.cursor = '';
+      onEnd(start);
+    };
+    el.addEventListener('pointermove', move);
+    el.addEventListener('pointerup', up);
+    el.addEventListener('pointercancel', up);
+  });
+}
+
+function setPanelHeight(name, h) {
+  const b = body(name);
+  const v = Math.round(Math.max(60, Math.min(h, 4000)));
+  layout.h[mode()][name] = v;
+  b.style.height = v + 'px';
+  b.classList.add('sized');
+  if (name === 'disp') applyFrameHeight();
+}
+
+function initLayout() {
+  for (const name of PANELS) {
+    $('panel-' + name).querySelector('.plate-toggle').addEventListener('click', () => togglePanel(name));
+  }
+  document.querySelectorAll('.grip').forEach((grip) => {
+    const name = grip.dataset.grip;
+    dragger(grip,
+      (ev) => (layout.collapsed[name] ? null : { y: ev.clientY, h: body(name).getBoundingClientRect().height }),
+      (s, e) => setPanelHeight(name, s.h + e.clientY - s.y),
+      () => saveLayout());
+    grip.addEventListener('dblclick', () => { delete layout.h[mode()][name]; saveLayout(); applyLayout(); });
+    grip.addEventListener('keydown', (e) => {
+      const step = e.key === 'ArrowDown' ? 20 : e.key === 'ArrowUp' ? -20 : 0;
+      if (!step || layout.collapsed[name]) return;
+      e.preventDefault();
+      setPanelHeight(name, body(name).getBoundingClientRect().height + step);
+      saveLayout();
+    });
+  });
+  const split = $('vsplit');
+  const sideWidth = () => $('side').getBoundingClientRect().width;
+  dragger(split,
+    (ev) => ({ x: ev.clientX, w: sideWidth() }),
+    (s, e) => { layout.side = clampSide(s.w + e.clientX - s.x); applyLayout(); },
+    () => saveLayout());
+  split.addEventListener('dblclick', () => { layout.side = null; saveLayout(); applyLayout(); });
+  split.addEventListener('keydown', (e) => {
+    const step = e.key === 'ArrowRight' ? 20 : e.key === 'ArrowLeft' ? -20 : 0;
+    if (!step) return;
+    e.preventDefault();
+    layout.side = clampSide(sideWidth() + step);
+    saveLayout();
+    applyLayout();
+  });
+  $('reset-layout').addEventListener('click', () => {
+    layout = defaultLayout();
+    saveLayout();
+    applyLayout();
+    // The robot page in the display keeps its own view sizes: reset those too.
+    const frame = $('frame');
+    if (frame.contentWindow && frame.dataset.src) frame.contentWindow.postMessage({ type: 'roomba-mfd-reset' }, '*');
+  });
+  // The robot page (three-view) reports its height so the stacked phone layout shows it whole.
+  window.addEventListener('message', (e) => {
+    if (e.source !== $('frame').contentWindow || !e.data || e.data.type !== 'roomba-mfd-height') return;
+    const h = Number(e.data.height);
+    if (!Number.isFinite(h)) return;
+    frameAutoHeight = Math.round(Math.max(240, Math.min(h, 4000)));
+    applyFrameHeight();
+  });
+  wide.addEventListener('change', applyLayout);
+  window.addEventListener('resize', () => { if (layout.side) applyLayout(); });
+  applyLayout();
+}
+
 document.addEventListener('DOMContentLoaded', () => {
+  initLayout();
   $('pwr').addEventListener('click', () => {
     if (!st) return;
     if (st.robot.state === 'stopped') act('start');
@@ -398,6 +591,12 @@ document.addEventListener('DOMContentLoaded', () => {
     if (!st || !guardOpen('vac')) return;
     act(st.vacuum.armed ? 'vacuum/disarm' : 'vacuum/arm');
     openGuard('vac');
+  });
+  $('pack-guard').addEventListener('click', () => { if (guardOpen('pack')) closeGuard('pack'); else openGuard('pack'); });
+  $('newpack').addEventListener('click', () => {
+    if (!guardOpen('pack')) return;
+    act('battery/new_pack');
+    closeGuard('pack');
   });
   document.querySelectorAll('.tone').forEach((b) => b.addEventListener('click', () => {
     if (lastTonePress && Date.now() - lastTonePress < 1000) return;

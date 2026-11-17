@@ -22,7 +22,7 @@ The serial driver lives in its own repository and is included here as a submodul
 | `src/roomba_skills_msgs` | Interfaces of the learned navigation skills (`action/Unstuck`) |
 | `twin/learned` | Learned navigation skills (trained in simulation; on by default on the robot since 2026-11-16, `unstuck_skill:=false goal_ranking:=rule` turns them off): Isaac Lab unstuck policy, learned frontier ranking for the explorer, their evaluation against the classical logic and in the 2D twin, and the Rust inference (`roomba_rs` feature `learned`, node `unstuck_skill`, explorer options `unstuck_skill` and `goal_ranking: learned`); see [docs/learned-skills.md](docs/learned-skills.md) |
 | `scripts/` | `run_robot.sh`, `stop_slam.sh`, `graceful.py` (`ros2 launch` that SIGTERM / SIGINT stop cleanly), `install_control_page.sh` (the control page service), `record_run.sh` / `compare_pipelines.sh` (A vs B on a recorded drive), `run_twin2d.sh` (the 2D digital twin), mapping/replay helpers, setup scripts |
-| `control/` | Control page (standalone Rust, no ROS libraries, always on, port 80): start / stop the robot, Roomba comms check, VACUUM ARMED, sound buttons, Jetson health, robot log, camera / map / depth, shut down; see [Control page](#control-page-phone-or-browser) |
+| `control/` | Control page (standalone Rust, no ROS libraries, always on, port 80): start / stop the robot, Roomba comms check, VACUUM ARMED, sound buttons, battery and NEW PACK, Jetson health, robot log, camera / map / depth, shut down; see [Control page](#control-page-phone-or-browser) |
 | `tools/` | Probes and diagnostics (motion step test, costmap/obstacle probes, map render, TF/drift/CPU-GPU checks, comparison monitor/renderer, Python vs Rust A/B checks), `twin2d_world.py` / `twin2d_plan.py` / `twin2d_run.py` (digital twin floor plan from the map database or a vector plan, scenario runner), `sound_events_offline.py` (the event-sounds node against a fake driver), `battery_learner_replay.py` (the battery gauge through whole simulated discharges and swaps); `tools/oi_tests/` holds early serial/OI bench scripts |
 | `docs/` | Wiring and power diagrams; [training.md](docs/training.md): everything that was trained in this project (Isaac Sim person / railing detector, unstuck skill, frontier ranking), with algorithms, code, results and status (simulation only, nothing learned is deployed); [learned-skills.md](docs/learned-skills.md): the two navigation skills in detail |
 | `hardware/platform` | 3D-printed platform: STLs, fit tests and the Python generator |
@@ -279,22 +279,31 @@ On a phone, "Add to Home Screen" adds it as an app.
   - Push-buttons OW, ARMED, CHATTER, HELLO and UH-OH: each press defines its song and plays it
     (`roomba/define_song` with play: songs 2, 3, 4, 0 and 1). They also play while muted, and only while the
     robot runs in Safe or Full mode. One press a second.
+- **BATTERY**: charge, voltage and, from `battery_learner`, the pack number and its learned capacity (Ah), from
+  `battery_state` (shown as unknown without `battery_learner`). **NEW PACK** (under an orange guard) calls
+  `/battery_learner/pack_swapped` after a battery swap and shows its answer (e.g. "new pack 5 at 100 %"). It is
+  disabled, with the reason, while the robot isn't running or `battery_learner` isn't.
 - **JETSON SHUTDOWN**: lift the red guard, flip the switch, then confirm. The robot stops first, exactly as above,
   then the Jetson powers off. When the page says **SAFE TO REMOVE POWER**, you can unplug it.
 - **Annunciators**: STACK, ROOMBA LINK (connected / responding / not responding), OI MODE, VACUUM, CAMERA, TEMP,
   WIFI and DISK, in green, amber or red. The last lines of `~/robot.log` show "Tracking OK" and errors.
 - **Camera · map · depth**: while the robot runs, the robot web app's three-view layout (port 8080 on the same
   host) is shown in a frame, with an "Open robot page" link.
+- **Layout**: on a desktop the display fills most of the window, with the controls in a column beside it. Tap a
+  panel's title plate to collapse or expand it; drag the grip under a panel (or the splitter beside the
+  display) to resize it, or use the arrow keys on it. The layout is kept per device (browser storage);
+  **RESET LAYOUT** restores it. On a phone the panels stack.
 
-The page talks to ROS only through the `ros2` CLI (`ros2 service call`, `ros2 topic pub --once`, and
-`ros2 topic echo` of `roomba/mode`, plus `roomba/sensors` while the vacuum is armed). A sound or a vacuum switch
-takes a few seconds while the CLI starts.
+The page talks to ROS only through the `ros2` CLI (`ros2 service call`, `ros2 topic pub`, `ros2 service list`,
+and `ros2 topic echo` of `roomba/mode` and `battery_state`, plus `roomba/sensors` while the vacuum is armed).
+A sound or a vacuum switch takes a few seconds while the CLI starts.
 
 Power-on is physical: apply power, and the Jetson boots and brings the page back by itself. The page logs to the
 journal (`journalctl -u roomba-control`). `roomba-control --check-comms` runs the comms check from a shell.
 Tests with stand-ins (no robot, serial port or power-off):
 - `control/tests/e2e/run.sh` tests the whole page with stand-in scripts.
-- `control/tests/e2e/ros_controls.sh` tests the sounds and the vacuum against a fake driver in ROS domain 78.
+- `control/tests/e2e/ros_controls.sh` tests the sounds, the vacuum and the battery against a fake driver and a
+  fake `battery_learner` in ROS domain 78.
 
 ### Robot web app views
 

@@ -154,7 +154,7 @@ fn route(app: &Arc<App>, rq: &mut Request, host: Option<&str>) -> Reply {
         ("/", true, _) => Reply::redirect("/login"),
         ("/api/status", true, _) if authed => Reply::json(200, &status::status(app, host)),
         ("/api/status", true, _) => Reply::json(401, &json!({"ok": false, "message": "log in"})),
-        (p, _, true) if p.starts_with("/api/tone/") || p == "/api/vacuum/arm" || p == "/api/vacuum/disarm" => {
+        (p, _, true) if p.starts_with("/api/tone/") || p == "/api/vacuum/arm" || p == "/api/vacuum/disarm" || p == "/api/battery/new_pack" => {
             if !authed {
                 return Reply::json(401, &json!({"ok": false, "message": "log in"}));
             }
@@ -165,6 +165,7 @@ fn route(app: &Arc<App>, rq: &mut Request, host: Option<&str>) -> Reply {
             Reply::result(match p {
                 "/api/vacuum/arm" => ros::request_vacuum(app, true),
                 "/api/vacuum/disarm" => ros::request_vacuum(app, false),
+                "/api/battery/new_pack" => ros::request_pack(app),
                 _ => ros::request_tone(app, &p["/api/tone/".len()..]),
             })
         }

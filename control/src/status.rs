@@ -116,6 +116,7 @@ pub fn host_name(host: &str) -> &str {
 pub fn status(app: &App, host: Option<&str>) -> Value {
     let cfg = &app.cfg;
     let ros_unavailable = crate::ros::unavailable(app);
+    let pack_unavailable = crate::ros::pack_unavailable(app);
     let driver = !robot::drivers(app).is_empty();
     let launches = robot::launches(app);
     let port = app.port_config();
@@ -179,6 +180,16 @@ pub fn status(app: &App, host: Option<&str>) -> Value {
             "armed": ctl.ros.armed,
             "pending": ctl.ros.vac_pending.map(|on| if on { "arm" } else { "disarm" }),
             "note": ctl.ros.vac_note.as_ref().map(|(ok, m, t)| json!({"ok": ok, "message": m, "ago_s": now.duration_since(*t).as_secs()})),
+        },
+        "battery": ctl.ros.battery.as_ref().map(|(b, t)| json!({
+            "percentage": b.percentage, "voltage": b.voltage, "pack": b.pack, "capacity_ah": b.capacity_ah,
+            "age_s": now.duration_since(*t).as_secs(),
+        })),
+        "pack_swap": {
+            "available": pack_unavailable.is_none(),
+            "reason": pack_unavailable,
+            "pending": ctl.ros.pack_pending,
+            "last": ctl.ros.pack_last.as_ref().map(|(ok, m, t)| json!({"ok": ok, "message": m, "ago_s": now.duration_since(*t).as_secs()})),
         },
         "tones": {
             "pending": ctl.ros.tone_pending,

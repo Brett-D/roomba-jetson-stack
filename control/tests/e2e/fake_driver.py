@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Stand-in roomba_driver for the control page's ROS test (ros_controls.sh), run in a private
 ROS_DOMAIN_ID: the roomba/define_song service, the roomba/cleaning_motors subscription, roomba/mode
-(latched) and roomba/sensors (5 Hz). The OI mode and a hazard come from the files mode and hazard
-in $FAKE_DIR; every request is appended to $FAKE_DIR/driver.jsonl.
+(latched), roomba/sensors (5 Hz) and battery_state (1 Hz: 18.20 V, 56 %). The OI mode, a hazard,
+battery_learner's pack number and learned capacity come from the files mode, hazard, pack and
+capacity in $FAKE_DIR; every request is appended to $FAKE_DIR/driver.jsonl.
   fake_driver.py <token>      (the token is only there for the page's --driver-match)"""
 import json
 import os
@@ -13,6 +14,7 @@ from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from roomba_msgs.msg import CleaningMotors, SensorState
 from roomba_msgs.srv import DefineSong
+from sensor_msgs.msg import BatteryState
 from std_msgs.msg import String
 
 DIR = os.environ['FAKE_DIR']
@@ -40,8 +42,10 @@ class FakeDriver(Node):
         self.pub_sensors = self.create_publisher(SensorState, 'roomba/sensors', 2)
         self.create_subscription(CleaningMotors, 'roomba/cleaning_motors', self.on_motors, 10)
         self.create_service(DefineSong, 'roomba/define_song', self.on_song)
+        self.pub_battery = self.create_publisher(BatteryState, 'battery_state', 10)
         self.mode = None
         self.create_timer(0.2, self.tick)
+        self.create_timer(1.0, self.battery)
 
     def tick(self):
         mode = read('mode', 'passive')
@@ -54,6 +58,14 @@ class FakeDriver(Node):
         if hazard:
             setattr(msg, hazard, True)
         self.pub_sensors.publish(msg)
+
+    def battery(self):
+        msg = BatteryState(voltage=18.2, percentage=0.56, serial_number=read('pack', ''))
+        try:
+            msg.capacity = float(read('capacity', 'nan'))
+        except ValueError:
+            msg.capacity = float('nan')
+        self.pub_battery.publish(msg)
 
     def on_motors(self, m):
         log('motors', main_brush=m.main_brush, side_brush=m.side_brush, vacuum=m.vacuum, use_pwm=m.use_pwm)

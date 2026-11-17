@@ -37,7 +37,7 @@ kill_fakes() {
 start_instance() {
     "$BIN" --listen "127.0.0.1:$PORT" --auth-file "$AUTH" --pid-file "$FAKE_DIR/robot.pid" \
         --log-file "$FAKE_DIR/robot.log" --start-cmd "$HERE/fake_run_robot.sh" \
-        --force-stop-cmd "$HERE/fake_stop_slam.sh" --launch-match "$FAKE_MATCH" --driver-match "$FAKE_DRIVER" \
+        --force-stop-cmd "$HERE/fake_stop_slam.sh" --launch-match "$FAKE_MATCH" --driver-match "$FAKE_DRIVER" --learner-match "fake-battery-learner-$$" \
         --serial-dev "$FAKE_DIR/no-such-tty" --ros-setup "sleep 1; false" --robot-web-port 18099 --sound-mute-file "$MUTE" "$@" \
         >> "$FAKE_DIR/server.log" 2>&1 &
     SERVER=$!
@@ -69,6 +69,7 @@ check_has "CSP allows only the robot page in frames" "$headers" "frame-src http:
 check "status" "$(st 'd["robot"]["state"], d["power"], d["roomba"]["link"]')" '["stopped", "on", "missing"]'
 check "status has the health fields" "$(st 'sorted(k for k in ("camera","cpu_temp_c","wifi","uptime_s","disk","log") if k in d)')" \
     '["camera", "cpu_temp_c", "disk", "log", "uptime_s", "wifi"]'
+check "no battery data, NEW PACK unavailable" "$(st 'd["battery"], d["pack_swap"]["available"], d["pack_swap"]["reason"]')" '[null, false, "Robot stack not running."]'
 check "page URL from the Host header" "$(st 'd["page_url"], d["robot_url"]')" "[\"$BASE/\", \"http://127.0.0.1:18099/\"]"
 check "GET on an action" "$(code -b "$JAR" "$BASE/api/start")" 405
 check "action without Origin" "$(code -b "$JAR" -X POST "$BASE/api/start")" 403
