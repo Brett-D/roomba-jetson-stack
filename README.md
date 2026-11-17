@@ -287,8 +287,8 @@ On a phone, "Add to Home Screen" adds it as an app.
   - Push-buttons OW, ARMED, CHATTER, HELLO and UH-OH: each press defines its song and plays it
     (`roomba/define_song` with play: songs 2, 3, 4, 0 and 1). They also play while muted, and only while the
     robot runs in Safe or Full mode. One press a second.
-- **BATTERY**: charge, voltage and, from `battery_learner`, the pack number and its learned capacity (Ah), from
-  `battery_state` (shown as unknown without `battery_learner`). **NEW PACK** (under an orange guard) calls
+- **BATTERY**: charge, voltage and, from `battery_learner` (see [Battery gauge](#battery-gauge)), the pack number
+  and its learned capacity (Ah), from `battery_state` (shown as unknown without `battery_learner`). **NEW PACK** (under an orange guard) calls
   `/battery_learner/pack_swapped` after a battery swap and shows its answer (e.g. "new pack 5 at 100 %"). It is
   disabled, with the reason, while the robot isn't running or `battery_learner` isn't.
 - **JETSON SHUTDOWN**: lift the red guard, flip the switch, then confirm. The robot stops first, exactly as above,

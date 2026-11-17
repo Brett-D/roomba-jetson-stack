@@ -120,7 +120,7 @@ rm -f "$FAKE_DIR/sound_muted"
 echo "== BATTERY: battery_state without battery_learner"
 wait_for 'd["battery"] is not None' true 40
 check "voltage and charge, no pack or capacity" "$(st '[d["battery"][k] for k in ("voltage", "percentage", "pack", "capacity_ah")]')" '[18.2, 56.0, null, null]'
-check "NEW PACK unavailable" "$(st 'd["pack_swap"]["available"], d["pack_swap"]["reason"]')" '[false, "battery_learner isn'"'"'t running (not installed yet?)."]'
+check "NEW PACK unavailable" "$(st 'd["pack_swap"]["available"], d["pack_swap"]["reason"]')" '[false, "battery_learner isn'"'"'t running (battery_learner:=false?)."]'
 check "NEW PACK refused" "$(post battery/new_pack)" 409
 
 echo "== NEW PACK with battery_learner"

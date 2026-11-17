@@ -156,7 +156,7 @@ pub fn pack_unavailable(app: &App) -> Option<String> {
         return Some("Robot stack not running.".into());
     }
     if !learner {
-        return Some("battery_learner isn't running (not installed yet?).".into());
+        return Some("battery_learner isn't running (battery_learner:=false?).".into());
     }
     match ctl.ros.learner_service {
         None => Some(format!("Looking for {PACK_SERVICE}…")),
