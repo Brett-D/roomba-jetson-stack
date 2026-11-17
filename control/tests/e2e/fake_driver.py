@@ -10,6 +10,8 @@ import os
 import time
 
 import rclpy
+from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
+from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from roomba_msgs.msg import CleaningMotors, SensorState
@@ -41,7 +43,8 @@ class FakeDriver(Node):
         self.pub_mode = self.create_publisher(String, 'roomba/mode', latched)
         self.pub_sensors = self.create_publisher(SensorState, 'roomba/sensors', 2)
         self.create_subscription(CleaningMotors, 'roomba/cleaning_motors', self.on_motors, 10)
-        self.create_service(DefineSong, 'roomba/define_song', self.on_song)
+        # Its own callback group: a slow answer (song_delay) doesn't hold up the rest.
+        self.create_service(DefineSong, 'roomba/define_song', self.on_song, callback_group=MutuallyExclusiveCallbackGroup())
         self.pub_battery = self.create_publisher(BatteryState, 'battery_state', 10)
         self.mode = None
         self.create_timer(0.2, self.tick)
@@ -74,6 +77,7 @@ class FakeDriver(Node):
 
     def on_song(self, req, res):
         log('song', song=req.song_number, notes=list(req.notes), durations=list(req.durations), play=req.play)
+        time.sleep(float(read('song_delay', '0')))
         what = f'song {req.song_number} defined and played'
         res.success = not req.play or self.mode in ('safe', 'full')
         res.message = f'{what} sent' if res.success else f'{what} needs Safe or Full mode; robot is in {self.mode} mode'
@@ -85,7 +89,9 @@ def main():
         raise SystemExit('fake_driver.py: set a private ROS_DOMAIN_ID (domain 0 is the robot)')
     rclpy.init()
     try:
-        rclpy.spin(FakeDriver())
+        executor = MultiThreadedExecutor()
+        executor.add_node(FakeDriver())
+        executor.spin()
     except KeyboardInterrupt:
         pass
 

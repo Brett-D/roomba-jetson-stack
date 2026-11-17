@@ -240,9 +240,10 @@ pub fn song_cmd(setup: &str, t: &Tone) -> String {
 /// All three cleaning motors on or off at full speed (opcode 138), normal directions. Sent three
 /// times (it is a state, so repeats are harmless) and kept alive a second: a single message from a
 /// CLI that exits right away can be lost while the driver is still matching the new publisher.
+/// Run with `cmd::run_killing`: nothing of a command that timed out can publish after the next one.
 pub fn motors_cmd(setup: &str, on: bool) -> String {
     format!(
-        "{setup} && exec timeout {CLI_TIMEOUT_S} ros2 topic pub -t 3 -r 5 -w 1 --max-wait-time-secs 8 --keep-alive 1 /roomba/cleaning_motors \
+        "{setup} && exec timeout -k 3 {CLI_TIMEOUT_S} ros2 topic pub -t 3 -r 5 -w 1 --max-wait-time-secs 8 --keep-alive 1 /roomba/cleaning_motors \
          roomba_msgs/msg/CleaningMotors '{{use_pwm: false, main_brush: {on}, side_brush: {on}, vacuum: {on}}}'"
     )
 }
@@ -392,7 +393,7 @@ pub fn motor_worker(app: Arc<App>) {
             }
         };
         let Some(target) = target else { continue };
-        let r = cmd::run(&motors_cmd(&app.cfg.ros_setup, target), Duration::from_secs(CLI_TIMEOUT_S + 10));
+        let r = cmd::run_killing(&motors_cmd(&app.cfg.ros_setup, target), Duration::from_secs(CLI_TIMEOUT_S + 10));
         let result = published(&r);
         eprintln!("vacuum {}: {result:?}", if target { "on" } else { "off" });
         let mut play_armed = false;
@@ -436,8 +437,15 @@ pub fn motor_worker(app: Arc<App>) {
             }
         }
         app.ctl_cv.notify_all();
+        // On its own thread: a slow sound service must not hold up the next motor command.
         if play_armed {
-            play(&app, &TONES[1]);
+            let app2 = Arc::clone(&app);
+            if std::thread::Builder::new().name("tone".into()).spawn(move || play(&app2, &TONES[1])).is_err() {
+                let mut ctl = robot::lock(&app);
+                if ctl.ros.tone_pending == Some("armed") {
+                    ctl.ros.tone_pending = None;
+                }
+            }
         }
     }
 }
@@ -643,6 +651,7 @@ mod tests {
             "S && exec timeout 15 ros2 service call /roomba/define_song roomba_msgs/srv/DefineSong \
              '{song_number: 2, notes: [96, 91, 86, 81, 76], durations: [3, 3, 3, 4, 12], play: true}'"
         );
+        assert!(motors_cmd("S", false).starts_with("S && exec timeout -k 3 15 ros2 topic pub "));
         assert!(motors_cmd("S", false).ends_with("'{use_pwm: false, main_brush: false, side_brush: false, vacuum: false}'"));
     }
 

@@ -33,7 +33,21 @@ impl CmdResult {
 /// same environment as in an SSH login (~/.profile). The ambient capability the service gets for
 /// port 80 is dropped first, so the robot runs exactly as when started from a shell.
 pub fn run(cmd: &str, timeout: Duration) -> CmdResult {
+    run_inner(cmd, timeout, false)
+}
+
+/// `run`, but in its own process group, all of which is killed (SIGKILL) and the shell reaped
+/// before this returns when the timeout expires: nothing it started can still act afterwards (the
+/// motor commands, which must arrive in order).
+pub fn run_killing(cmd: &str, timeout: Duration) -> CmdResult {
+    run_inner(cmd, timeout, true)
+}
+
+fn run_inner(cmd: &str, timeout: Duration, kill_on_timeout: bool) -> CmdResult {
     let mut command = Command::new("bash");
+    if kill_on_timeout {
+        command.process_group(0);
+    }
     command.arg("-lc").arg(format!("exec 2>&1\n{cmd}")).stdin(Stdio::null()).stdout(Stdio::piped());
     if let Some(home) = std::env::var_os("HOME") {
         command.current_dir(home);
@@ -73,6 +87,12 @@ pub fn run(cmd: &str, timeout: Duration) -> CmdResult {
     let (code, timed_out) = loop {
         match child.try_wait() {
             Ok(Some(status)) => break (status.code(), false),
+            Ok(None) if start.elapsed() >= timeout && kill_on_timeout => {
+                // SAFETY: kill(2) on the process group this child leads (process_group(0)).
+                unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
+                let _ = child.wait();
+                break (None, true);
+            }
             Ok(None) if start.elapsed() >= timeout => {
                 // Leave it running, but reap it when it ends.
                 std::thread::spawn(move || {
@@ -182,4 +202,34 @@ pub fn fd_holders(dev: &Path) -> Vec<(i32, String)> {
 
 pub fn home() -> PathBuf {
     std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn gone(pid: i32) -> bool {
+        // Killed and reparented: gone, or a zombie until init reaps it.
+        std::fs::read_to_string(format!("/proc/{pid}/stat")).map_or(true, |s| s.rsplit_once(") ").is_some_and(|(_, r)| r.starts_with('Z')))
+    }
+
+    #[test]
+    fn run_killing_ends_everything_it_started() {
+        let dir = std::env::temp_dir().join(format!("roomba-control-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pid_file = dir.join("pid");
+        // A shell that ignores SIGTERM and a child of it: both must be gone when run_killing returns.
+        let cmd = format!("trap '' TERM; sleep 30 & echo $! > {}; wait", shell_quote(pid_file.to_str().unwrap()));
+        let t0 = Instant::now();
+        let r = run_killing(&cmd, Duration::from_millis(800));
+        assert!(r.timed_out && r.code.is_none());
+        assert!(t0.elapsed() < Duration::from_secs(5));
+        let pid: i32 = std::fs::read_to_string(&pid_file).unwrap().trim().parse().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !gone(pid) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(gone(pid), "the background sleep {pid} survived");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

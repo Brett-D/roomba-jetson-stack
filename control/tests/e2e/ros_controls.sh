@@ -160,6 +160,18 @@ wait_for 'd["vacuum"]["armed"]' false 40
 settled
 check "all off" "$(last_entry motors '[e["main_brush"], e["side_brush"], e["vacuum"]]')" '[false, false, false]'
 
+echo "== a slow ARMED sound doesn't hold up the OFF"
+echo 8 > "$FAKE_DIR/song_delay"
+settled
+post vacuum/arm > /dev/null
+wait_for 'd["vacuum"]["armed"]' true 40
+wait_for 'd["tones"]["pending"]' armed 10
+check "disarm" "$(post vacuum/disarm)" 202
+wait_entry motors 'e["vacuum"]' false 7 && echo "ok   OFF while the sound call is still waiting" || { echo "FAIL OFF waited for the sound"; fails=$((fails + 1)); }
+check "the sound was still waiting" "$(st 'd["tones"]["pending"]')" armed
+rm -f "$FAKE_DIR/song_delay"
+wait_for 'd["tones"]["pending"]' null 30
+
 echo "== a cliff while arming: OFF follows the ON"
 echo 'cliff_right' > "$FAKE_DIR/hazard"
 settled
