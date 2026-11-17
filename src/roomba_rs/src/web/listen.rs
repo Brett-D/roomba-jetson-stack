@@ -77,7 +77,11 @@ mod tests {
         for v6only in [None, Some(false), Some(true)] {
             let (ls, what) = bind_dual(0, v6only).unwrap();
             let port = ls[0].local_addr().unwrap().port();
-            assert_eq!(ls.len(), if v6only == Some(true) { 2 } else { 1 }, "{what}");
+            // With the system default (None) the count depends on net.ipv6.bindv6only (2 listeners
+            // when it is 1), so only an explicit setting fixes it; reachability holds either way.
+            if v6only.is_some() {
+                assert_eq!(ls.len(), if v6only == Some(true) { 2 } else { 1 }, "{what}");
+            }
             assert!(reachable(&format!("127.0.0.1:{port}")) && reachable(&format!("[::1]:{port}")), "{what}");
         }
     }
