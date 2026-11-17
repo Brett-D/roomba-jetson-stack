@@ -363,11 +363,22 @@ struct Pending {
     /// mAh drawn over the settling frames' own intervals (not the gap before them), for the pack
     /// in the robot once it is settled.
     used_mah: f64,
+    /// mAh of settling runs cut short by another gap whose readings had already jumped from the
+    /// baseline: a new pack's, also for the pack in the robot once settled.
+    used_new_mah: f64,
 }
 
 impl Pending {
     fn new(kind: Kind) -> Self {
-        Pending { kind, readings: Vec::new(), used_mah: 0.0 }
+        Pending { kind, readings: Vec::new(), used_mah: 0.0, used_new_mah: 0.0 }
+    }
+
+    /// The voltage the settled one is compared with (none after a manual reset).
+    fn baseline(&self) -> Option<f64> {
+        match self.kind {
+            Kind::Startup { saved } => saved,
+            Kind::Gap { before, .. } => before,
+        }
     }
 }
 
@@ -565,10 +576,12 @@ impl Learner {
             // Sample again at once: after a clock step back the old deadline lies ahead of the new
             // timeline and would hold the samples back until the clock caught up.
             self.next_sample = f64::NEG_INFINITY;
-        }
-        if gap && self.pending.is_none() {
-            let gap_s = dt.unwrap_or(0.0);
-            self.pending = Some(Pending::new(Kind::Gap { before: self.ocv, gap_s }));
+            self.pending = Some(match self.pending.take() {
+                None => Pending::new(Kind::Gap { before: self.ocv, gap_s: dt.unwrap_or(0.0) }),
+                // Another gap before the voltage settled (e.g. the pack pulled just after a driver
+                // restart): settle again on the readings after it, against the same baseline.
+                Some(p) => self.restart_settling(p),
+            });
         }
         self.last_stamp = Some(stamp);
         self.state.last_stamp = Some(stamp);
@@ -586,10 +599,7 @@ impl Learner {
                 let m = median(&pending.readings);
                 self.resolve(pending.kind, m, unix, &mut out);
                 // The settling frames were drawn from the pack now in the robot, whichever it is.
-                let capacity = self.capacity_mah();
-                let pack = &mut self.state.pack;
-                pack.used_mah += pending.used_mah;
-                pack.soc = (pack.soc - pending.used_mah / capacity).clamp(0.0, 1.0);
+                self.draw(pending.used_mah + pending.used_new_mah);
                 self.ocv = Some(m);
                 self.state.last_ocv = Some(m);
                 self.rest_since = None;
@@ -644,6 +654,30 @@ impl Learner {
             });
         }
         out
+    }
+
+    /// Counts mAh drawn from the pack in the robot.
+    fn draw(&mut self, mah: f64) {
+        let capacity = self.capacity_mah();
+        let pack = &mut self.state.pack;
+        pack.used_mah += mah;
+        pack.soc = (pack.soc - mah / capacity).clamp(0.0, 1.0);
+    }
+
+    /// Settling cut short by another gap: drop its readings but not what was drawn meanwhile. If its
+    /// readings had already jumped from the baseline they came from a new pack, which gets those
+    /// mAh once settled; otherwise they are the pack's in the state (the first run's go to its
+    /// first pack).
+    fn restart_settling(&mut self, mut p: Pending) -> Pending {
+        let jumped = !p.readings.is_empty() && p.baseline().is_some_and(|b| median(&p.readings) - b >= self.p.swap_jump_v);
+        if jumped || self.fresh {
+            p.used_new_mah += p.used_mah;
+        } else {
+            self.draw(p.used_mah);
+        }
+        p.used_mah = 0.0;
+        p.readings.clear();
+        p
     }
 
     /// The first readings at start-up or after a gap have settled at open-circuit voltage `m`.
@@ -1375,6 +1409,35 @@ mod tests {
         assert!(l.state.history[3].outlier);
         let soc = l.curve_soc(bin_centre(bin as usize));
         assert!((soc - 0.3).abs() < 0.005, "{soc}");
+    }
+
+    #[test]
+    fn second_gap_while_settling_starts_settling_again() {
+        let mut t = 0.0;
+        let mut sim = Sim { offset: 0.0, capacity: 2000.0, soc: 0.3, r: 0.2 };
+        let (mut l, _) = started(None, &sim, &mut t);
+        run(&mut l, &mut sim, &mut t, 60.0, -1000.0);
+        let used = l.state.pack.used_mah;
+        // A driver restart: 3 frames from the same pack, not settled yet ...
+        t += 20.0;
+        run(&mut l, &mut sim, &mut t, 3.0, -1000.0);
+        // ... then the pack is pulled and a full one goes in: a swap, not the old pack's median.
+        t += 60.0;
+        sim.soc = 1.0;
+        let logs = run(&mut l, &mut sim, &mut t, 10.0, -1000.0);
+        assert_eq!((l.state.pack.id, l.state.pack.anchor), (2, Anchor::Full), "{logs:?}");
+        // The old pack keeps the 2 intervals it gave after the restart; the new one has its 9.
+        let i = 1000.0 / 3600.0;
+        assert!((l.state.history[0].used_mah - (used + 2.0 * i)).abs() < 1e-9, "{}", l.state.history[0].used_mah - used);
+        assert!((l.state.pack.used_mah - 9.0 * i).abs() < 1e-9, "{}", l.state.pack.used_mah);
+        // A second gap with no swap at all: the same pack, every interval counted.
+        let used = l.state.pack.used_mah;
+        t += 20.0;
+        run(&mut l, &mut sim, &mut t, 3.0, -1000.0);
+        t += 20.0;
+        run(&mut l, &mut sim, &mut t, 10.0, -1000.0);
+        assert_eq!(l.state.pack.id, 2);
+        assert!((l.state.pack.used_mah - used - 11.0 * i).abs() < 1e-9);
     }
 
     #[test]
