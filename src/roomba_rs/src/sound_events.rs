@@ -149,8 +149,9 @@ pub struct SoundEvents {
     last_uh_oh: f64,
     /// The song it asked for plays until then.
     playing_until: f64,
-    /// Play requests so far.
+    /// Play requests so far, and the length of the last one's song (s).
     plays: u64,
+    play_len: f64,
     /// The play request waiting for its answer (its number) and when it was sent.
     in_flight: Option<(u64, f64)>,
     /// Hello / done waiting for the playing song to end, with their deadlines.
@@ -174,6 +175,7 @@ impl SoundEvents {
             last_uh_oh: f64::NEG_INFINITY,
             playing_until: f64::NEG_INFINITY,
             plays: 0,
+            play_len: 0.0,
             in_flight: None,
             queued: Vec::new(),
             run_armed: false,
@@ -211,8 +213,9 @@ impl SoundEvents {
     fn play(&mut self, e: Event, now: f64, out: &mut Vec<Action>) {
         out.push(Action::Play(e));
         self.plays += 1;
+        self.play_len = e.song().seconds();
         self.in_flight = Some((self.plays, now));
-        self.playing_until = now + e.song().seconds();
+        self.playing_until = now + self.play_len;
         if e == Event::Bump {
             self.last_uh_oh = now;
         }
@@ -331,15 +334,14 @@ impl SoundEvents {
     }
 
     /// The driver's answer to play request `play` (`ok`: success), or its call failed. A late answer
-    /// to an earlier request changes nothing.
+    /// to an earlier request changes nothing. On success the song may only have started now (the
+    /// driver can be slow to answer), so it counts as playing for its full length from now.
     pub fn on_played(&mut self, play: u64, now: f64, ok: bool) {
         if play != self.plays {
             return;
         }
         self.in_flight = None;
-        if !ok {
-            self.playing_until = self.playing_until.min(now);
-        }
+        self.playing_until = if ok { self.playing_until.max(now + self.play_len) } else { self.playing_until.min(now) };
     }
 }
 
@@ -510,8 +512,10 @@ mod tests {
         let jingle = s.plays();
         s.on_played(jingle - 1, 12.5, true);
         assert!(s.busy(13.5), "jingle call still waiting");
+        // Its own answer: playing for the jingle's length from the answer on (1.30 s).
         s.on_played(jingle, 13.6, true);
-        assert!(!s.busy(13.7));
+        assert!(s.busy(14.85));
+        assert!(!s.busy(14.95));
     }
 
     #[test]
@@ -628,6 +632,22 @@ mod tests {
         }
         s.on_sensors(playing, 6.1, &unmuted);
         assert_eq!(s.tick(6.1, true, &unmuted), [Action::Skipped(Event::Done, Skip::Busy)]);
+    }
+
+    #[test]
+    fn a_late_acknowledgement_keeps_the_song_playing_for_its_length() {
+        let mut s = SoundEvents::new(Params { display_time: 0.0, ..Params::default() });
+        s.tick(10.0, true, &unmuted);
+        assert_eq!(plays(&s.on_sensors(safe(), 10.0, &unmuted)), [Event::Hello]);
+        s.on_explorer_status(&status("exploring", ""), 10.1, &unmuted);
+        assert!(s.on_explorer_status(&status("done", "Exploration finished"), 10.2, &unmuted).is_empty());
+        // The driver answers late, as it starts hello (0.69 s): hello plays until ~11.39.
+        s.on_sensors(safe(), 10.7, &unmuted);
+        s.on_played(s.plays(), 10.7, true);
+        s.on_sensors(safe(), 11.3, &unmuted);
+        assert!(plays(&s.tick(11.3, true, &unmuted)).is_empty(), "hello still playing");
+        s.on_sensors(safe(), 11.4, &unmuted);
+        assert_eq!(plays(&s.tick(11.4, true, &unmuted)), [Event::Done]);
     }
 
     #[test]
