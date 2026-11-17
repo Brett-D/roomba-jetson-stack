@@ -1,9 +1,10 @@
 """Printable ArUco markers for RTAB-Map landmarks (vslam.launch.py markers:=true).
 
-  python tools/markers/make_markers.py [--out markers.pdf] [--count 3] [--size_mm 150]
+  python tools/markers/make_markers.py [--out markers.pdf] [--ids 1,2,3] [--home_id 1] [--size_mm 150]
 
-One marker per Letter page: ID 0 is the robot's home / start spot (the important one); optional
-others go one per floor in a central open area. DICT_4X4_50 (RTAB-Map Marker/Dictionary 0);
+One marker per Letter page. The HOME marker (--home_id) goes at the robot's home / start spot (the
+important one); optional others go one per floor in a central open area. IDs must be 1-49: RTAB-Map
+ignores marker ID 0 ("Invalid marker received! IDs should be > 0"). DICT_4X4_50 (RTAB-Map Marker/Dictionary 0);
 --size_mm must match the launch argument marker_length (metres). Needs opencv-contrib (cv2.aruco,
 OpenCV 4.6 or newer) and matplotlib.
 """
@@ -36,14 +37,14 @@ def marker_image(dictionary, marker_id, pixels):
     return cv2.aruco.drawMarker(dictionary, marker_id, pixels, borderBits=1)
 
 
-def page(pdf, dictionary, marker_id, size_mm):
+def page(pdf, dictionary, marker_id, size_mm, home):
     fig = plt.figure(figsize=(W_IN, H_IN))
     s = mm(size_mm)
     y0 = BAND_LO + (BAND_HI - BAND_LO - s) / 2
     ax = fig.add_axes([(W_IN - s) / 2 / W_IN, y0 / H_IN, s / W_IN, s / H_IN])
     ax.imshow(marker_image(dictionary, marker_id, 600), cmap="gray", vmin=0, vmax=255, interpolation="nearest")
     ax.axis("off")
-    name = "HOME / START SPOT" if marker_id == 0 else f"CENTRAL MARKER {marker_id}"
+    name = "HOME / START SPOT" if home else f"CENTRAL MARKER {marker_id}"
     fig.text(0.5, 0.93, f"ID {marker_id}", ha="center", fontsize=40, weight="bold")
     fig.text(0.5, 0.895, name, ha="center", fontsize=16)
     fig.text(0.5, 0.86, f"Roomba navigation marker  -  ArUco DICT_4X4_50  -  {size_mm:g} mm",
@@ -64,19 +65,24 @@ def page(pdf, dictionary, marker_id, size_mm):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default="markers.pdf")
-    ap.add_argument("--count", type=int, default=3)
+    ap.add_argument("--ids", default="1,2,3", help="comma-separated marker IDs, 1-49")
+    ap.add_argument("--home_id", type=int, default=1, help="the ID labelled HOME / START SPOT")
     ap.add_argument("--size_mm", type=float, default=150.0)
     a = ap.parse_args()
     if not MIN_SIZE_MM <= a.size_mm <= MAX_SIZE_MM:
         ap.error(f"--size_mm must be between {MIN_SIZE_MM:g} and {MAX_SIZE_MM:.0f} mm to fit a Letter page "
                  f"with a white margin")
-    if not 1 <= a.count <= 50:
-        ap.error("--count must be 1-50 (DICT_4X4_50 has IDs 0-49)")
+    try:
+        ids = [int(v) for v in a.ids.split(",") if v.strip()]
+    except ValueError:
+        ap.error("--ids must be comma-separated integers")
+    if not ids or any(not 1 <= i <= 49 for i in ids):
+        ap.error("--ids must be 1-49: RTAB-Map ignores marker ID 0 and DICT_4X4_50 ends at 49")
     dictionary = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
     with PdfPages(a.out) as pdf:
-        for i in range(a.count):
-            page(pdf, dictionary, i, a.size_mm)
-    print(f"wrote {a.out}: IDs 0-{a.count - 1}, {a.size_mm:g} mm")
+        for i in ids:
+            page(pdf, dictionary, i, a.size_mm, i == a.home_id)
+    print(f"wrote {a.out}: IDs {', '.join(map(str, ids))} (HOME {a.home_id}), {a.size_mm:g} mm")
 
 
 if __name__ == "__main__":

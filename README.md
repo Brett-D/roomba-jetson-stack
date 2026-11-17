@@ -127,14 +127,14 @@ to the map the first time it sees one, and every later sighting fixes the robot'
 lighting or clutter.
 
 ```bash
-python tools/markers/make_markers.py --out markers.pdf    # IDs 0-2, 150 mm, one per Letter page
+python tools/markers/make_markers.py --out markers.pdf    # IDs 1-3 (1 = HOME), 150 mm, one per Letter page
 ```
 
 - Print at 100 % and check that the 100 mm bar measures 100 mm.
-- ID 0 marks the robot's home / start spot: the one that matters. Starting in view of it, the robot knows
+- The HOME marker (ID 1 by default, `--home_id`) marks the robot's home / start spot: the one that matters. Starting in view of it, the robot knows
   where it is from the first frame whatever the lighting. Optionally add one more in the most central open
-  area of each floor (ID 1, 2, ...) for starts elsewhere or recovery mid-run; between markers the visual
-  odometry keeps the position.
+  area of each floor for starts elsewhere or recovery mid-run; between markers the visual odometry keeps
+  the position. Don't use ID 0: RTAB-Map ignores it (marker IDs must be > 0).
 - Mount them flat on walls facing open floor, centre about 20 cm above the floor (the camera is at about
   15 cm), on matte paper. Put them up **before** mapping and never move them afterwards.
 - Markers are on by default (`markers:=true`, `marker_length:=0.15` in metres, detected up to 3 m). Use
