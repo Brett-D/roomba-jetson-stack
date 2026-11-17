@@ -218,6 +218,10 @@ fn login(app: &Arc<App>, rq: &mut Request, origin_ok: bool) -> Reply {
             Err(_) => std::thread::sleep(Duration::from_millis(50)),
         }
     };
+    // Other requests from this address may have failed while this one waited for the gate.
+    if let Some(wait) = lock(app).locked(ip, Instant::now()) {
+        return login_page(429, Some(&format!("Too many wrong passwords: try again in {wait} s.")));
+    }
     match auth::check_password(&app.cfg.auth_file, &password) {
         Ok(true) => {
             lock(app).success(ip);

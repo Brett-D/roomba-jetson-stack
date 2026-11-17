@@ -160,7 +160,12 @@ echo "== logout and login backoff"
 token=$(awk '$6 == "roomba_control" { print $7 }' "$JAR")
 check "logout" "$(code -b "$JAR" -c "$JAR" -X POST -H "$ORIGIN" "$BASE/logout")" 303
 check "the old session is gone" "$(code -H "Cookie: roomba_control=$token" "$BASE/api/status")" 401
-for i in 1 2 3 4 5; do login "wrong-$i" > /dev/null; done
+for i in 1 2 3 4; do login "wrong-$i" > /dev/null; done
+# The 5th and 6th at once: one waits for the other's password check, then finds the lockout.
+login wrong-5 > "$FAKE_DIR/login5" & l5=$!
+login wrong-6 > "$FAKE_DIR/login6" & l6=$!
+wait "$l5" "$l6"
+check "a login waiting for the password check is locked out too" "$(printf '%s\n' "$(cat "$FAKE_DIR/login5")" "$(cat "$FAKE_DIR/login6")" | sort | paste -sd' ')" "401 429"
 check "locked out after 5 wrong passwords" "$(login fixture-password)" 429
 stop_instance
 

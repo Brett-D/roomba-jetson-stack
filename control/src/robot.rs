@@ -233,8 +233,8 @@ pub fn request_stop(app: &Arc<App>) -> Result<String, String> {
 }
 
 /// SIGTERM to the launch (graceful.py: every node stops like Ctrl-C and RTAB-Map saves the map),
-/// wait for it to end, and only if it's still running after the stop timeout (or a launch without
-/// a PID file is running) fall back to stop_slam.sh.
+/// wait for it to end, and only if it's still running the stop timeout after SIGTERM (or a launch
+/// without a PID file is running) fall back to stop_slam.sh. `t0` only times the whole stop.
 fn stop_robot(app: &Arc<App>) -> (bool, String) {
     let cfg = &app.cfg;
     let t0 = Instant::now();
@@ -249,7 +249,8 @@ fn stop_robot(app: &Arc<App>) -> (bool, String) {
         eprintln!("stop: SIGTERM to the launch, PID {pid}");
         // SAFETY: kill(2) on a PID whose command line we just checked.
         unsafe { libc::kill(pid, libc::SIGTERM) };
-        while is_launch(pid, &cfg.launch_match) && t0.elapsed() < cfg.stop_timeout {
+        let sigterm = Instant::now();
+        while is_launch(pid, &cfg.launch_match) && sigterm.elapsed() < cfg.stop_timeout {
             std::thread::sleep(Duration::from_millis(500));
         }
         if !is_launch(pid, &cfg.launch_match) {
@@ -268,7 +269,7 @@ fn stop_robot(app: &Arc<App>) -> (bool, String) {
         };
     }
     let why = if first.ours.is_some() && !clean {
-        format!("Still running after {} s: forcing stop (stop_slam.sh)…", t0.elapsed().as_secs())
+        format!("Still running {} s after SIGTERM: forcing stop (stop_slam.sh)…", cfg.stop_timeout.as_secs())
     } else {
         "A robot launch not started from here is running: stopping it (stop_slam.sh)…".to_string()
     };
