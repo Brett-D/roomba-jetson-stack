@@ -21,7 +21,8 @@ Safe/Full mode) and checks:
   ROS_DOMAIN_ID=77 python3 tools/sound_events_offline.py [--node <sound_events binary>] [--dir D] [--keep]
                                                         [--auto-reenter-mode]
 
-Without --node it runs `ros2 run roomba_rs sound_events`. The scratch directory is made in --dir (default:
+Without --node it runs the roomba_rs sound_events installed in the sourced workspace (directly, not through
+`ros2 run`, which doesn't pass a SIGINT sent to it on to the node). The scratch directory is made in --dir (default:
 the current directory) and removed afterwards unless --keep. Exit status 0 when every check passed.
 """
 import argparse
@@ -41,6 +42,7 @@ import rclpy  # noqa: E402
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup, ReentrantCallbackGroup  # noqa: E402
 from rclpy.executors import MultiThreadedExecutor  # noqa: E402
 from rclpy.node import Node  # noqa: E402
+from ament_index_python.packages import get_package_prefix  # noqa: E402
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy  # noqa: E402
 from roomba_msgs.msg import SensorState  # noqa: E402
 from roomba_msgs.srv import DefineSong, PlaySong, SetMode  # noqa: E402
@@ -153,7 +155,7 @@ class FakeDriver(Node):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('--node', help='sound_events binary (default: ros2 run roomba_rs sound_events)')
+    ap.add_argument('--node', help='sound_events binary (default: the installed roomba_rs one)')
     ap.add_argument('--dir', default='.', help='where to make the scratch directory (default: here)')
     ap.add_argument('--keep', action='store_true', help='keep the scratch directory (node log)')
     ap.add_argument('--auto-reenter-mode', action='store_true',
@@ -166,8 +168,8 @@ def main():
     mute = os.path.join(scratch, '.config', 'roomba', 'sound_muted')
     os.makedirs(os.path.dirname(mute))
     env = dict(os.environ, HOME=scratch, RCUTILS_COLORIZED_OUTPUT='0', ROS_LOG_DIR=os.path.join(scratch, 'ros_log'))
-    cmd = [a.node] if a.node else ['ros2', 'run', 'roomba_rs', 'sound_events']
-    cmd += ['--ros-args', '--log-level', 'sound_events:=debug']
+    node = a.node or os.path.join(get_package_prefix('roomba_rs'), 'lib', 'roomba_rs', 'sound_events')
+    cmd = [node, '--ros-args', '--log-level', 'sound_events:=debug']
     log_path = os.path.join(scratch, 'sound_events.log')
     log = open(log_path, 'w')
     proc = subprocess.Popen(cmd, env=env, stdout=log, stderr=subprocess.STDOUT)
