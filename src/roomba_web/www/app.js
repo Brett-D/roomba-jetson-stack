@@ -29,6 +29,7 @@ const S = {
   lastSpokeAt: 0,
   showExcluded: false,
   dirty: true,
+  userViewAt: 0,        // last pan / zoom by hand (the three-view map follows the robot otherwise)
 };
 
 // ---------- API ----------
@@ -88,6 +89,9 @@ function onState(d) {
   renderNav(d);
   renderRobot(d);
   renderGrid(d);
+  const e = d.explore;
+  $('map-explore').hidden = !e;
+  if (e) $('map-explore').textContent = `Explorer: ${e.state}${e.message ? ' · ' + e.message : ''}${e.frontiers != null ? ' · ' + e.frontiers + ' frontier groups' : ''}`;
   S.dirty = true;
 }
 
@@ -237,6 +241,8 @@ function resize() {
   S.dirty = true;
 }
 window.addEventListener('resize', resize);
+// Layout changes (tabs, three-view) resize the map without a window resize.
+if ('ResizeObserver' in window) new ResizeObserver(resize).observe(canvas.parentElement);
 
 function W() { return canvas.getBoundingClientRect(); }
 function toScreen(x, y) { const r = W(); return [r.width / 2 + (x - S.view.x) * S.view.scale, r.height / 2 - (y - S.view.y) * S.view.scale]; }
@@ -394,8 +400,44 @@ function drawNav(d) {
   }
 }
 
+// The explorer's goal and home from its status (explore: {goal: [x, y], home: [x, y], ...}).
+function drawExplore(e) {
+  if (!e) return;
+  ctx.font = '600 12px system-ui, sans-serif';
+  ctx.textAlign = 'left';
+  if (Array.isArray(e.home)) {
+    const [hx, hy] = toScreen(e.home[0], e.home[1]);
+    ctx.fillStyle = 'rgba(13, 16, 21, 0.75)';
+    ctx.fillRect(hx - 8, hy - 8, 16, 16);
+    ctx.strokeStyle = '#ffb000';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(hx - 8, hy - 8, 16, 16);
+    ctx.fillStyle = '#ffb000';
+    ctx.textAlign = 'center';
+    ctx.fillText('H', hx, hy + 4);
+    ctx.textAlign = 'left';
+  }
+  if (Array.isArray(e.goal)) {
+    const [gx, gy] = toScreen(e.goal[0], e.goal[1]);
+    ctx.beginPath();
+    ctx.moveTo(gx, gy - 10); ctx.lineTo(gx + 10, gy); ctx.lineTo(gx, gy + 10); ctx.lineTo(gx - 10, gy);
+    ctx.closePath();
+    ctx.strokeStyle = '#ffb000';
+    ctx.lineWidth = 3;
+    ctx.stroke();
+    ctx.fillStyle = '#ffb000';
+    ctx.fillText('explore', gx + 13, gy + 4);
+  }
+}
+
 function render() {
   try {
+    const d0 = S.data || {};
+    // Three-view: keep the robot in the middle unless the map was moved by hand recently.
+    if (document.body.dataset.tab === 'mfd' && d0.pose && Date.now() - S.userViewAt > 15000
+        && (Math.abs(S.view.x - d0.pose.x) > 0.01 || Math.abs(S.view.y - d0.pose.y) > 0.01)) {
+      S.view.x = d0.pose.x; S.view.y = d0.pose.y; S.dirty = true;
+    }
     if (S.dirty) {
       S.dirty = false;
       const r = W();
@@ -406,6 +448,7 @@ function render() {
       drawZones();
       const d = S.data || {};
       drawNav(d);
+      drawExplore(d.explore);
       drawCamera(d.pose);
       drawDetections(d.detections || []);
       if (!S.map) {
@@ -427,6 +470,7 @@ const pointers = new Map();
 let gesture = null;
 
 function zoomAt(sx, sy, factor) {
+  S.userViewAt = Date.now();
   const [wx, wy] = toWorld(sx, sy);
   S.view.scale = Math.min(400, Math.max(5, S.view.scale * factor));
   const [nx, ny] = toWorld(sx, sy);
@@ -457,6 +501,7 @@ canvas.addEventListener('pointermove', (ev) => {
     gesture.pinch = dist;
   } else if (pointers.size === 1 && gesture && gesture.last) {
     const p = localXY(ev);
+    S.userViewAt = Date.now();
     S.view.x -= (p[0] - gesture.last[0]) / S.view.scale;
     S.view.y += (p[1] - gesture.last[1]) / S.view.scale;
     gesture.moved += Math.hypot(p[0] - gesture.last[0], p[1] - gesture.last[1]);
@@ -733,14 +778,29 @@ $('btn-robot-enable').onclick = async () => {
   } finally { setTimeout(() => { $('btn-robot-enable').disabled = false; }, 1500); }
 };
 
-// ---------- phone tabs + camera stream control ----------
+// ---------- tabs / layouts + camera and depth stream control ----------
+// Tabs: camera, map, depth (one view on a phone; a wide screen shows all three with their
+// controls) and mfd: the three views only, side by side or stacked (?layout=mfd opens it; the
+// choice is kept for this browser tab). A frame named roomba-mfd (the control page's display)
+// opens in it too: the name survives the login redirect, which drops ?layout.
+const TABS = ['camera', 'map', 'depth', 'mfd'];
 const phone = window.matchMedia('(max-width: 900px)');
 const cam = $('camera');
+const depth = $('depth');
 let camPaused = false;
 let camOn = false;
+let depthPaused = false;
+let depthOn = false;
+let depthAvailable = null;   // false: this server has no /depth.mjpg (the Python web server)
+
+function tab() { return document.body.dataset.tab; }
 
 function cameraVisible() {
-  return !document.hidden && !camPaused && (!phone.matches || document.body.dataset.tab === 'camera');
+  return !document.hidden && !camPaused && (!phone.matches || tab() === 'camera' || tab() === 'mfd');
+}
+
+function depthVisible() {
+  return !document.hidden && !depthPaused && depthAvailable !== false && (!phone.matches || tab() === 'depth' || tab() === 'mfd');
 }
 
 // Only stream while the camera is on screen: saves ~0.4 MB/s and phone battery.
@@ -753,17 +813,67 @@ function updateStream() {
   $('btn-pause').textContent = camPaused ? '▶ Resume' : '⏸ Pause';
 }
 
-function setTab(tab) {
-  document.body.dataset.tab = tab;
-  try { localStorage.setItem('roomba.tab', tab); } catch (e) { /* private mode */ }
+function depthMessage(text) {
+  $('depth-msg').textContent = text;
+  $('depth-msg').hidden = !text;
+}
+
+// The robot encodes depth frames only while someone watches /depth.mjpg.
+function updateDepth() {
+  const want = depthVisible();
+  if (want && !depthOn) { depth.src = '/depth.mjpg?t=' + Date.now(); depthMessage('Waiting for depth…'); }
+  if (!want && depthOn) depth.removeAttribute('src');
+  depthOn = want;
+  if (depthAvailable === false) depthMessage('The depth view needs the Rust web server (rust_nodes:=true).');
+  else if (depthPaused) depthMessage('Depth paused');
+  $('btn-depth-pause').textContent = depthPaused ? '▶ Resume' : '⏸ Pause';
+}
+
+// Turbo colours as the server draws them: red (near) to blue (far).
+function turbo(x) {
+  const p = (c) => c[0] + x * (c[1] + x * (c[2] + x * (c[3] + x * (c[4] + x * c[5]))));
+  const v = [
+    p([0.13572138, 4.61539260, -42.66032258, 132.13108234, -152.94239396, 59.28637943]),
+    p([0.09140261, 2.19418839, 4.84296658, -14.18503333, 4.27729857, 2.82956604]),
+    p([0.10667330, 12.64194608, -60.58204836, 110.36276771, -89.90310912, 27.34824973]),
+  ].map((c) => Math.round(Math.min(1, Math.max(0, c)) * 255));
+  return `rgb(${v.join(',')})`;
+}
+
+async function loadDepthInfo() {
+  const stops = [];
+  for (let i = 0; i <= 10; i++) stops.push(`${turbo(0.9 - 0.08 * i)} ${i * 10}%`);
+  $('depth-bar').style.background = `linear-gradient(to right, ${stops.join(', ')})`;
+  try {
+    const res = await fetch('/depth.mjpg', { method: 'HEAD', credentials: 'same-origin' });
+    if (res.status === 404) { depthAvailable = false; updateDepth(); return; }
+    depthAvailable = true;
+    const range = (res.headers.get('X-Depth-Range') || '').split('-').map(Number);
+    if (range.length === 2 && range.every((v) => v > 0)) {
+      $('depth-near').textContent = `${range[0] / 1000} m`;
+      $('depth-far').textContent = `${range[1] / 1000} m`;
+    }
+  } catch (e) { /* offline: the stream's error handler retries */ }
+}
+
+function setTab(t, persist = true) {
+  document.body.dataset.tab = t;
+  try {
+    sessionStorage.setItem('roomba.tab', t);
+    if (persist) localStorage.setItem('roomba.tab', t);
+  } catch (e) { /* private mode */ }
+  $('btn-layout').textContent = t === 'mfd' ? '☰ Full page' : '▦ 3-view';
   updateStream();
+  updateDepth();
   resize();
 }
 
 document.querySelectorAll('.tabs button').forEach((b) => { b.onclick = () => setTab(b.dataset.tab); });
+$('btn-layout').onclick = () => setTab(tab() === 'mfd' ? 'camera' : 'mfd');
 $('btn-pause').onclick = () => { camPaused = !camPaused; updateStream(); };
-document.addEventListener('visibilitychange', updateStream);
-phone.addEventListener('change', () => { updateStream(); resize(); });
+$('btn-depth-pause').onclick = () => { depthPaused = !depthPaused; updateDepth(); };
+document.addEventListener('visibilitychange', () => { updateStream(); updateDepth(); });
+phone.addEventListener('change', () => { updateStream(); updateDepth(); resize(); });
 
 // Reload the camera stream if it stalls (e.g. after the robot restarts).
 cam.onerror = () => {
@@ -771,10 +881,22 @@ cam.onerror = () => {
   camOn = false;
   setTimeout(updateStream, 2000);
 };
+depth.onload = () => { if (depthOn) depthMessage(''); };
+depth.onerror = async () => {
+  if (!depthOn) return;
+  depthOn = false;
+  await loadDepthInfo();
+  setTimeout(updateDepth, 2000);
+};
 
 let savedTab = 'camera';
-try { savedTab = localStorage.getItem('roomba.tab') || 'camera'; } catch (e) { /* private mode */ }
-setTab(savedTab === 'map' ? 'map' : 'camera');
+try {
+  const embedded = window.name === 'roomba-mfd' && !sessionStorage.getItem('roomba.tab');
+  if (new URLSearchParams(location.search).get('layout') === 'mfd' || embedded) sessionStorage.setItem('roomba.tab', 'mfd');
+  savedTab = sessionStorage.getItem('roomba.tab') || localStorage.getItem('roomba.tab') || 'camera';
+} catch (e) { /* private mode */ }
+setTab(TABS.includes(savedTab) ? savedTab : 'camera', false);
+loadDepthInfo().then(updateDepth);
 renderZones();
 renderDetections();
 connect();

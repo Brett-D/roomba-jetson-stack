@@ -2,6 +2,8 @@
 //! routes). Same node name, parameters, topics and QoS, NavigateToPose action and /roomba/set_mode
 //! clients, TF, HTTP routes and status codes, websocket JSON (10 Hz), MJPEG stream, static files
 //! (share/roomba_web/www) and login (the same ~/.config/roomba_web/auth.json and session cookie).
+//! Rust only: /depth.mjpg, the depth camera colourised (turbo, red near to blue far, black where
+//! there is no depth), at most depth_fps frames a second and only while someone watches it.
 //! The ROS side runs on rclrs' executor thread (like the Python node's spin thread, including the
 //! 10 Hz drive pad deadman), the HTTP server on tokio (hyper + tokio-tungstenite). The logic lives
 //! in roomba_rs::web (state, request validation, images, auth, aiohttp behaviour).
@@ -103,6 +105,16 @@ struct Ros {
     preview_fps: f64,
     preview_topic: String,
     preview_width: usize,
+    /// Depth view: JPEGs for /depth.mjpg, its viewers (the subscription exists only while there
+    /// are any), the colour table and the frame rate.
+    depth_jpeg: tokio::sync::watch::Sender<Option<Bytes>>,
+    depth_viewers: AtomicUsize,
+    depth_sub: Mutex<Option<Subscription<sensor_msgs::msg::rmw::Image>>>,
+    last_depth: Mutex<f64>,
+    depth_topic: String,
+    depth_fps: f64,
+    depth_colours: image::DepthColours,
+    depth_range_mm: (u32, u32),
     rt: tokio::runtime::Handle,
 }
 
@@ -149,6 +161,41 @@ impl Ros {
         *lock(&self.last_preview) = now;
         if let Some(jpg) = image::preview_jpeg(&msg.data, msg.width as usize, msg.height as usize, msg.step as usize, self.preview_width) {
             self.jpeg.send_replace(Some(Bytes::from(jpg)));
+        }
+    }
+
+    /// Subscribes to the depth image while /depth.mjpg has viewers.
+    fn depth_check(self: &Arc<Self>) {
+        let watched = self.depth_viewers.load(Ordering::SeqCst) > 0;
+        let mut sub = lock(&self.depth_sub);
+        if !watched && sub.is_some() {
+            *sub = None;
+            self.depth_jpeg.send_replace(None);
+        } else if watched && sub.is_none() {
+            let ros = Arc::clone(self);
+            match self
+                .node
+                .create_subscription::<sensor_msgs::msg::rmw::Image, _>(self.depth_topic.as_str().sensor_data_qos(), move |m: sensor_msgs::msg::rmw::Image| ros.on_depth(m))
+            {
+                Ok(s) => *sub = Some(s),
+                Err(e) => log!(self.node.error(), "cannot subscribe to {}: {e}", self.depth_topic),
+            }
+        }
+    }
+
+    fn on_depth(&self, msg: sensor_msgs::msg::rmw::Image) {
+        let now = mono();
+        if now - *lock(&self.last_depth) < 1.0 / self.depth_fps || self.depth_viewers.load(Ordering::SeqCst) == 0 {
+            return;
+        }
+        let encoding = msg.encoding.to_string();
+        if encoding != "16UC1" && encoding != "mono16" {
+            return;
+        }
+        *lock(&self.last_depth) = now;
+        let (w, h, step) = (msg.width as usize, msg.height as usize, msg.step as usize);
+        if let Some(jpg) = self.depth_colours.jpeg(&msg.data, w, h, step, msg.is_bigendian != 0, 75) {
+            self.depth_jpeg.send_replace(Some(Bytes::from(jpg)));
         }
     }
 
@@ -434,6 +481,46 @@ fn py_repr_opt(v: Option<&str>) -> String {
     v.map_or("None".into(), json::repr_str)
 }
 
+/// MJPEG over HTTP: every new JPEG from `rx` as a part; `slot` is held until the client leaves.
+fn mjpeg(rx: tokio::sync::watch::Receiver<Option<Bytes>>, slot: Box<dyn Send>, method: &Method, extra: &[(&str, String)]) -> Out {
+    let mut builder = Response::builder()
+        .status(200)
+        .header(header::CONTENT_TYPE, "multipart/x-mixed-replace; boundary=frame")
+        .header(header::CACHE_CONTROL, "no-cache, no-store");
+    for (name, value) in extra {
+        builder = builder.header(*name, value.as_str());
+    }
+    if method == Method::HEAD {
+        drop(slot);
+        return Out::Raw(builder.body(Empty::new().boxed_unsync()).unwrap_or_else(|_| to_response(Reply::internal_error())));
+    }
+    let frames = futures_util::stream::unfold((rx, slot, true), |(mut rx, slot, mut first)| async move {
+        loop {
+            if !first && rx.changed().await.is_err() {
+                return None;
+            }
+            first = false;
+            let jpg = rx.borrow_and_update().clone();
+            if let Some(jpg) = jpg {
+                let mut part = Vec::with_capacity(jpg.len() + 80);
+                part.extend_from_slice(format!("--frame\r\nContent-Type: image/jpeg\r\nContent-Length: {}\r\n\r\n", jpg.len()).as_bytes());
+                part.extend_from_slice(&jpg);
+                part.extend_from_slice(b"\r\n");
+                return Some((Ok::<_, Infallible>(Frame::data(Bytes::from(part))), (rx, slot, first)));
+            }
+        }
+    });
+    Out::Raw(builder.body(BodyExt::boxed_unsync(StreamBody::new(frames))).unwrap_or_else(|_| to_response(Reply::internal_error())))
+}
+
+struct DepthSlot(Arc<Ros>);
+
+impl Drop for DepthSlot {
+    fn drop(&mut self) {
+        self.0.depth_viewers.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 struct StreamSlot(Arc<App>);
 
 impl Drop for StreamSlot {
@@ -467,7 +554,7 @@ impl App {
         // The guard middleware: everything except the login page and static files needs a session.
         if !(path == "/login" || path == "/favicon.ico" || path.starts_with("/static/")) {
             if !self.authed(req.headers()) {
-                if path.starts_with("/api/") || path == "/ws" || path == "/stream.mjpg" {
+                if path.starts_with("/api/") || path == "/ws" || path == "/stream.mjpg" || path == "/depth.mjpg" {
                     return Out::Reply(Reply::error(401));
                 }
                 return Out::Reply(Reply::found("/login"));
@@ -482,7 +569,7 @@ impl App {
         }
         let method = req.method().clone();
         let allowed: &[&str] = match raw_path {
-            "/" | "/stream.mjpg" | "/ws" | "/api/state" | "/api/map.json" | "/api/map.png" | "/api/path" | "/api/plan" | "/api/obstacles" => GET,
+            "/" | "/stream.mjpg" | "/depth.mjpg" | "/ws" | "/api/state" | "/api/map.json" | "/api/map.png" | "/api/path" | "/api/plan" | "/api/obstacles" => GET,
             "/login" | "/api/zones" => &["GET", "HEAD", "POST"],
             "/logout" | "/api/goal" | "/api/goal/cancel" | "/api/drive" | "/api/robot/mode" | "/api/robot/stop" | "/api/explore" | "/api/floor_grid" => POST,
             p if p.strip_prefix("/api/zones/").is_some_and(|n| !n.is_empty() && !n.contains(['/', '{', '}'])) => &["DELETE"],
@@ -521,6 +608,7 @@ impl App {
                 Reply::found("/login").with("Set-Cookie", &format!("{SESSION_COOKIE}=\"\"; expires=Thu, 01 Jan 1970 00:00:00 GMT; Max-Age=0; Path=/"))
             }
             ("/stream.mjpg", _) => return self.stream(&method),
+            ("/depth.mjpg", _) => return self.depth_stream(&method),
             ("/ws", _) => return self.websocket(req),
             ("/api/state", _) => Reply::json(ros.snapshot_json()),
             ("/api/map.json", _) => match lock(&ros.core).map_json() {
@@ -667,34 +755,20 @@ impl App {
             return Out::Reply(Reply::text(503, "too many camera viewers"));
         }
         let slot = StreamSlot(Arc::clone(self));
-        let builder = Response::builder()
-            .status(200)
-            .header(header::CONTENT_TYPE, "multipart/x-mixed-replace; boundary=frame")
-            .header(header::CACHE_CONTROL, "no-cache, no-store");
-        if method == Method::HEAD {
-            drop(slot);
-            return Out::Raw(builder.body(Empty::new().boxed_unsync()).unwrap_or_else(|_| to_response(Reply::internal_error())));
-        }
-        let rx = self.ros.jpeg.subscribe();
-        let frames = futures_util::stream::unfold((rx, slot, true), |(mut rx, slot, mut first)| async move {
-            loop {
-                if !first && rx.changed().await.is_err() {
-                    return None;
-                }
-                first = false;
-                let jpg = rx.borrow_and_update().clone();
-                if let Some(jpg) = jpg {
-                    let mut part = Vec::with_capacity(jpg.len() + 80);
-                    part.extend_from_slice(format!("--frame\r\nContent-Type: image/jpeg\r\nContent-Length: {}\r\n\r\n", jpg.len()).as_bytes());
-                    part.extend_from_slice(&jpg);
-                    part.extend_from_slice(b"\r\n");
-                    return Some((Ok::<_, Infallible>(Frame::data(Bytes::from(part))), (rx, slot, first)));
-                }
-            }
-        });
-        Out::Raw(builder.body(BodyExt::boxed_unsync(StreamBody::new(frames))).unwrap_or_else(|_| to_response(Reply::internal_error())))
+        mjpeg(self.ros.jpeg.subscribe(), Box::new(slot), method, &[])
     }
 
+    /// The colourised depth camera. X-Depth-Range (mm) is for the page's legend.
+    fn depth_stream(self: &Arc<Self>, method: &Method) -> Out {
+        let ros = &self.ros;
+        let taken = ros.depth_viewers.try_update(Ordering::SeqCst, Ordering::SeqCst, |n| (n < MAX_STREAMS).then_some(n + 1));
+        if taken.is_err() {
+            return Out::Reply(Reply::text(503, "too many depth viewers"));
+        }
+        let slot = DepthSlot(Arc::clone(ros));
+        let range = format!("{}-{}", ros.depth_range_mm.0, ros.depth_range_mm.1);
+        mjpeg(ros.depth_jpeg.subscribe(), Box::new(slot), method, &[("X-Depth-Range", range)])
+    }
     /// aiohttp's WebSocketResponse handshake checks, then the 10 Hz state push.
     fn websocket(self: &Arc<Self>, req: &mut Request<Incoming>) -> Out {
         let h = req.headers();
@@ -869,6 +943,11 @@ fn main() -> Result<()> {
     let preview_fps: f64 = d.get("preview_fps", 4.0)?;
     let preview_topic: Arc<str> = d.get("preview_topic", Arc::from("/camera/left/image_rect_mono"))?;
     let preview_width: i64 = d.get("preview_width", 480)?;
+    let depth_topic: Arc<str> = d.get("depth_topic", Arc::from("/camera/depth/image_rect_raw"))?;
+    let depth_fps: f64 = d.get("depth_fps", 5.0)?;
+    let depth_min_m: f64 = d.get("depth_min_m", 0.2)?;
+    let depth_max_m: f64 = d.get("depth_max_m", 4.0)?;
+    let depth_range_mm = ((depth_min_m * 1000.0).round().max(0.0) as u32, (depth_max_m * 1000.0).round().max(1.0) as u32);
     let port = u16::try_from(port).map_err(|_| anyhow!("port {port} out of range"))?;
 
     let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build()?;
@@ -896,6 +975,14 @@ fn main() -> Result<()> {
         preview_fps,
         preview_topic: preview_topic.to_string(),
         preview_width: preview_width.max(0) as usize,
+        depth_jpeg: tokio::sync::watch::channel(None).0,
+        depth_viewers: AtomicUsize::new(0),
+        depth_sub: Mutex::new(None),
+        last_depth: Mutex::new(0.0),
+        depth_topic: depth_topic.to_string(),
+        depth_fps: depth_fps.max(0.1),
+        depth_colours: image::DepthColours::new(depth_range_mm.0 as f64, depth_range_mm.1 as f64),
+        depth_range_mm,
         rt: rt.handle().clone(),
         node: node.clone(),
     });
@@ -939,6 +1026,11 @@ fn main() -> Result<()> {
         // Plain camera preview while no annotated frames arrive (e.g. people:=false).
         let r = Arc::clone(&ros);
         keep.push(Box::new(node.create_timer_repeating(Duration::from_secs(2).node_time(), move || r.preview_check())?));
+    }
+
+    {
+        let r = Arc::clone(&ros);
+        keep.push(Box::new(node.create_timer_repeating(Duration::from_millis(500).node_time(), move || r.depth_check())?));
     }
 
     let www = http::package_share("roomba_web").ok_or_else(|| anyhow!("package 'roomba_web' not found"))?.join("www");

@@ -67,6 +67,42 @@ int rs_jpeg_encode_gray(const unsigned char *pixels, int width, int height, size
   return 0;
 }
 
+/* Like rs_jpeg_encode_gray for 8-bit RGB rows (the depth view, which has no OpenCV twin). */
+int rs_jpeg_encode_rgb(const unsigned char *pixels, int width, int height, size_t stride, int quality,
+                       unsigned char **out, size_t *out_len) {
+  struct jpeg_compress_struct cinfo;
+  struct rs_jpeg_error jerr;
+  const int q = quality < 0 ? 0 : (quality > 100 ? 100 : quality);
+  struct rs_jpeg_out *res = calloc(1, sizeof(*res));
+  if (!res) return -1;
+  cinfo.err = jpeg_std_error(&jerr.pub);
+  jerr.pub.error_exit = rs_jpeg_error_exit;
+  if (setjmp(jerr.jump)) {
+    jpeg_destroy_compress(&cinfo);
+    free(res->data);
+    free(res);
+    return -1;
+  }
+  jpeg_create_compress(&cinfo);
+  jpeg_mem_dest(&cinfo, &res->data, &res->len);
+  cinfo.image_width = (JDIMENSION)width;
+  cinfo.image_height = (JDIMENSION)height;
+  cinfo.input_components = 3;
+  cinfo.in_color_space = JCS_RGB;
+  jpeg_set_defaults(&cinfo);
+  jpeg_set_quality(&cinfo, q, TRUE);
+  jpeg_start_compress(&cinfo, TRUE);
+  for (int y = 0; y < height; y++) {
+    JSAMPROW row = (JSAMPROW)(pixels + (size_t)y * stride);
+    jpeg_write_scanlines(&cinfo, &row, 1);
+  }
+  jpeg_finish_compress(&cinfo);
+  jpeg_destroy_compress(&cinfo);
+  *out = res->data;
+  *out_len = res->len;
+  free(res);
+  return 0;
+}
 struct rs_png_out {
   unsigned char *data;
   size_t len, cap;

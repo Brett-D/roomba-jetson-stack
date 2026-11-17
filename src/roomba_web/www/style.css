@@ -73,6 +73,7 @@ button:disabled { opacity: .5; cursor: default; }
   gap: 14px;
   padding: 14px;
 }
+@media (min-width: 1280px) { .grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
 @media (max-width: 900px) { .grid { grid-template-columns: 1fr; padding: 10px; } }
 
 .card {
@@ -200,13 +201,18 @@ button.danger { background: var(--bad); color: #fff; border-color: var(--bad); }
     padding: 10px;
   }
   body[data-tab="camera"] .tabs button[data-tab="camera"],
-  body[data-tab="map"] .tabs button[data-tab="map"] {
+  body[data-tab="map"] .tabs button[data-tab="map"],
+  body[data-tab="depth"] .tabs button[data-tab="depth"],
+  body[data-tab="mfd"] .tabs button[data-tab="mfd"] {
     background: var(--accent);
     color: #111;
     border-color: var(--accent);
   }
-  body[data-tab="camera"] #sec-map,
-  body[data-tab="map"] #sec-camera { display: none; }
+  body[data-tab="camera"] #sec-map, body[data-tab="camera"] #sec-depth,
+  body[data-tab="map"] #sec-camera, body[data-tab="map"] #sec-depth,
+  body[data-tab="depth"] #sec-camera, body[data-tab="depth"] #sec-map { display: none; }
+  .tabs button { padding: 10px 4px; font-size: 14px; }
+  .layout-btn { display: none; }
   .map-wrap { height: calc(100dvh - 330px); min-height: 300px; }
   .nav-banner { position: sticky; top: 58px; z-index: 4; margin: 8px 10px 0; }
   .nav-arrow { font-size: 48px; }
@@ -309,4 +315,27 @@ button.danger { background: var(--bad); color: #fff; border-color: var(--bad); }
   .drive-row { flex-direction: column; }
   .drive-pad { width: 200px; height: 200px; }
   .drive-knob { left: calc(50% - 34px); top: calc(50% - 34px); width: 68px; height: 68px; }
+}
+/* Depth view */
+.depth-legend { display: flex; align-items: center; gap: 8px; margin-top: 8px; font-size: 12px; color: var(--muted); }
+.depth-legend i { flex: 1; height: 10px; border-radius: 3px; background: linear-gradient(to right, #b8200a, #fbb935, #95f950, #2ec3e1, #4958dd); }
+.sw-explore { background: #ffb000; border-radius: 2px; }
+
+/* Three-view layout (the "All 3" tab, ▦ 3-view, or ?layout=mfd): only camera, map and depth,
+   side by side on a wide screen and stacked on a phone. */
+body[data-tab="mfd"] .card > :not(.mfd-keep) { display: none !important; }
+body[data-tab="mfd"] .mfd-keep button { display: none; }
+body[data-tab="mfd"] .nav-banner.idle { display: none !important; }
+body[data-tab="mfd"] .card { padding: 10px; }
+body[data-tab="mfd"] .card h2 { font-size: 15px; margin-bottom: 6px; }
+body[data-tab="mfd"] .depth-legend { margin-top: 6px; }
+body[data-tab="mfd"] #map-explore { margin: 6px 0 0; }
+@media (min-width: 901px) {
+  body[data-tab="mfd"] .grid { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; padding: 10px; }
+  body[data-tab="mfd"] .camera-wrap,
+  body[data-tab="mfd"] .map-wrap { aspect-ratio: auto; height: clamp(200px, calc(100vh - 190px), 640px); }
+}
+@media (max-width: 900px) {
+  body[data-tab="mfd"] .grid { gap: 10px; }
+  body[data-tab="mfd"] .map-wrap { height: auto; aspect-ratio: 1 / 1; min-height: 0; }
 }

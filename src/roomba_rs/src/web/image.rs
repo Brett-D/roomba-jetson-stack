@@ -8,6 +8,7 @@ use std::os::raw::{c_int, c_uchar};
 
 extern "C" {
     fn rs_jpeg_encode_gray(px: *const c_uchar, w: c_int, h: c_int, stride: usize, q: c_int, out: *mut *mut c_uchar, len: *mut usize) -> c_int;
+    fn rs_jpeg_encode_rgb(px: *const c_uchar, w: c_int, h: c_int, stride: usize, q: c_int, out: *mut *mut c_uchar, len: *mut usize) -> c_int;
     fn rs_png_encode_bgra(px: *const c_uchar, w: c_int, h: c_int, stride: usize, out: *mut *mut c_uchar, len: *mut usize) -> c_int;
     fn rs_codec_free(p: *mut std::ffi::c_void);
 }
@@ -32,6 +33,17 @@ pub fn encode_jpeg_gray(pixels: &[u8], width: usize, height: usize, stride: usiz
     let (mut out, mut len) = (std::ptr::null_mut(), 0usize);
     // SAFETY: the buffer holds `height` rows of `width` bytes at `stride` (checked above).
     let rc = unsafe { rs_jpeg_encode_gray(pixels.as_ptr(), width as c_int, height as c_int, stride, quality, &mut out, &mut len) };
+    take_buffer(rc, out, len)
+}
+
+/// JPEG of an RGB image of `width * 3`-byte rows.
+pub fn encode_jpeg_rgb(pixels: &[u8], width: usize, height: usize, quality: i32) -> Option<Vec<u8>> {
+    if width == 0 || height == 0 || pixels.len() < width * height * 3 {
+        return None;
+    }
+    let (mut out, mut len) = (std::ptr::null_mut(), 0usize);
+    // SAFETY: the buffer holds `height` rows of `width * 3` bytes (checked above).
+    let rc = unsafe { rs_jpeg_encode_rgb(pixels.as_ptr(), width as c_int, height as c_int, width * 3, quality, &mut out, &mut len) };
     take_buffer(rc, out, len)
 }
 
@@ -223,6 +235,47 @@ pub fn map_png(width: usize, height: usize, data: &[i8]) -> Option<Vec<u8>> {
     encode_png_bgra(&img, width, height)
 }
 
+/// Turbo-style rainbow (dark blue -> cyan -> green -> yellow -> red -> dark red) at x in 0..=1,
+/// from a polynomial fit of Google's Turbo colormap.
+pub fn turbo(x: f64) -> [u8; 3] {
+    let x = x.clamp(0.0, 1.0);
+    let poly = |c: [f64; 6]| c[0] + x * (c[1] + x * (c[2] + x * (c[3] + x * (c[4] + x * c[5]))));
+    let r = poly([0.13572138, 4.61539260, -42.66032258, 132.13108234, -152.94239396, 59.28637943]);
+    let g = poly([0.09140261, 2.19418839, 4.84296658, -14.18503333, 4.27729857, 2.82956604]);
+    let b = poly([0.10667330, 12.64194608, -60.58204836, 110.36276771, -89.90310912, 27.34824973]);
+    [r, g, b].map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8)
+}
+
+/// Colours for every 16-bit depth in mm: black for 0 (no depth), then turbo from red (`min_mm`
+/// and closer) to blue (`max_mm` and beyond), leaving out turbo's near-black ends.
+pub struct DepthColours {
+    lut: Vec<[u8; 3]>,
+}
+
+impl DepthColours {
+    pub fn new(min_mm: f64, max_mm: f64) -> DepthColours {
+        let span = (max_mm - min_mm).max(1.0);
+        let mut lut: Vec<[u8; 3]> = (0..=u16::MAX as u32).map(|mm| turbo(0.9 - 0.8 * ((mm as f64 - min_mm) / span).clamp(0.0, 1.0))).collect();
+        lut[0] = [0, 0, 0];
+        DepthColours { lut }
+    }
+
+    /// A 16UC1 depth image (rows of `step` bytes, little- or big-endian) as JPEG.
+    pub fn jpeg(&self, data: &[u8], width: usize, height: usize, step: usize, big_endian: bool, quality: i32) -> Option<Vec<u8>> {
+        if width == 0 || height == 0 || step < width * 2 || data.len() < step * (height - 1) + width * 2 {
+            return None;
+        }
+        let mut rgb = Vec::with_capacity(width * height * 3);
+        for row in data.chunks(step).take(height) {
+            for px in row[..width * 2].chunks_exact(2) {
+                let mm = if big_endian { u16::from_be_bytes([px[0], px[1]]) } else { u16::from_le_bytes([px[0], px[1]]) };
+                rgb.extend_from_slice(&self.lut[mm as usize]);
+            }
+        }
+        encode_jpeg_rgb(&rgb, width, height, quality)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -250,5 +303,23 @@ mod tests {
         assert!(map_png(0, 2, &[]).is_none());
         assert!(map_png(2, 2, &[0; 3]).is_none());
         assert!(preview_jpeg(&gray, 64, 48, 64, 32).is_some());
+    }
+
+    #[test]
+    fn depth_colours_run_from_red_near_to_blue_far() {
+        let c = DepthColours::new(200.0, 4000.0);
+        assert_eq!(c.lut[0], [0, 0, 0], "no depth");
+        let (near, far) = (c.lut[200], c.lut[4000]);
+        assert!(near[0] > 100 && near[2] < 30, "near is red: {near:?}");
+        assert!(far[2] > 40 && far[0] < 80, "far is blue: {far:?}");
+        assert_eq!(c.lut[100], near, "closer than the range: clamped");
+        assert_eq!(c.lut[9000], far, "beyond the range: clamped");
+        let mid = c.lut[2100];
+        assert!(mid[1] > 200, "the middle is green / yellow: {mid:?}");
+        // 2x2 image, rows padded to 6 bytes: 0 mm, 1 m / 3 m, 4 m
+        let img = [0, 0, 0xe8, 0x03, 0, 0, 0xb8, 0x0b, 0xa0, 0x0f, 0, 0];
+        let jpg = c.jpeg(&img, 2, 2, 6, false, 80).unwrap();
+        assert_eq!(&jpg[..3], &[0xff, 0xd8, 0xff]);
+        assert!(c.jpeg(&img, 2, 2, 3, false, 80).is_none(), "step too small");
     }
 }
