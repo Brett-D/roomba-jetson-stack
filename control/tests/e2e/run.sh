@@ -51,7 +51,9 @@ start_instance() {
     echo "the server didn't start:"; cat "$FAKE_DIR/server.log"; exit 1
 }
 stop_instance() { kill "$SERVER" 2>/dev/null; wait "$SERVER" 2>/dev/null; rm -f "$JAR"; }
-trap 'stop_instance; kill_fakes' EXIT
+# A failed wait_for exits mid-test: the standalone fake drivers (detached loops with $FAKE_DRIVER,
+# not matched by kill_fakes) must go too, so a failed run leaves nothing behind.
+trap 'stop_instance; kill_fakes; for p in $(fake_drivers); do kill -9 "$p"; done' EXIT
 
 echo "== instance A: dry-run power-off, 6 s stop timeout"
 start_instance --dry-run-poweroff --stop-timeout-s 6
