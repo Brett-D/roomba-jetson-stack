@@ -139,8 +139,11 @@ fn set_phase(app: &App, message: &str, stopping: bool) {
 }
 
 fn finish(app: &App, ok: bool, message: String) {
+    finish_locked(&mut lock(app), ok, message);
+}
+
+fn finish_locked(ctl: &mut Ctl, ok: bool, message: String) {
     eprintln!("{} {message}", if ok { "done:" } else { "FAILED:" });
-    let mut ctl = lock(app);
     let op = ctl.busy.take().map_or(Op::Stop, |b| b.op);
     ctl.last = Some(Done { op, ok, message, at: Instant::now() });
 }
@@ -216,14 +219,23 @@ pub fn request_stop(app: &Arc<App>) -> Result<String, String> {
     let app2 = Arc::clone(app);
     spawn("stop", move || {
         let (ok, msg) = stop_robot(&app2);
-        let then_poweroff = lock(&app2).busy.as_ref().is_some_and(|b| b.then_poweroff);
-        if then_poweroff {
-            if let Some(b) = lock(&app2).busy.as_mut() {
-                b.op = Op::Shutdown;
+        // One lock for the check and the finish: a shutdown asked for meanwhile has either set
+        // then_poweroff already (and happens now) or will find the page idle (and start its own).
+        let then_poweroff = {
+            let mut ctl = lock(&app2);
+            match ctl.busy.as_mut() {
+                Some(b) if b.then_poweroff => {
+                    b.op = Op::Shutdown;
+                    true
+                }
+                _ => {
+                    finish_locked(&mut ctl, ok, msg.clone());
+                    false
+                }
             }
+        };
+        if then_poweroff {
             power_off(&app2, &msg);
-        } else {
-            finish(&app2, ok, msg);
         }
     })
     .inspect_err(|_| {
