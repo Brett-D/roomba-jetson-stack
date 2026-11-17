@@ -399,7 +399,14 @@ a.plate-btn[aria-disabled="true"] { opacity: .45; pointer-events: none; }
 .plate-yellow { background: #f2c200; color: #111; }
 
 /* BATTERY panel: a ten-cell gauge, the readouts, and NEW PACK under an orange guard */
-.batt-row { display: flex; flex-wrap: wrap; gap: 12px 16px; align-items: center; }
+.batt-row { display: grid; grid-template-columns: 1fr auto; grid-template-areas: "gauge pack" "read pack"; gap: 12px 16px; align-items: start; }
+.batt-row > .batt-gauge { grid-area: gauge; }
+.batt-row > .batt-read { grid-area: read; }
+.batt-row > .pack-ctl { grid-area: pack; }
+@container (max-width: 300px) {
+  .batt-row { grid-template-columns: 1fr; grid-template-areas: "gauge" "read" "pack"; }
+  .batt-row > .pack-ctl { justify-self: end; }
+}
 .batt-gauge { display: flex; align-items: center; gap: 10px; }
 .gauge-cells {
   position: relative;
@@ -421,7 +428,7 @@ a.plate-btn[aria-disabled="true"] { opacity: .45; pointer-events: none; }
 .batt-read { display: grid; grid-template-columns: auto auto; gap: 2px 10px; margin: 0; font-size: 13px; }
 .batt-read dt { align-self: center; font-size: 10px; color: var(--dim); }
 .batt-read dd { margin: 0; color: var(--hud); text-shadow: 0 0 5px var(--hud-glow); }
-.pack-ctl { margin-left: auto; padding-top: 30px; }
+.pack-ctl { padding-top: 26px; }
 .guarded.round { width: 88px; height: 88px; }
 .guarded.round .pushbtn { margin: 0; }
 .guarded.round .guard { border-radius: 50%; inset: -5px; }
