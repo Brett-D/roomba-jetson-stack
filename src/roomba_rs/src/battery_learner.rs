@@ -284,6 +284,13 @@ pub struct State {
     /// The first run's seed point (V, fraction), for the record.
     pub seed: Option<[f64; 2]>,
     pub history: Vec<PackRecord>,
+    /// Stamp of the last frame and of a detected swap the manual reset may still confirm (within
+    /// `manual_merge_s`). Frame stamps are the driver's clock (wall time), so they stay comparable
+    /// across restarts.
+    #[serde(default)]
+    pub last_stamp: Option<f64>,
+    #[serde(default)]
+    pub detected_swap_stamp: Option<f64>,
 }
 
 /// One discharge sample for the pack's CSV file.
@@ -369,8 +376,6 @@ pub struct Learner {
     ocv: Option<f64>,
     rest_since: Option<f64>,
     next_sample: f64,
-    /// Frame stamp of the last detected (not manual) swap.
-    last_detected_swap: Option<f64>,
 }
 
 /// Inverse of the stock curve: cell voltage at this charge.
@@ -463,6 +468,8 @@ impl Learner {
                 prior_offset_v: if seeded { p.cells * li_ion_voltage(p.seed_fraction) - p.seed_voltage } else { 0.0 },
                 seed: seeded.then_some([p.seed_voltage, p.seed_fraction]),
                 history: Vec::new(),
+                last_stamp: None,
+                detected_swap_stamp: None,
             }
         });
         let saved_ocv = state.last_ocv;
@@ -478,7 +485,6 @@ impl Learner {
             ocv: None,
             rest_since: None,
             next_sample: f64::NEG_INFINITY,
-            last_detected_swap: None,
         };
         l.refit();
         l
@@ -556,6 +562,7 @@ impl Learner {
             self.pending = Some(Pending { kind: Kind::Gap { before: self.ocv, gap_s }, readings: Vec::new() });
         }
         self.last_stamp = Some(stamp);
+        self.state.last_stamp = Some(stamp);
         self.last_voltage = v;
         let prev_i = std::mem::replace(&mut self.last_current_ma, i);
         self.state.last_seen_unix = unix;
@@ -677,7 +684,7 @@ impl Learner {
         let (anchor, start) = if soc_v >= self.p.full_pack_min_fraction { (Anchor::Full, 1.0) } else { (Anchor::Voltage, soc_v) };
         let id = self.state.pack.id + 1;
         self.state.pack = Pack::new(id, unix, anchor, start, m);
-        self.last_detected_swap = self.last_stamp;
+        self.state.detected_swap_stamp = self.last_stamp;
         out.logs.push(format!(
             "new pack ({}: {before:.2} V -> {m:.2} V): pack {id} starts at {}{}",
             how.as_str(),
@@ -692,8 +699,9 @@ impl Learner {
     pub fn manual_swap(&mut self, unix: f64) -> (String, Vec<String>) {
         let mut out = Output::default();
         let message;
-        // Seconds (stamp time) since a detected swap, if within manual_merge_s.
-        let since_detected = match (self.last_detected_swap, self.last_stamp) {
+        // Seconds (frame stamp time, persisted) since a detected swap, if within manual_merge_s;
+        // right after a restart, before any frame, that is up to the last frame before it.
+        let since_detected = match (self.state.detected_swap_stamp, self.state.last_stamp) {
             (Some(swap), Some(now)) if now - swap <= self.p.manual_merge_s => Some(now - swap),
             _ => None,
         };
@@ -718,7 +726,7 @@ impl Learner {
             self.pending = Some(Pending { kind: Kind::Gap { before: None, gap_s: 0.0 }, readings: Vec::new() });
             self.rest_since = None;
         }
-        self.last_detected_swap = None;
+        self.state.detected_swap_stamp = None;
         out.logs.insert(0, format!("manual reset: {message}"));
         (message, out.logs)
     }
@@ -1256,6 +1264,36 @@ mod tests {
         assert_eq!((l.state.pack.id, l.state.pack.anchor, l.state.history.len()), (2, Anchor::Full, 1));
         assert!(l.estimate().unwrap().soc > 0.99);
         assert!((l.state.pack.start_ocv - 21.0).abs() < 0.01, "{}", l.state.pack.start_ocv);
+    }
+
+    #[test]
+    fn manual_reset_confirms_a_swap_detected_before_a_restart() {
+        let mut t = 0.0;
+        let mut sim = Sim { offset: 0.0, capacity: 2000.0, soc: 0.2, r: 0.2 };
+        let (mut l, _) = started(None, &sim, &mut t);
+        run(&mut l, &mut sim, &mut t, 60.0, -400.0);
+        // A detected swap to a pack that reads part-charged (it settles 5 s after the data is back),
+        // then the node restarts.
+        t += 60.0;
+        sim.soc = 0.6;
+        run(&mut l, &mut sim, &mut t, 120.0, -400.0);
+        assert_eq!((l.state.pack.id, l.state.pack.anchor), (2, Anchor::Voltage));
+        let saved = l.state.clone();
+        // The button right after the restart, before any frame, still confirms that swap ...
+        let mut l2 = Learner::new(params(), Some(saved.clone()), t);
+        let (reply, _) = l2.manual_swap(t);
+        assert!(reply.starts_with("pack 2 (swap detected 115 s ago) is marked full"), "{reply}");
+        assert_eq!((l2.state.pack.id, l2.state.pack.anchor, l2.state.history.len()), (2, Anchor::Full, 1));
+        assert_eq!(l2.state.detected_swap_stamp, None);
+        // ... and after the restart's first frames ...
+        let (mut l3, _) = started(Some(saved.clone()), &sim, &mut t);
+        let (reply, _) = l3.manual_swap(t);
+        assert!(reply.starts_with("pack 2 (swap detected 120 s ago) is marked full"), "{reply}");
+        // ... but not once manual_merge_s (600 s) has passed: then it is a new pack of its own.
+        t += 600.0;
+        let (mut l4, _) = started(Some(saved), &sim, &mut t);
+        let (reply, _) = l4.manual_swap(t);
+        assert!(reply.starts_with("new pack 3 at 100 %"), "{reply}");
     }
 
     #[test]
