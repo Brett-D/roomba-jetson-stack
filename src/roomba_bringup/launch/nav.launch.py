@@ -165,7 +165,8 @@ def generate_launch_description():
         Node(package=PythonExpression(["'roomba_rs' if '", LaunchConfiguration('rust_nodes'),
                                        "' == 'true' else 'roomba_perception'"]),
              executable='explorer', name='explorer', output='screen',
-             # The driver estimates the Ridgid pack's charge from its voltage (battery_gauge: voltage).
+             # /battery_state: battery_learner's gauge of the 18 V pack (robot.launch.py battery_learner:=true;
+             # README "Battery gauge"), or with false the driver's voltage estimate (battery_gauge: voltage).
              # Bump marks: wider (this robot's right bumper switch is masked, so hits on the right
              # read as left), and also on the front light bumpers, which see railing posts first.
              # Marks leave the robot's footprint + 0.1 m free (a cell diagonal: the mask and costmap

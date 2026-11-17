@@ -16,8 +16,10 @@ Replays (scripts/compare_pipelines.sh) add camera:=false driver:=false use_sim_t
 Frames: map (RTAB-Map) -> odom (vslam_watchdog: VIO, wheel-bridged; or the EKF) -> base_link (Roomba centre
 on the floor, x forward) -> camera_link (static mount below) -> optical / IMU frames (camera driver).
 roomba_driver drives the wheels from /cmd_vel (Nav2's collision monitor, or the web app's drive pad)
-and publishes /wheel/odom, /battery_state and /roomba/sensors. rust_nodes:=false runs the original
-Python nodes (driver included) instead of their Rust ports in roomba_rs and roomba_driver_rs.
+and publishes /wheel/odom and /roomba/sensors; battery_learner turns the pack's voltage and current in
+/roomba/sensors into /battery_state (battery_learner:=false: the driver's own voltage-curve estimate).
+rust_nodes:=false runs the original Python nodes (driver included) instead of their Rust ports in
+roomba_rs and roomba_driver_rs.
 
 Learned parts (docs/learned-skills.md, docs/training.md): the explorer calls the learned unstuck skill
 when stuck and ranks its frontier goals with the learned ranker (unstuck_skill:=true
@@ -56,6 +58,20 @@ def _check_args(context):
         raise RuntimeError(f"odometry must be basalt or cuvslam (got '{odometry}')")
     return [LogInfo(msg=f"[robot] odometry={odometry} fusion={LaunchConfiguration('fusion').perform(context)} "
                         f"obstacles={obstacles} nav_params={LaunchConfiguration('nav_params').perform(context)}")]
+
+
+def _driver(context):
+    lc = LaunchConfiguration
+    rust = lc('rust_nodes').perform(context) == 'true'
+    # With the battery learner, the driver's own (voltage-curve) estimate goes to roomba/battery_raw.
+    learner = lc('battery_learner').perform(context) == 'true'
+    return [Node(
+        package='roomba_driver_rs' if rust else 'roomba_driver',
+        executable='roomba_driver', name='roomba_driver', output='screen',
+        parameters=[lc('driver_params')],
+        remappings=[('battery_state', 'roomba/battery_raw')] if learner else [],
+        condition=IfCondition(lc('driver')),
+    )]
 
 
 def generate_launch_description():
@@ -106,6 +122,13 @@ def generate_launch_description():
                                           'Python nodes'),
         DeclareLaunchArgument('driver_params', default_value=PathJoinSubstitution(
             [bringup, 'config', 'roomba_driver_robot.yaml'])),
+        DeclareLaunchArgument('battery_learner', default_value='true',
+                              description="true: roomba_rs battery_learner publishes /battery_state (a gauge "
+                                          "that learns the 18 V pack from its swaps at 1 bar) and the driver's "
+                                          "own estimate moves to /roomba/battery_raw; false: the driver's "
+                                          "/battery_state as before"),
+        DeclareLaunchArgument('battery_learner_params', default_value=PathJoinSubstitution(
+            [bringup, 'config', 'battery_learner_robot.yaml'])),
         DeclareLaunchArgument('nav_params', default_value=PythonExpression([
             "'", bringup_share, "/config/' + ('nav2_robot_nvblox.yaml' if '", lc('obstacles'),
             "' == 'nvblox' else 'nav2_robot.yaml')"])),
@@ -139,11 +162,15 @@ def generate_launch_description():
 
     # Rust driver (roomba_driver_rs, in the roomba-serial-ros2 submodule): same topics, services,
     # parameters and serial bytes as the Python roomba_driver, ~1/10 of the CPU.
-    driver = Node(
-        package=PythonExpression(["'roomba_driver_rs' if '", lc('rust_nodes'), "' == 'true' else 'roomba_driver'"]),
-        executable='roomba_driver', name='roomba_driver', output='screen',
-        parameters=[lc('driver_params')],
-        condition=IfCondition(lc('driver')),
+    driver = OpaqueFunction(function=_driver)
+
+    # Learns the 18 V pack's capacity and voltage curve from the swaps (README "Battery gauge"):
+    # /battery_state for the explorer and the web app, service /battery_learner/pack_swapped.
+    battery_learner = Node(
+        package='roomba_rs', executable='battery_learner', name='battery_learner', output='screen',
+        parameters=[lc('battery_learner_params')],
+        condition=IfCondition(PythonExpression(
+            ["'", lc('driver'), "' == 'true' and '", lc('battery_learner'), "' == 'true'"])),
     )
 
     # Event sounds (sounds:=true): "hello" when the driver first reports Safe/Full mode, "uh-oh" on a
@@ -185,4 +212,4 @@ def generate_launch_description():
 
     sim_time = SetParameter(name='use_sim_time', value=ParameterValue(lc('use_sim_time'), value_type=bool))
     return LaunchDescription(args + [OpaqueFunction(function=_check_args), sim_time,
-                                     mount, vslam, driver, sounds, nvblox, nav])
+                                     mount, vslam, driver, battery_learner, sounds, nvblox, nav])

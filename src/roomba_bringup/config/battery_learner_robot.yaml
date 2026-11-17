@@ -1,0 +1,17 @@
+# battery_learner settings for this robot (robot.launch.py battery_learner:=true). How it learns and
+# its files: README "Battery gauge"; parameters: src/roomba_rs/src/battery_learner.rs (Params).
+battery_learner:
+  ros__parameters:
+    cells: 5                       # 18 V pack, 5 Li-ion cells in series
+    # Pack + wiring: the Roomba read 0.11 V less at 0.75 A than at 0.2 A.
+    internal_resistance_ohm: 0.2
+    # The pack is swapped when its fuel gauge shows 1 bar: the charge it is taken to have then.
+    one_bar_fraction: 0.15
+    # Capacity until the swaps teach it (a 2 Ah pack fits the first night's voltage drop).
+    capacity_mah: 2000.0
+    # First run only (no ~/.local/state/roomba/battery_learner.json yet): the pack in the robot read
+    # 18.29 V with its gauge at 3 bars (50-75 %, taken as 62 %). The stock Li-ion curve is shifted
+    # to pass through this point until the packs teach the real one; it called 18.29 V about 18 %.
+    seed_voltage: 18.29
+    seed_fraction: 0.62
+    state_dir: ~/.local/state/roomba

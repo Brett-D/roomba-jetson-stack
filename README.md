@@ -14,7 +14,7 @@ The serial driver lives in its own repository and is included here as a submodul
 |---|---|
 | `src/roomba_bringup` | Launch files (`robot.launch.py`, `vslam.launch.py`, `nav.launch.py`, `handheld_slam.launch.py`, `twin2d.launch.py`), Nav2 configs, robot driver config, digital-twin scenarios (`config/twin2d/`) |
 | `src/roomba_perception` | VSLAM watchdog/odometry filter with wheel bridging, EKF input conditioning (`ekf_inputs`), floor obstacle detection, explorer, ignore zones, nav coach, person detector, IMU calibration |
-| `src/roomba_rs` | Rust ports of the robot's ROS 2 nodes (rclrs): `floor_obstacles`, `ekf_inputs`, `vslam_watchdog`, `map_gap_filler`, `ignore_zones`, `web_server`, `set_password`, `explorer`, `nav_coach` and `person_detector` (TensorRT and OpenCV through a small C++ shim in `native/`) (same topics, services, parameters, files and output as the Python nodes at a fraction of the CPU; `vendor/` holds generated Rust bindings for the Isaac ROS VSLAM interfaces). `tf_buffer`/`tf_listener` give rclrs nodes a tf2-equivalent TF buffer (bit-identical lookups). `rust_nodes:=false` switches back to the Python nodes (and the Python Roomba driver). `twin2d` is the 2D digital twin (see [Digital twin (2D)](#digital-twin-2d)); its simulated Roomba uses the Open Interface code of the Rust driver's library (`roomba_driver_rs`, a cargo path dependency on the submodule); `nav2_guard` (Rust only) brings Nav2's servers up when the lifecycle manager's start-up hangs on a lost answer; `sound_events` (Rust only) plays [event sounds](#event-sounds) on the Roomba |
+| `src/roomba_rs` | Rust ports of the robot's ROS 2 nodes (rclrs): `floor_obstacles`, `ekf_inputs`, `vslam_watchdog`, `map_gap_filler`, `ignore_zones`, `web_server`, `set_password`, `explorer`, `nav_coach` and `person_detector` (TensorRT and OpenCV through a small C++ shim in `native/`) (same topics, services, parameters, files and output as the Python nodes at a fraction of the CPU; `vendor/` holds generated Rust bindings for the Isaac ROS VSLAM interfaces). `tf_buffer`/`tf_listener` give rclrs nodes a tf2-equivalent TF buffer (bit-identical lookups). `rust_nodes:=false` switches back to the Python nodes (and the Python Roomba driver). `twin2d` is the 2D digital twin (see [Digital twin (2D)](#digital-twin-2d)); its simulated Roomba uses the Open Interface code of the Rust driver's library (`roomba_driver_rs`, a cargo path dependency on the submodule); `nav2_guard` (Rust only) brings Nav2's servers up when the lifecycle manager's start-up hangs on a lost answer; `sound_events` (Rust only) plays [event sounds](#event-sounds) on the Roomba; `battery_learner` (Rust only) is the robot's battery gauge, learned from the pack swaps (see [Battery gauge](#battery-gauge)) |
 | `src/roomba_web` | Web app on port 8080: live map, robot status, drive pad, tap-to-go navigation, login (the page, and the Python server used with `rust_nodes:=false`) |
 | `src/mynteye_d1000_driver` | ROS 2 node for the MYNT EYE D1000 stereo/depth/IMU camera |
 | `src/basalt_vio_ros` | ROS 2 wrapper for Basalt visual-inertial odometry |
@@ -22,7 +22,7 @@ The serial driver lives in its own repository and is included here as a submodul
 | `src/roomba_skills_msgs` | Interfaces of the learned navigation skills (`action/Unstuck`) |
 | `twin/learned` | Learned navigation skills (trained in simulation; on by default on the robot since 2026-11-16, `unstuck_skill:=false goal_ranking:=rule` turns them off): Isaac Lab unstuck policy, learned frontier ranking for the explorer, their evaluation against the classical logic and in the 2D twin, and the Rust inference (`roomba_rs` feature `learned`, node `unstuck_skill`, explorer options `unstuck_skill` and `goal_ranking: learned`); see [docs/learned-skills.md](docs/learned-skills.md) |
 | `scripts/` | `run_robot.sh`, `stop_slam.sh`, `graceful.py` (`ros2 launch` that SIGTERM / SIGINT stop cleanly), `record_run.sh` / `compare_pipelines.sh` (A vs B on a recorded drive), `run_twin2d.sh` (the 2D digital twin), mapping/replay helpers, setup scripts |
-| `tools/` | Probes and diagnostics (motion step test, costmap/obstacle probes, map render, TF/drift/CPU-GPU checks, comparison monitor/renderer, Python vs Rust A/B checks), `twin2d_world.py` / `twin2d_plan.py` / `twin2d_run.py` (digital twin floor plan from the map database or a vector plan, scenario runner), `sound_events_offline.py` (the event-sounds node against a fake driver); `tools/oi_tests/` holds early serial/OI bench scripts |
+| `tools/` | Probes and diagnostics (motion step test, costmap/obstacle probes, map render, TF/drift/CPU-GPU checks, comparison monitor/renderer, Python vs Rust A/B checks), `twin2d_world.py` / `twin2d_plan.py` / `twin2d_run.py` (digital twin floor plan from the map database or a vector plan, scenario runner), `sound_events_offline.py` (the event-sounds node against a fake driver), `battery_learner_replay.py` (the battery gauge through whole simulated discharges and swaps); `tools/oi_tests/` holds early serial/OI bench scripts |
 | `docs/` | Wiring and power diagrams; [training.md](docs/training.md): everything that was trained in this project (Isaac Sim person / railing detector, unstuck skill, frontier ranking), with algorithms, code, results and status (simulation only, nothing learned is deployed); [learned-skills.md](docs/learned-skills.md): the two navigation skills in detail |
 | `hardware/platform` | 3D-printed platform: STLs, fit tests and the Python generator |
 
@@ -42,9 +42,11 @@ TF: `map → odom → base_link → camera_link` (camera mount: x 0.135 m, z 0.1
 - Jetson Orin Nano Super 8 GB, ROS 2 Jazzy
 - MYNT EYE D1000 stereo camera (USB)
 - FT232 USB-TTL adapter set to **5 V** on the Roomba mini-DIN (the Jetson header UART with a BSS138 shifter was unreliable)
-- Power: Ridgid 18 V Li-ion pack → 7.5 A fuse → 15 V / 12 A buck regulator → Roomba battery contacts and Jetson.
-  See [`docs/battery-voltage-monitor.png`](docs/battery-voltage-monitor.png) for the ADS1115 pack-voltage monitor.
-  **Do not dock or plug in the Roomba charger while running from the Ridgid pack.**
+- Power: an 18 V Li-ion tool pack (Ryobi, 5 cells, 4-bar fuel gauge) wired straight to the Roomba's battery
+  contacts, so the Roomba's own voltage and current sensors measure the pack (see [Battery gauge](#battery-gauge));
+  the Jetson runs from a separate pack. The wiring diagram below shows the earlier setup (one pack through a
+  15 V regulator for both). See [`docs/battery-voltage-monitor.png`](docs/battery-voltage-monitor.png) for the ADS1115 pack-voltage monitor.
+  **Do not dock or plug in the Roomba charger while running from the tool pack.**
 - 3D-printed platform: STLs and generator in [`hardware/platform/`](hardware/platform/)
 
 System wiring (power, camera and serial), [`docs/system-wiring.png`](docs/system-wiring.png):
@@ -118,6 +120,70 @@ each node gets SIGINT, then if still running SIGTERM 5 s later and SIGKILL only 
 (`sigkill_timeout:=`), so RTAB-Map can finish writing its map database.
 The web login password is generated on first run and stored in `~/.config/roomba_web/initial_password`;
 change it with `ros2 run roomba_web set_password` (or `ros2 run roomba_rs set_password`; same file).
+
+### Battery gauge
+
+The Roomba runs straight off an 18 V tool pack (5 Li-ion cells, a 4-bar fuel gauge), so the charge figures
+the Roomba reports are made up. `battery_learner` (`src/roomba_rs`, started by `robot.launch.py`;
+`battery_learner:=true` is the default) learns the pack from the Roomba's own voltage and current readings
+(`/roomba/sensors`) and publishes `/battery_state`, which the explorer (`low_battery_fraction`, 0.2) and the
+web app read. With it, the driver's own estimate (the pack voltage on a stock Li-ion curve) moves to
+`/roomba/battery_raw`; `battery_learner:=false` puts the driver's `/battery_state` back as before.
+
+**Swap the pack when its gauge shows 1 bar, for a full one.** That is all the learner needs:
+
+- **Swaps are detected.** With the pack out the Roomba has no power: its sensor data stops, then comes back
+  at least 0.4 V higher (open-circuit voltage: the reading plus current × 0.2 Ω). That is a new pack, and it
+  starts at 100 %. A pack that reads part-charged on the learned curve starts from its voltage instead. A gap
+  without a jump (a driver restart, a stream stall) is the same pack. A swap while the Jetson was off is
+  caught at start-up, against the voltage saved last time.
+- **Coulomb counting.** The charge is 100 % minus the mAh drawn since the swap over the learned capacity.
+- **Learning at each swap.** The pack that came out was at 1 bar, taken as `one_bar_fraction` (15 %), so a
+  pack that went in full measured capacity = mAh used / 0.85. The estimates are averaged. The prior
+  (`capacity_mah`, 2000) weighs 0.2 and a pack that started from its voltage 0.3. With 3 or more estimates,
+  those more than 30 % from the median are rejected. The pack's voltage samples, labelled linearly in mAh
+  between its two anchors (100 % and 15 %), are merged with earlier packs into a voltage → charge curve.
+  The curve is fitted with isotonic regression (monotone) over the stock Li-ion curve, which is shifted
+  onto the data and fills in where there is none.
+- **Voltage.** The curve gives the charge where the counter has no anchor (first run, a part-charged
+  pack). While the robot draws under 0.8 A, it pulls the count gently towards the curve: with a time
+  constant of 2 h for a pack that went in full, and 20 min for one that started from its voltage.
+- **First run.** The pack in the robot read 18.29 V with its gauge at 3 bars. 3 bars is 50-75 %, taken as
+  62 % (`seed_voltage`, `seed_fraction`). The stock curve called that 18 %, so until the swaps teach the
+  real curve, it is shifted by +1.03 V to pass through that point. This assumes the whole curve is off by
+  the same voltage (the Roomba reading the pack low, or generous bars). The pack in the robot starts from
+  its voltage on that curve, and the first swap at 1 bar starts the learning.
+
+Settings are in `src/roomba_bringup/config/battery_learner_robot.yaml` (all parameters:
+`src/roomba_rs/src/battery_learner.rs`, `Params`). `one_bar_fraction` is the charge at which you swap: if
+you swap at a different point (e.g. 2 bars, 0.4), change it before that swap. The seed applies only when
+there is no state file yet.
+
+The control page's **new pack** button, or by hand:
+
+```bash
+ros2 service call /battery_learner/pack_swapped std_srvs/srv/Trigger   # a full pack is in now
+```
+
+It sets the pack in the robot to 100 %. Called within 10 min of a detected swap, it only confirms it (it
+marks that pack full if its voltage made it start lower). Otherwise it starts a new pack but learns nothing
+from the old one: without a detected swap, there is no telling that the old pack was at 1 bar.
+
+Files, in `~/.local/state/roomba/`:
+
+- `battery_learner.json` holds the pack in use (charge, mAh used, how its start is known, its discharge
+  samples by voltage) and the last 60 packs (when and how each came out, mAh used, capacity estimate, its
+  labelled curve points). It also holds the learned capacity and the curve offset. It is written atomically
+  (a temporary file renamed over it) every 30 s, at each swap and at shutdown, so it survives restarts and
+  reboots. Delete it to start over (the seed applies again).
+- `battery_pack_NNNN.csv` logs each pack's discharge, a line every 10 s, for refitting the curve offline:
+  `unix_time,pack,voltage_v,current_a,ocv_v,used_mah,soc,soc_voltage,anchor`. `soc` is the published charge;
+  `soc_voltage` is the curve's.
+
+Swaps, capacity estimates and the learned capacity are logged at INFO (`~/robot.log`).
+`/battery_state` also carries `capacity` (learned Ah), `charge` and `serial_number` (`pack N`). Tests:
+`cargo test --lib battery_learner` in `src/roomba_rs`, and `tools/battery_learner_replay.py`, which runs the
+node in ROS domain 79 against a simulated pack through whole discharges, swaps, restarts and the service.
 
 ### Position markers
 
