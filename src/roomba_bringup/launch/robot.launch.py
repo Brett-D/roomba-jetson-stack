@@ -36,7 +36,7 @@ import os
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, LogInfo, OpaqueFunction
-from launch.conditions import IfCondition
+from launch.conditions import IfCondition, evaluate_condition_expression
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution, PythonExpression
 from launch_ros.actions import Node, SetParameter
@@ -61,17 +61,29 @@ def _check_args(context):
 
 
 def _driver(context):
+    """The Roomba driver and, with battery_learner, the learner that takes over /battery_state.
+    driver and battery_learner are read like IfCondition reads them (true/false/1/0, any case) and
+    decided here together, so the driver's battery remap and the learner can't disagree."""
     lc = LaunchConfiguration
+    if not evaluate_condition_expression(context, [lc('driver')]):
+        return []
+    learner = evaluate_condition_expression(context, [lc('battery_learner')])
     rust = lc('rust_nodes').perform(context) == 'true'
-    # With the battery learner, the driver's own (voltage-curve) estimate goes to roomba/battery_raw.
-    learner = lc('battery_learner').perform(context) == 'true'
-    return [Node(
+    actions = [Node(
         package='roomba_driver_rs' if rust else 'roomba_driver',
         executable='roomba_driver', name='roomba_driver', output='screen',
         parameters=[lc('driver_params')],
+        # With the battery learner, the driver's own (voltage-curve) estimate goes to roomba/battery_raw.
         remappings=[('battery_state', 'roomba/battery_raw')] if learner else [],
-        condition=IfCondition(lc('driver')),
     )]
+    if learner:
+        # Learns the 18 V pack's capacity and voltage curve from the swaps (README "Battery gauge"):
+        # /battery_state for the explorer and the web app, service /battery_learner/pack_swapped.
+        actions.append(Node(
+            package='roomba_rs', executable='battery_learner', name='battery_learner', output='screen',
+            parameters=[lc('battery_learner_params')],
+        ))
+    return actions
 
 
 def generate_launch_description():
@@ -161,17 +173,9 @@ def generate_launch_description():
     )
 
     # Rust driver (roomba_driver_rs, in the roomba-serial-ros2 submodule): same topics, services,
-    # parameters and serial bytes as the Python roomba_driver, ~1/10 of the CPU.
+    # parameters and serial bytes as the Python roomba_driver, ~1/10 of the CPU. With
+    # battery_learner:=true (default) also the battery learner (see _driver).
     driver = OpaqueFunction(function=_driver)
-
-    # Learns the 18 V pack's capacity and voltage curve from the swaps (README "Battery gauge"):
-    # /battery_state for the explorer and the web app, service /battery_learner/pack_swapped.
-    battery_learner = Node(
-        package='roomba_rs', executable='battery_learner', name='battery_learner', output='screen',
-        parameters=[lc('battery_learner_params')],
-        condition=IfCondition(PythonExpression(
-            ["'", lc('driver'), "' == 'true' and '", lc('battery_learner'), "' == 'true'"])),
-    )
 
     # Event sounds (sounds:=true): "hello" when the driver first reports Safe/Full mode, "uh-oh" on a
     # bumper hit, a jingle when an exploration run finishes. Rust only, but it just uses the driver's
@@ -212,4 +216,4 @@ def generate_launch_description():
 
     sim_time = SetParameter(name='use_sim_time', value=ParameterValue(lc('use_sim_time'), value_type=bool))
     return LaunchDescription(args + [OpaqueFunction(function=_check_args), sim_time,
-                                     mount, vslam, driver, battery_learner, sounds, nvblox, nav])
+                                     mount, vslam, driver, sounds, nvblox, nav])

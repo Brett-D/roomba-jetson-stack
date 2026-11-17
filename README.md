@@ -182,8 +182,9 @@ Files, in `~/.local/state/roomba/`:
 
 Swaps, capacity estimates and the learned capacity are logged at INFO (`~/robot.log`).
 `/battery_state` also carries `capacity` (learned Ah), `charge` and `serial_number` (`pack N`). Tests:
-`cargo test --lib battery_learner` in `src/roomba_rs`, and `tools/battery_learner_replay.py`, which runs the
-node in ROS domain 79 against a simulated pack through whole discharges, swaps, restarts and the service.
+`cargo test --lib battery_learner` in `src/roomba_rs`; `python3 -m pytest src/roomba_bringup/test` (which nodes
+`robot.launch.py` starts for each `driver` / `battery_learner` value); and `tools/battery_learner_replay.py`, which
+runs the node in ROS domain 79 against a simulated pack through whole discharges, swaps, restarts and the service.
 
 ### Position markers
 
