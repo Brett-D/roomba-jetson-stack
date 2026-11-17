@@ -58,11 +58,13 @@ def real(model, people, railing, files, name, crops):
     alarm_frames, alarms, rail_frames, rails, near = [], 0, 0, 0, 0
     for f in files:
         bgr = cv2.imread(f)
-        dets = model.detect(bgr)
+        # One inference: the 0.25 result filtered at model.conf equals a run at model.conf (NMS keeps
+        # boxes in score order, so the weaker boxes in between never suppress a stronger one).
+        low = model.detect(bgr, conf=0.25)
+        dets = [d for d in low if d[4] > model.conf]
         pd = [d for d in dets if d[5] in people]
         rd = [d for d in dets if railing is not None and d[5] == railing]
-        low = [d for d in model.detect(bgr, conf=0.25) if d[5] in people]
-        near += bool(low)
+        near += any(d[5] in people for d in low)
         rails += len(rd)
         rail_frames += bool(rd)
         if pd:
