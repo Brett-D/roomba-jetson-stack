@@ -662,6 +662,10 @@ impl Learner {
                     let change = before.map_or(String::new(), |b| format!(", {:+.2} V", m - b));
                     out.logs.push(format!("sensor data back after {gap_s:.0} s{change}: same pack"));
                 }
+                if !self.state.pack.start_ocv.is_finite() {
+                    // A pack started by the manual reset gets its first settled voltage.
+                    self.state.pack.start_ocv = m;
+                }
             }
         }
     }
@@ -703,15 +707,14 @@ impl Learner {
             message = format!("pack {} (swap detected {since:.0} s ago) is marked full: {}", pack.id, pct(pack.soc));
         } else {
             self.finish_pack(How::Manual, unix, &mut out);
-            let ocv = self.ocv.unwrap_or(f64::NAN);
             let id = self.state.pack.id + 1;
-            self.state.pack = Pack::new(id, unix, Anchor::Full, 1.0, ocv);
+            // Its voltage comes from the next settled readings.
+            self.state.pack = Pack::new(id, unix, Anchor::Full, 1.0, f64::NAN);
             message = format!("new pack {id} at 100 %");
             self.fresh = false;
-            // Data settling after a gap or at start-up must not swap again.
-            if let Some(p) = &mut self.pending {
-                p.kind = Kind::Gap { before: None, gap_s: 0.0 };
-            }
+            // The next readings settle the voltage without a swap check: the button may come while
+            // the pack is out, and the new pack's voltage jump must not count as another swap.
+            self.pending = Some(Pending { kind: Kind::Gap { before: None, gap_s: 0.0 }, readings: Vec::new() });
             self.rest_since = None;
         }
         self.last_detected_swap = None;
@@ -1231,6 +1234,26 @@ mod tests {
         assert_eq!(samples, 3);
         assert_eq!(l.state.pack.id, 1);
         assert_eq!(logs, ["sensor stamps went back 3599 s (clock step): same pack"]);
+    }
+
+    #[test]
+    fn manual_reset_while_the_pack_is_out() {
+        let mut t = 0.0;
+        let mut sim = Sim { offset: 0.0, capacity: 2000.0, soc: 0.3, r: 0.2 };
+        let (mut l, _) = started(None, &sim, &mut t);
+        run(&mut l, &mut sim, &mut t, 60.0, -400.0);
+        // The pack is pulled (no frames), the button pressed, then a full pack goes in: the jump
+        // back to data is that same swap, not another one.
+        t += 30.0;
+        let (reply, _) = l.manual_swap(t);
+        assert!(reply.starts_with("new pack 2 at 100 %"), "{reply}");
+        t += 30.0;
+        sim.soc = 1.0;
+        let logs = run(&mut l, &mut sim, &mut t, 10.0, -200.0);
+        assert!(!logs.iter().any(|m| m.starts_with("new pack")), "{logs:?}");
+        assert_eq!((l.state.pack.id, l.state.pack.anchor, l.state.history.len()), (2, Anchor::Full, 1));
+        assert!(l.estimate().unwrap().soc > 0.99);
+        assert!((l.state.pack.start_ocv - 21.0).abs() < 0.01, "{}", l.state.pack.start_ocv);
     }
 
     #[test]
