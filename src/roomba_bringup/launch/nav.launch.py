@@ -27,7 +27,10 @@ NAV_NODES = ['controller_server', 'planner_server', 'behavior_server', 'bt_navig
 
 def _unstuck_skill(context):
     """The unstuck_skill node with the light-bumper calibration (unstuck_params), or a warning when
-    roomba_rs was built without LEARNED_SKILLS (the explorer then carries on without the skill)."""
+    roomba_rs was built without LEARNED_SKILLS (the explorer then carries on without the skill). Robot
+    mode only, like the explorer that calls it (both booleans as IfCondition reads them: true/True/1)."""
+    if not IfCondition(LaunchConfiguration('robot_mode')).evaluate(context):
+        return []
     try:
         prefix = get_package_prefix('roomba_rs')
     except PackageNotFoundError:
@@ -194,8 +197,6 @@ def generate_launch_description():
         # Learned unstuck skill (robot only: the explorer calls it): drives through cmd_vel_nav, so the
         # smoother, the collision monitor and the driver's reflexes stay in charge; respawned if its
         # watchdog fires.
-        OpaqueFunction(function=_unstuck_skill, condition=IfCondition(PythonExpression([
-            "'", LaunchConfiguration('unstuck_skill'), "' == 'true' and '", LaunchConfiguration('robot_mode'),
-            "' == 'true'"]))),
+        OpaqueFunction(function=_unstuck_skill, condition=IfCondition(LaunchConfiguration('unstuck_skill'))),
     ]
     return LaunchDescription(args + nodes)
