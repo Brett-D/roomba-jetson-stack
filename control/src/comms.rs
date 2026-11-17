@@ -316,13 +316,13 @@ pub fn echo_value(output: &str) -> Option<String> {
 
 /// The robot stack is running: ask the driver over ROS (both topics at once, `timeout_s` each).
 pub fn ros_check(ros_setup: &str, timeout_s: u64) -> Outcome {
-    let echo = |field: &str, topic: &str| {
-        format!("{ros_setup} && exec timeout {timeout_s} ros2 topic echo --once --field {field} {topic}")
+    let echo = |field: &str, topic: &str, qos: &str| {
+        format!("{ros_setup} && exec timeout {timeout_s} ros2 topic echo --once {qos}--field {field} {topic}")
     };
     let wait = Duration::from_secs(timeout_s + 20);
-    let mode_cmd = echo("data", "/roomba/mode");
+    let mode_cmd = echo("data", "/roomba/mode", "--qos-durability transient_local --qos-reliability reliable ");
     let mode = std::thread::spawn(move || cmd::run(&mode_cmd, wait));
-    let battery = cmd::run(&echo("voltage", "/battery_state"), wait);
+    let battery = cmd::run(&echo("voltage", "/battery_state", ""), wait);
     let mode = mode.join().ok().and_then(|r| echo_value(&r.output));
     ros_outcome(mode.as_deref(), echo_value(&battery.output).and_then(|v| v.parse::<f64>().ok()), timeout_s)
 }

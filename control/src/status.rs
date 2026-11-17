@@ -115,6 +115,8 @@ pub fn host_name(host: &str) -> &str {
 
 pub fn status(app: &App, host: Option<&str>) -> Value {
     let cfg = &app.cfg;
+    let ros_unavailable = crate::ros::unavailable(app);
+    let driver = !robot::drivers(app).is_empty();
     let launches = robot::launches(app);
     let port = app.port_config();
     let port_present = port.port.exists();
@@ -170,6 +172,17 @@ pub fn status(app: &App, host: Option<&str>) -> Value {
             "result": ctl.link.as_ref().map(|r| json!({
                 "link": r.link.as_str(), "message": r.message, "via": via(r.via), "ago_s": now.duration_since(r.at).as_secs(),
             })),
+        },
+        "sound": {"muted": cfg.sound_mute_file.exists()},
+        "ros": {"driver": driver, "mode": ctl.ros.mode.clone(), "available": ros_unavailable.is_none(), "reason": ros_unavailable},
+        "vacuum": {
+            "armed": ctl.ros.armed,
+            "pending": ctl.ros.vac_pending.map(|on| if on { "arm" } else { "disarm" }),
+            "note": ctl.ros.vac_note.as_ref().map(|(ok, m, t)| json!({"ok": ok, "message": m, "ago_s": now.duration_since(*t).as_secs()})),
+        },
+        "tones": {
+            "pending": ctl.ros.tone_pending,
+            "last": ctl.ros.tone_last.as_ref().map(|(k, ok, m, t)| json!({"key": k, "ok": ok, "message": m, "ago_s": now.duration_since(*t).as_secs()})),
         },
         "camera": usb_present(&cfg.camera_usb.0, &cfg.camera_usb.1),
         "cpu_temp_c": cpu_temp_c(),

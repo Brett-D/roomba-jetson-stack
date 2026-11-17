@@ -50,7 +50,7 @@ echo "== lingering for $USER_NAME"
 sudo loginctl enable-linger "$USER_NAME"
 
 # The robot started from the page gets the resource limits of an SSH login (this shell's).
-lim() { [ "$1" = unlimited ] && echo infinity || echo "$1$2"; }
+lim() { [ "$1" = unlimited ] && echo infinity || echo "$1${2:-}"; }
 NOFILE="$(lim "$(ulimit -Sn)"):$(lim "$(ulimit -Hn)")"
 MEMLOCK="$(lim "$(ulimit -Sl)" K):$(lim "$(ulimit -Hl)" K)"
 RTPRIO="$(lim "$(ulimit -Sr)"):$(lim "$(ulimit -Hr)")"
@@ -77,7 +77,7 @@ LimitNOFILE=$NOFILE
 LimitMEMLOCK=$MEMLOCK
 LimitRTPRIO=$RTPRIO
 TasksMax=infinity
-ExecStart=$BIN --listen 0.0.0.0:$PORT --robot-ws "$WS"
+ExecStart=$BIN --listen [::]:$PORT --robot-ws "$WS"
 # Port $PORT as a normal user (the page drops this for everything it starts).
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 # The robot lives in this unit's cgroup: stopping or restarting the page must not stop it, and a

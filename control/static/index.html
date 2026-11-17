@@ -29,100 +29,147 @@
   </header>
 
   <main class="layout">
-    <div class="col">
-      <section class="panel master" aria-labelledby="master-h">
-        <h2 id="master-h" class="panel-label stencil">MASTER</h2>
-        <div class="controls">
-          <!-- ROBOT PWR: up = robot running; the lever only moves when the server reports it -->
-          <div class="ctl">
-            <span class="pos stencil" aria-hidden="true">ON</span>
-            <button id="pwr" class="toggle" role="switch" aria-checked="false" aria-describedby="pwr-state" type="button">
-              <span class="sr-only">Robot power</span>
+    <section class="panel master area-master" aria-labelledby="master-h">
+      <h2 id="master-h" class="panel-label stencil">MASTER</h2>
+      <div class="controls">
+        <!-- ROBOT PWR: up = robot running; the lever only moves when the server reports it -->
+        <div class="ctl">
+          <span class="pos stencil" aria-hidden="true">ON</span>
+          <button id="pwr" class="toggle" role="switch" aria-checked="false" aria-describedby="pwr-state" type="button">
+            <span class="sr-only">Robot power</span>
+            <span class="nut" aria-hidden="true"></span><span class="lever" aria-hidden="true"></span>
+          </button>
+          <span class="pos stencil" aria-hidden="true">OFF</span>
+          <span class="plate stencil">ROBOT PWR</span>
+          <span id="pwr-state" class="sr-only">Stopped</span>
+          <div class="mini-lamps" aria-hidden="true">
+            <span id="l-run" class="mini">RUN</span>
+            <span id="l-xfer" class="mini">START</span>
+            <span id="l-save" class="mini">SAVING MAP</span>
+          </div>
+        </div>
+
+        <!-- COMMS CHECK: momentary -->
+        <div class="ctl">
+          <span class="pos stencil" aria-hidden="true">PUSH</span>
+          <button id="comms" class="pushbtn" type="button" aria-describedby="comms-state">
+            <span class="cap" data-legend="TEST" aria-hidden="true"></span>
+            <span class="sr-only">Comms check: test the Jetson to Roomba serial link</span>
+          </button>
+          <span class="pos stencil" aria-hidden="true">&nbsp;</span>
+          <span class="plate stencil">COMMS CHECK</span>
+          <span id="comms-state" class="sr-only"></span>
+          <div class="mini-lamps" aria-hidden="true">
+            <span id="l-link" class="mini">LINK</span>
+          </div>
+        </div>
+
+        <!-- VACUUM ARMED: lift the yellow guard, flip up; closing the guard switches it off -->
+        <div class="ctl has-guard">
+          <span class="pos stencil" aria-hidden="true">ARM</span>
+          <div class="guarded" id="vac-guarded">
+            <button id="vac" class="toggle" role="switch" aria-checked="false" aria-describedby="vac-state" type="button" disabled>
+              <span class="sr-only">Vacuum armed: vacuum, main brush and side brush</span>
               <span class="nut" aria-hidden="true"></span><span class="lever" aria-hidden="true"></span>
             </button>
-            <span class="pos stencil" aria-hidden="true">OFF</span>
-            <span class="plate stencil">ROBOT PWR</span>
-            <span id="pwr-state" class="sr-only">Stopped</span>
-            <div class="mini-lamps" aria-hidden="true">
-              <span id="l-run" class="mini">RUN</span>
-              <span id="l-xfer" class="mini">START</span>
-              <span id="l-save" class="mini">SAVING MAP</span>
-            </div>
-          </div>
-
-          <!-- COMMS CHECK: momentary -->
-          <div class="ctl">
-            <span class="pos stencil" aria-hidden="true">PUSH</span>
-            <button id="comms" class="pushbtn" type="button" aria-describedby="comms-state">
-              <span class="cap" aria-hidden="true"></span>
-              <span class="sr-only">Comms check: test the Jetson to Roomba serial link</span>
+            <button id="vac-guard" class="guard yellow" type="button" aria-expanded="false" aria-controls="vac">
+              <span class="guard-text stencil">LIFT</span>
+              <span class="sr-only">Lift the guard of the vacuum switch</span>
             </button>
-            <span class="pos stencil" aria-hidden="true">&nbsp;</span>
-            <span class="plate stencil">COMMS CHECK</span>
-            <span id="comms-state" class="sr-only"></span>
-            <div class="mini-lamps" aria-hidden="true">
-              <span id="l-link" class="mini">LINK</span>
-            </div>
           </div>
-
-          <!-- JETSON SHUTDOWN: lift the guard, flip the switch, confirm -->
-          <div class="ctl">
-            <span class="pos stencil" aria-hidden="true">ON</span>
-            <div class="guarded" id="guarded">
-              <button id="sd" class="toggle danger" role="switch" aria-checked="true" aria-describedby="sd-state" type="button" disabled>
-                <span class="sr-only">Jetson power: flip to shut down</span>
-                <span class="nut" aria-hidden="true"></span><span class="lever" aria-hidden="true"></span>
-              </button>
-              <button id="guard" class="guard" type="button" aria-expanded="false" aria-controls="sd">
-                <span class="guard-text stencil">LIFT</span>
-                <span class="sr-only">Lift the guard of the Jetson shutdown switch</span>
-              </button>
-            </div>
-            <span class="pos stencil" aria-hidden="true">OFF</span>
-            <span class="plate stencil plate-red">JETSON SHUTDOWN</span>
-            <span id="sd-state" class="sr-only">Guard closed</span>
-            <div class="mini-lamps" aria-hidden="true">
-              <span id="l-pwr" class="mini">PWR</span>
-            </div>
+          <span class="pos stencil" aria-hidden="true">OFF</span>
+          <span class="plate stencil plate-yellow">VACUUM ARMED</span>
+          <span id="vac-state" class="sr-only">Off</span>
+          <div class="mini-lamps" aria-hidden="true">
+            <span id="l-vac" class="mini">ARMED</span>
           </div>
         </div>
-        <p id="msg" class="readout mono" role="status" aria-live="polite">&nbsp;</p>
-        <p id="comms-msg" class="readout mono small" aria-live="polite">COMMS: PRESS TO TEST THE ROOMBA LINK</p>
-        <p class="note stencil">PWR ON IS PHYSICAL: APPLY POWER, THE JETSON BOOTS AND THIS PAGE RETURNS BY ITSELF</p>
-      </section>
 
-      <section class="panel" aria-labelledby="ann-h">
-        <h2 id="ann-h" class="panel-label stencil">CAUTION / ADVISORY</h2>
-        <ul class="annunciators" id="ann">
-          <li id="a-stack" class="ann"><span class="ann-name">STACK</span><span class="ann-val mono">—</span></li>
-          <li id="a-link" class="ann"><span class="ann-name">ROOMBA LINK</span><span class="ann-val mono">—</span></li>
-          <li id="a-cam" class="ann"><span class="ann-name">CAMERA</span><span class="ann-val mono">—</span></li>
-          <li id="a-temp" class="ann"><span class="ann-name">TEMP</span><span class="ann-val mono">—</span></li>
-          <li id="a-wifi" class="ann"><span class="ann-name">WIFI</span><span class="ann-val mono">—</span></li>
-          <li id="a-disk" class="ann"><span class="ann-name">DISK</span><span class="ann-val mono">—</span></li>
-        </ul>
-      </section>
-
-      <section class="panel" aria-labelledby="log-h">
-        <h2 id="log-h" class="panel-label stencil">MFD 1 <span class="dim">·</span> ROBOT LOG <span id="log-age" class="mono dim small"></span></h2>
-        <div class="bezel">
-          <pre id="log" class="mfd mono" tabindex="0" aria-label="Last lines of the robot log">NO DATA</pre>
+        <!-- JETSON SHUTDOWN: lift the guard, flip the switch, confirm -->
+        <div class="ctl has-guard">
+          <span class="pos stencil" aria-hidden="true">ON</span>
+          <div class="guarded" id="guarded">
+            <button id="sd" class="toggle danger" role="switch" aria-checked="true" aria-describedby="sd-state" type="button" disabled>
+              <span class="sr-only">Jetson power: flip to shut down</span>
+              <span class="nut" aria-hidden="true"></span><span class="lever" aria-hidden="true"></span>
+            </button>
+            <button id="guard" class="guard" type="button" aria-expanded="false" aria-controls="sd">
+              <span class="guard-text stencil">LIFT</span>
+              <span class="sr-only">Lift the guard of the Jetson shutdown switch</span>
+            </button>
+          </div>
+          <span class="pos stencil" aria-hidden="true">OFF</span>
+          <span class="plate stencil plate-red">JETSON SHUTDOWN</span>
+          <span id="sd-state" class="sr-only">Guard closed</span>
+          <div class="mini-lamps" aria-hidden="true">
+            <span id="l-pwr" class="mini">PWR</span>
+          </div>
         </div>
-      </section>
-    </div>
+      </div>
+      <p id="msg" class="readout mono" role="status" aria-live="polite">&nbsp;</p>
+      <p id="comms-msg" class="readout mono small" aria-live="polite">COMMS: PRESS TEST TO CHECK THE ROOMBA LINK</p>
+      <p id="vac-msg" class="readout mono small" aria-live="polite">VACUUM: OFF</p>
+      <p class="note stencil">PWR ON IS PHYSICAL: APPLY POWER, THE JETSON BOOTS AND THIS PAGE RETURNS BY ITSELF</p>
+    </section>
 
-    <div class="col">
-      <section class="panel" aria-labelledby="disp-h">
-        <h2 id="disp-h" class="panel-label stencil">MFD 2 <span class="dim">·</span> ROBOT PAGE</h2>
-        <div class="bezel display">
-          <span class="screw tl" aria-hidden="true"></span><span class="screw tr" aria-hidden="true"></span>
-          <span class="screw bl" aria-hidden="true"></span><span class="screw br" aria-hidden="true"></span>
-          <div id="nosignal" class="nosignal mono">NO SIGNAL<br><span class="small">THE ROBOT PAGE APPEARS HERE WHILE THE ROBOT RUNS</span></div>
-          <iframe id="frame" title="Robot web page" hidden></iframe>
+    <section class="panel area-sound" aria-labelledby="sound-h">
+      <h2 id="sound-h" class="panel-label stencil">SOUND</h2>
+      <div class="sound-row">
+        <!-- AUTO SOUND: down = ~/.config/roomba/sound_muted exists (sound_events stays silent) -->
+        <div class="ctl auto-ctl">
+          <span class="pos stencil" aria-hidden="true">ON</span>
+          <button id="snd" class="toggle" role="switch" aria-checked="true" aria-describedby="snd-state" type="button">
+            <span class="sr-only">Automatic sounds</span>
+            <span class="nut" aria-hidden="true"></span><span class="lever" aria-hidden="true"></span>
+          </button>
+          <span class="pos stencil" aria-hidden="true">MUTE</span>
+          <span class="plate stencil">AUTO SOUND</span>
+          <span id="snd-state" class="sr-only">On</span>
+          <div class="mini-lamps" aria-hidden="true"><span id="l-snd" class="mini">MUTED</span></div>
         </div>
-        <p class="bezel-row"><a id="open" class="plate-btn" target="_blank" rel="noopener">OPEN ROBOT PAGE ↗</a></p>
-      </section>
-    </div>
+        <!-- Momentary tone buttons: each press defines and plays its song on the Roomba -->
+        <div class="tones" role="group" aria-label="Play a sound on the Roomba" aria-describedby="tone-msg">
+          <button class="pushbtn tone" type="button" data-tone="ow"><span class="cap" data-legend="OW" aria-hidden="true"></span><span class="sr-only">Play OW</span></button>
+          <button class="pushbtn tone" type="button" data-tone="armed"><span class="cap" data-legend="ARMED" aria-hidden="true"></span><span class="sr-only">Play ARMED</span></button>
+          <button class="pushbtn tone" type="button" data-tone="chatter"><span class="cap" data-legend="CHATTER" aria-hidden="true"></span><span class="sr-only">Play CHATTER</span></button>
+          <button class="pushbtn tone" type="button" data-tone="hello"><span class="cap" data-legend="HELLO" aria-hidden="true"></span><span class="sr-only">Play HELLO</span></button>
+          <button class="pushbtn tone" type="button" data-tone="uhoh"><span class="cap" data-legend="UH-OH" aria-hidden="true"></span><span class="sr-only">Play UH-OH</span></button>
+        </div>
+      </div>
+      <p id="tone-msg" class="readout mono small" aria-live="polite">&nbsp;</p>
+    </section>
+
+    <section class="panel area-ann" aria-labelledby="ann-h">
+      <h2 id="ann-h" class="panel-label stencil">CAUTION / ADVISORY</h2>
+      <ul class="annunciators" id="ann">
+        <li id="a-stack" class="ann"><span class="ann-name">STACK</span><span class="ann-val mono">—</span></li>
+        <li id="a-link" class="ann"><span class="ann-name">ROOMBA LINK</span><span class="ann-val mono">—</span></li>
+        <li id="a-mode" class="ann"><span class="ann-name">OI MODE</span><span class="ann-val mono">—</span></li>
+        <li id="a-vac" class="ann"><span class="ann-name">VACUUM</span><span class="ann-val mono">—</span></li>
+        <li id="a-cam" class="ann"><span class="ann-name">CAMERA</span><span class="ann-val mono">—</span></li>
+        <li id="a-temp" class="ann"><span class="ann-name">TEMP</span><span class="ann-val mono">—</span></li>
+        <li id="a-wifi" class="ann"><span class="ann-name">WIFI</span><span class="ann-val mono">—</span></li>
+        <li id="a-disk" class="ann"><span class="ann-name">DISK</span><span class="ann-val mono">—</span></li>
+      </ul>
+    </section>
+
+    <section class="panel area-disp" aria-labelledby="disp-h">
+      <h2 id="disp-h" class="panel-label stencil">MFD 2 <span class="dim">·</span> CAMERA <span class="dim">·</span> MAP <span class="dim">·</span> DEPTH</h2>
+      <div class="bezel display">
+        <span class="screw tl" aria-hidden="true"></span><span class="screw tr" aria-hidden="true"></span>
+        <span class="screw bl" aria-hidden="true"></span><span class="screw br" aria-hidden="true"></span>
+        <div id="nosignal" class="nosignal mono">NO SIGNAL<br><span class="small">CAMERA, MAP AND DEPTH APPEAR HERE WHILE THE ROBOT RUNS</span></div>
+        <iframe id="frame" name="roomba-mfd" title="Robot camera, map and depth views" hidden></iframe>
+      </div>
+      <p class="bezel-row"><a id="open" class="plate-btn" target="_blank" rel="noopener">OPEN ROBOT PAGE ↗</a></p>
+    </section>
+
+    <section class="panel area-log" aria-labelledby="log-h">
+      <h2 id="log-h" class="panel-label stencil">MFD 1 <span class="dim">·</span> ROBOT LOG <span id="log-age" class="mono dim small"></span></h2>
+      <div class="bezel">
+        <pre id="log" class="mfd mono" tabindex="0" aria-label="Last lines of the robot log">NO DATA</pre>
+      </div>
+    </section>
   </main>
 
   <dialog id="confirm" aria-labelledby="confirm-h">

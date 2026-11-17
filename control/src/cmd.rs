@@ -97,6 +97,26 @@ pub fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 
+/// `bash -lc <cmd>` left running with its stdout piped (stderr dropped), like `run` otherwise.
+pub fn spawn_piped(cmd: &str) -> std::io::Result<std::process::Child> {
+    let mut command = Command::new("bash");
+    command.arg("-lc").arg(cmd).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
+    if let Some(home) = std::env::var_os("HOME") {
+        command.current_dir(home);
+    }
+    // SAFETY: as in `run`; PR_SET_PDEATHSIG only concerns this (child) process.
+    unsafe {
+        command.pre_exec(|| {
+            libc::prctl(libc::PR_CAP_AMBIENT, libc::PR_CAP_AMBIENT_CLEAR_ALL as libc::c_ulong, 0, 0, 0);
+            // A monitor must not outlive the page (systemd's KillMode=process leaves children).
+            // SIGKILL: rclpy turns SIGTERM into a shutdown that ros2 topic echo can sit through.
+            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL as libc::c_ulong, 0, 0, 0);
+            Ok(())
+        });
+    }
+    command.spawn()
+}
+
 pub struct Proc {
     pub pid: i32,
     pub uid: u32,

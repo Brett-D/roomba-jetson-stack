@@ -69,11 +69,12 @@ pub struct Ctl {
     pub power: Power,
     pub checking: Option<(CheckVia, Instant)>,
     pub link: Option<LinkResult>,
+    pub ros: crate::ros::RosState,
 }
 
 impl Default for Ctl {
     fn default() -> Self {
-        Ctl { busy: None, last: None, power: Power::On, checking: None, link: None }
+        Ctl { busy: None, last: None, power: Power::On, checking: None, link: None, ros: Default::default() }
     }
 }
 
@@ -235,6 +236,10 @@ pub fn request_stop(app: &Arc<App>) -> Result<String, String> {
 fn stop_robot(app: &Arc<App>) -> (bool, String) {
     let cfg = &app.cfg;
     let t0 = Instant::now();
+    if !drivers(app).is_empty() {
+        set_phase(app, "Vacuum and brushes off, then stopping…", true);
+        crate::ros::vacuum_off_before_stop(app);
+    }
     let first = launches(app);
     let mut clean = false;
     if let Some(pid) = first.ours {
@@ -323,6 +328,27 @@ fn power_off(app: &Arc<App>, stop_message: &str) {
     } else {
         lock(app).power = Power::On;
         finish(app, false, format!("Power-off failed: {}", r.last_line()));
+    }
+}
+
+/// SOUND switch: the sound_events node checks for the mute file live, so creating or removing it
+/// is all there is to do.
+pub fn set_sound(app: &App, muted: bool) -> Result<String, String> {
+    let file = &app.cfg.sound_mute_file;
+    if muted {
+        if let Some(dir) = file.parent() {
+            std::fs::create_dir_all(dir).map_err(|e| format!("Cannot create {}: {e}", dir.display()))?;
+        }
+        std::fs::OpenOptions::new().create(true).append(true).open(file).map_err(|e| format!("Cannot create {}: {e}", file.display()))?;
+        eprintln!("sound muted ({})", file.display());
+        Ok("Sound muted.".into())
+    } else {
+        match std::fs::remove_file(file) {
+            Ok(()) => eprintln!("sound on (removed {})", file.display()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("Cannot remove {}: {e}", file.display())),
+        }
+        Ok("Sound on.".into())
     }
 }
 

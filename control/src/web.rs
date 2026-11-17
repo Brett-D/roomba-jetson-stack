@@ -11,6 +11,7 @@ use tiny_http::{Header, Request, Response};
 
 use crate::auth::{self, COOKIE};
 use crate::robot;
+use crate::ros;
 use crate::status;
 use crate::App;
 
@@ -71,7 +72,7 @@ pub fn same_origin(host: Option<&str>, origin: Option<&str>) -> bool {
 }
 
 fn client_ip(rq: &Request) -> IpAddr {
-    rq.remote_addr().map_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED), |a| a.ip())
+    rq.remote_addr().map_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED), |a| a.ip().to_canonical())
 }
 
 fn html_escape(s: &str) -> String {
@@ -153,7 +154,21 @@ fn route(app: &Arc<App>, rq: &mut Request, host: Option<&str>) -> Reply {
         ("/", true, _) => Reply::redirect("/login"),
         ("/api/status", true, _) if authed => Reply::json(200, &status::status(app, host)),
         ("/api/status", true, _) => Reply::json(401, &json!({"ok": false, "message": "log in"})),
-        ("/api/start" | "/api/stop" | "/api/shutdown" | "/api/comms", _, true) => {
+        (p, _, true) if p.starts_with("/api/tone/") || p == "/api/vacuum/arm" || p == "/api/vacuum/disarm" => {
+            if !authed {
+                return Reply::json(401, &json!({"ok": false, "message": "log in"}));
+            }
+            if !origin_ok {
+                return Reply::json(403, &json!({"ok": false, "message": "blocked: not from this page (Origin check)"}));
+            }
+            eprintln!("{}: {p}", client_ip(rq));
+            Reply::result(match p {
+                "/api/vacuum/arm" => ros::request_vacuum(app, true),
+                "/api/vacuum/disarm" => ros::request_vacuum(app, false),
+                _ => ros::request_tone(app, &p["/api/tone/".len()..]),
+            })
+        }
+        ("/api/start" | "/api/stop" | "/api/shutdown" | "/api/comms" | "/api/sound/mute" | "/api/sound/unmute", _, true) => {
             if !authed {
                 return Reply::json(401, &json!({"ok": false, "message": "log in"}));
             }
@@ -165,10 +180,12 @@ fn route(app: &Arc<App>, rq: &mut Request, host: Option<&str>) -> Reply {
                 "/api/start" => robot::request_start(app),
                 "/api/stop" => robot::request_stop(app),
                 "/api/shutdown" => robot::request_shutdown(app),
-                _ => robot::request_check(app),
+                "/api/comms" => robot::request_check(app),
+                p => robot::set_sound(app, p == "/api/sound/mute"),
             })
         }
         ("/" | "/login" | "/logout" | "/api/status" | "/api/start" | "/api/stop" | "/api/shutdown" | "/api/comms", _, _)
+        | ("/api/sound/mute" | "/api/sound/unmute", _, _)
         | ("/app.js" | "/style.css" | "/manifest.webmanifest" | "/icon-192.png" | "/icon-512.png" | "/favicon.ico", _, _) => {
             Reply::new(405, "text/plain", "method not allowed")
         }

@@ -15,14 +15,14 @@ The serial driver lives in its own repository and is included here as a submodul
 | `src/roomba_bringup` | Launch files (`robot.launch.py`, `vslam.launch.py`, `nav.launch.py`, `handheld_slam.launch.py`, `twin2d.launch.py`), Nav2 configs, robot driver config, digital-twin scenarios (`config/twin2d/`) |
 | `src/roomba_perception` | VSLAM watchdog/odometry filter with wheel bridging, EKF input conditioning (`ekf_inputs`), floor obstacle detection, explorer, ignore zones, nav coach, person detector, IMU calibration |
 | `src/roomba_rs` | Rust ports of the robot's ROS 2 nodes (rclrs): `floor_obstacles`, `ekf_inputs`, `vslam_watchdog`, `map_gap_filler`, `ignore_zones`, `web_server`, `set_password`, `explorer`, `nav_coach` and `person_detector` (TensorRT and OpenCV through a small C++ shim in `native/`) (same topics, services, parameters, files and output as the Python nodes at a fraction of the CPU; `vendor/` holds generated Rust bindings for the Isaac ROS VSLAM interfaces). `tf_buffer`/`tf_listener` give rclrs nodes a tf2-equivalent TF buffer (bit-identical lookups). `rust_nodes:=false` switches back to the Python nodes (and the Python Roomba driver). `twin2d` is the 2D digital twin (see [Digital twin (2D)](#digital-twin-2d)); its simulated Roomba uses the Open Interface code of the Rust driver's library (`roomba_driver_rs`, a cargo path dependency on the submodule); `nav2_guard` (Rust only) brings Nav2's servers up when the lifecycle manager's start-up hangs on a lost answer; `sound_events` (Rust only) plays [event sounds](#event-sounds) on the Roomba; `battery_learner` (Rust only) is the robot's battery gauge, learned from the pack swaps (see [Battery gauge](#battery-gauge)) |
-| `src/roomba_web` | Web app on port 8080: live map, robot status, drive pad, tap-to-go navigation, login (the page, and the Python server used with `rust_nodes:=false`) |
+| `src/roomba_web` | Web app on port 8080: live camera, map and depth views (side by side, or the three-view layout), robot status, drive pad, tap-to-go navigation, login (the page, and the Python server used with `rust_nodes:=false`) |
 | `src/mynteye_d1000_driver` | ROS 2 node for the MYNT EYE D1000 stereo/depth/IMU camera |
 | `src/basalt_vio_ros` | ROS 2 wrapper for Basalt visual-inertial odometry |
 | `src/roomba-serial-ros2` | Roomba Open Interface driver (submodule): `roomba_driver_rs` (Rust, used with `rust_nodes:=true`), `roomba_driver` (Python), `roomba_msgs`, and in `tools/` the simulated Roomba (`fake_roomba.py`) and the driver A/B checks |
 | `src/roomba_skills_msgs` | Interfaces of the learned navigation skills (`action/Unstuck`) |
 | `twin/learned` | Learned navigation skills (trained in simulation; on by default on the robot since 2026-11-16, `unstuck_skill:=false goal_ranking:=rule` turns them off): Isaac Lab unstuck policy, learned frontier ranking for the explorer, their evaluation against the classical logic and in the 2D twin, and the Rust inference (`roomba_rs` feature `learned`, node `unstuck_skill`, explorer options `unstuck_skill` and `goal_ranking: learned`); see [docs/learned-skills.md](docs/learned-skills.md) |
 | `scripts/` | `run_robot.sh`, `stop_slam.sh`, `graceful.py` (`ros2 launch` that SIGTERM / SIGINT stop cleanly), `install_control_page.sh` (the control page service), `record_run.sh` / `compare_pipelines.sh` (A vs B on a recorded drive), `run_twin2d.sh` (the 2D digital twin), mapping/replay helpers, setup scripts |
-| `control/` | Control page (standalone Rust, no ROS, always on, port 80): start / stop the robot, Roomba comms check, Jetson health, robot log, shut down; see [Control page](#control-page-phone-or-browser) |
+| `control/` | Control page (standalone Rust, no ROS libraries, always on, port 80): start / stop the robot, Roomba comms check, VACUUM ARMED, sound buttons, Jetson health, robot log, camera / map / depth, shut down; see [Control page](#control-page-phone-or-browser) |
 | `tools/` | Probes and diagnostics (motion step test, costmap/obstacle probes, map render, TF/drift/CPU-GPU checks, comparison monitor/renderer, Python vs Rust A/B checks), `twin2d_world.py` / `twin2d_plan.py` / `twin2d_run.py` (digital twin floor plan from the map database or a vector plan, scenario runner), `sound_events_offline.py` (the event-sounds node against a fake driver), `battery_learner_replay.py` (the battery gauge through whole simulated discharges and swaps); `tools/oi_tests/` holds early serial/OI bench scripts |
 | `docs/` | Wiring and power diagrams; [training.md](docs/training.md): everything that was trained in this project (Isaac Sim person / railing detector, unstuck skill, frontier ranking), with algorithms, code, results and status (simulation only, nothing learned is deployed); [learned-skills.md](docs/learned-skills.md): the two navigation skills in detail |
 | `hardware/platform` | 3D-printed platform: STLs, fit tests and the Python generator |
@@ -256,10 +256,11 @@ Open `http://<jetson-host>.local/` (or `http://<jetson-ip>/`) and log in with th
 On a phone, "Add to Home Screen" adds it as an app.
 
 - **ROBOT PWR** (toggle): up runs `scripts/run_robot.sh auto` (the saved map; the page has no way to start a new
-  map). Down sends SIGTERM to the launch in `~/robot.pid` (a clean Ctrl-C-like stop: RTAB-Map saves the map, and
-  the amber SAVING MAP light shows it). If the launch is still running after 100 s (graceful.py's own SIGTERM and
-  SIGKILL escalation ends by 90 s), it runs `stop_slam.sh`. A launch without a PID file is stopped with
-  `stop_slam.sh`. The lever moves only when the Jetson reports the new state.
+  map). Down first switches the vacuum and brushes off (`roomba/cleaning_motors`, all off), then sends SIGTERM to
+  the launch in `~/robot.pid` (a clean Ctrl-C-like stop: RTAB-Map saves the map, and the amber SAVING MAP light
+  shows it). If the launch is still running after 100 s (graceful.py's own SIGTERM and SIGKILL escalation ends by
+  90 s), it runs `stop_slam.sh`. A launch without a PID file is stopped with `stop_slam.sh`. The lever moves only
+  when the Jetson reports the new state.
 - **COMMS CHECK** (push-button) tests the Jetson ↔ Roomba serial link:
   - While the robot runs, the driver owns the port, so the page asks the driver over ROS (`roomba/mode`,
     `battery_state`).
@@ -267,16 +268,45 @@ On a phone, "Add to Home Screen" adds it as an app.
     one sensor query (142, packet 3: voltage and current). It never sends Safe/Full or any drive command.
   - The result reads "OK: voltage …", "No reply: Roomba asleep, press Clean until its lights come on", or
     "Port missing: check the USB-serial cable".
+- **VACUUM ARMED**: lift the yellow guard and flip the switch up to run the vacuum, main brush and side brush
+  (`roomba/cleaning_motors`); the ARMED sound plays. Flip it down, or close the guard, to switch them off.
+  - It can be armed only while the robot runs and the OI mode is Safe or Full; otherwise the page says why.
+  - The driver doesn't report the motors, so the switch shows what the page commanded. It disarms by itself
+    when the robot stack stops, the OI mode leaves Safe / Full (the Roomba stops its motors then) or a cliff or
+    wheel drop is reported (it also sends all-off then, for Full mode).
+- **SOUND** panel:
+  - AUTO SOUND (toggle): MUTE creates `~/.config/roomba/sound_muted`, which keeps the `sound_events` node quiet.
+  - Push-buttons OW, ARMED, CHATTER, HELLO and UH-OH: each press defines its song and plays it
+    (`roomba/define_song` with play: songs 2, 3, 4, 0 and 1). They also play while muted, and only while the
+    robot runs in Safe or Full mode. One press a second.
 - **JETSON SHUTDOWN**: lift the red guard, flip the switch, then confirm. The robot stops first, exactly as above,
   then the Jetson powers off. When the page says **SAFE TO REMOVE POWER**, you can unplug it.
-- **Annunciators**: STACK, ROOMBA LINK (connected / responding / not responding), CAMERA, TEMP, WIFI and DISK, in
-  green, amber or red. Below them, the last lines of `~/robot.log` show "Tracking OK" and errors.
-- **Robot page**: while the robot runs, its web app (port 8080 on the same host) is shown in a frame, with an
-  "Open robot page" link.
+- **Annunciators**: STACK, ROOMBA LINK (connected / responding / not responding), OI MODE, VACUUM, CAMERA, TEMP,
+  WIFI and DISK, in green, amber or red. The last lines of `~/robot.log` show "Tracking OK" and errors.
+- **Camera · map · depth**: while the robot runs, the robot web app's three-view layout (port 8080 on the same
+  host) is shown in a frame, with an "Open robot page" link.
+
+The page talks to ROS only through the `ros2` CLI (`ros2 service call`, `ros2 topic pub --once`, and
+`ros2 topic echo` of `roomba/mode`, plus `roomba/sensors` while the vacuum is armed). A sound or a vacuum switch
+takes a few seconds while the CLI starts.
 
 Power-on is physical: apply power, and the Jetson boots and brings the page back by itself. The page logs to the
 journal (`journalctl -u roomba-control`). `roomba-control --check-comms` runs the comms check from a shell.
-`control/tests/e2e/run.sh` tests the whole page with stand-in scripts: no robot, serial port or power-off.
+Tests with stand-ins (no robot, serial port or power-off):
+- `control/tests/e2e/run.sh` tests the whole page with stand-in scripts.
+- `control/tests/e2e/ros_controls.sh` tests the sounds and the vacuum against a fake driver in ROS domain 78.
+
+### Robot web app views
+
+On a wide screen the robot page (`http://<jetson-host>.local:8080/`) shows the camera, the map and the depth
+camera side by side. On a phone, tabs pick one of them, or **All 3** stacks them. **▦ 3-view** (or
+`?layout=mfd`) shows only the three views, without their controls: this is what the control page frames.
+- **Depth** is `/depth.mjpg`: `/camera/depth/image_rect_raw` in turbo colours, red at 0.2 m to blue at 4 m and
+  black where there is no depth (parameters `depth_min_m`, `depth_max_m`).
+  - It runs at up to `depth_fps` (5) frames a second.
+  - The web server subscribes to the depth image only while someone is watching.
+  - It is in the Rust web server only: with `rust_nodes:=false`, the page says the depth view needs it.
+- **Map**: as before, plus the explorer's current goal and home.
 
 ### Pipelines A (default) and B (GPU)
 

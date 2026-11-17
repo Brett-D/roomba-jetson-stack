@@ -13,7 +13,7 @@ let flash = null;              // {text, kind, until}: an action's answer, shown
 let lostAt = null;             // first failed poll since the last good one
 let offSeen = false;           // the server reported that it ran the power-off command
 let dryRunDismissed = false;
-let guardTimer = null;
+let lastTonePress = 0;
 let pollTimer = null;
 
 function cls(el, color, blink) {
@@ -99,14 +99,75 @@ function render() {
   cm.classList.toggle('err', !checking && !!res && res.link !== 'responding');
   $('comms-state').textContent = commsText;
 
+  // SOUND
+  const muted = !!(st.sound && st.sound.muted);
+  if (p && p.startsWith('sound/') && muted === (p === 'sound/mute')) pending = null;
+  const sndMoving = !!pendingOp() && pendingOp().startsWith('sound/');
+  const snd = $('snd');
+  snd.dataset.pos = sndMoving ? 'mid' : (muted ? 'down' : 'up');
+  snd.setAttribute('aria-checked', String(!muted));
+  snd.setAttribute('aria-busy', String(sndMoving));
+  snd.disabled = sndMoving;
+  cls($('l-snd'), muted || sndMoving ? 'a' : null, sndMoving);
+  $('snd-state').textContent = muted ? 'Muted' : 'On';
+
   // JETSON SHUTDOWN
   const sd = $('sd');
   const shutting = (busy && busy.op === 'shutdown') || st.power === 'powering_off' || (busy && busy.then_poweroff);
   sd.dataset.pos = st.power === 'off' ? 'down' : (shutting ? 'mid' : 'up');
   sd.setAttribute('aria-checked', String(st.power === 'on' && !shutting));
   cls($('l-pwr'), st.power === 'off' ? 'r' : (shutting || p === 'shutdown' ? 'a' : 'g'), shutting || p === 'shutdown');
-  if (off || shutting) closeGuard();
+  if (off || shutting) closeGuard('sd');
   $('guard').disabled = off || !!shutting;
+
+  // VACUUM ARMED (commanded state: the driver doesn't report the motors)
+  const vac = st.vacuum;
+  const ros = st.ros;
+  if (p && p.startsWith('vacuum/') && (vac.pending || vac.armed === (p === 'vacuum/arm'))) pending = null;
+  const vacMoving = !!vac.pending || (!!pendingOp() && pendingOp().startsWith('vacuum/'));
+  const vs = $('vac');
+  vs.dataset.pos = vacMoving ? 'mid' : (vac.armed ? 'up' : 'down');
+  vs.setAttribute('aria-checked', String(vac.armed));
+  vs.setAttribute('aria-busy', String(vacMoving));
+  const vacOpen = $('vac-guarded').classList.contains('open');
+  vs.disabled = !vacOpen || vacMoving || (!vac.armed && !ros.available);
+  if (!vac.armed && !ros.available && !vacMoving) closeGuard('vac');
+  if (vac.armed && !vacOpen) openGuard('vac', false);
+  $('vac-guard').disabled = vacMoving || (!vac.armed && !ros.available);
+  $('vac-guard').title = !vac.armed && !ros.available ? ros.reason : '';
+  cls($('l-vac'), vac.armed ? 'g' : (vacMoving ? 'a' : null), vacMoving);
+  let vacText;
+  if (vacMoving) vacText = vac.pending === 'disarm' || (pendingOp() || '').endsWith('disarm') ? 'VACUUM: SWITCHING OFF…' : 'VACUUM: ARMING…';
+  else if (vac.armed) vacText = 'VACUUM: ARMED (VACUUM, MAIN AND SIDE BRUSH ON). CLOSE THE GUARD OR FLIP DOWN TO SWITCH OFF.';
+  else if (!ros.available) vacText = `VACUUM: UNAVAILABLE: ${ros.reason}`;
+  else vacText = 'VACUUM: OFF. LIFT THE GUARD AND FLIP UP TO ARM.';
+  if (vac.note && vac.note.ago_s < 30 && !vacMoving && (!vac.armed || !vac.note.ok)) vacText += ` (${vac.note.message})`;
+  const vm = $('vac-msg');
+  vm.textContent = vacText;
+  vm.classList.toggle('err', !!vac.note && !vac.note.ok && vac.note.ago_s < 30);
+  vm.classList.toggle('warn', !vac.armed && !ros.available);
+  $('vac-state').textContent = vac.armed ? 'Armed' : (ros.available ? 'Off' : 'Off. Unavailable: ' + ros.reason);
+
+  // SOUND: tone buttons
+  const tones = st.tones;
+  const debounced = lastTonePress && Date.now() - lastTonePress < 1000;
+  document.querySelectorAll('.tone').forEach((b) => {
+    const sending = tones.pending === b.dataset.tone || (pendingOp() === 'tone/' + b.dataset.tone);
+    b.classList.toggle('sending', sending);
+    b.classList.toggle('busy', !!tones.pending);
+    b.disabled = !ros.available || !!tones.pending || debounced;
+    b.title = ros.available ? '' : ros.reason;
+  });
+  if (p && p.startsWith('tone/') && tones.pending) pending = null;
+  let toneText;
+  if (!ros.available) toneText = `SOUNDS UNAVAILABLE: ${ros.reason}`;
+  else if (tones.pending) toneText = `PLAYING ${tones.pending.toUpperCase()}…`;
+  else if (tones.last && tones.last.ago_s < 60) toneText = `${tones.last.key.toUpperCase()}: ${tones.last.ok ? 'OK' : 'FAILED'}: ${tones.last.message}`;
+  else toneText = 'PRESS A BUTTON TO PLAY IT ON THE ROOMBA (AUTO SOUND MUTE DOES NOT SILENCE THESE)';
+  const tm = $('tone-msg');
+  tm.textContent = toneText;
+  tm.classList.toggle('warn', !ros.available);
+  tm.classList.toggle('err', ros.available && !tones.pending && !!tones.last && !tones.last.ok && tones.last.ago_s < 60);
 
   // Message line: what's happening, else the last result
   if (busy) say(`${busy.message} (${busy.elapsed_s} s)`, 'warn');
@@ -123,6 +184,14 @@ function render() {
 
   const linkVal = { responding: 'RESPONDING', connected: 'CONNECTED', checking: 'CHECKING', not_responding: 'NOT RESPONDING', missing: 'NO CABLE' }[rb.link];
   ann('a-link', checking ? 'a' : linkColor, checking ? 'CHECKING' : linkVal, checking);
+  const mode = ros.mode;
+  if (!ros.driver) ann('a-mode', null, 'NO DRIVER');
+  else if (!mode) ann('a-mode', 'a', 'WAITING', true);
+  else ann('a-mode', mode === 'safe' || mode === 'full' ? 'g' : 'a', mode.toUpperCase());
+  if (vac.armed) ann('a-vac', 'g', 'ARMED');
+  else if (vacMoving) ann('a-vac', 'a', vac.pending === 'disarm' ? 'SWITCHING OFF' : 'ARMING', true);
+  else if (!ros.available && r.state !== 'stopped') ann('a-vac', 'a', !ros.driver ? 'NO DRIVER' : (mode && mode !== 'safe' && mode !== 'full' ? mode.toUpperCase() + ' MODE' : 'WAITING'));
+  else ann('a-vac', null, 'OFF');
   ann('a-cam', st.camera ? 'g' : 'r', st.camera ? 'PRESENT' : 'MISSING');
   const t = st.cpu_temp_c;
   ann('a-temp', t == null ? 'r' : t >= 90 ? 'r' : t >= 75 ? 'a' : 'g', t == null ? 'N/A' : `${t.toFixed(0)}\u00b0C`);
@@ -140,6 +209,9 @@ function render() {
     `WIFI ${w ? w.level_dbm.toFixed(0) + ' dBm' : '—'}`,
     `DISK ${d ? gb(d.free_bytes) : '—'}`,
     `LINK ${linkVal}`,
+    `OI ${mode ? mode.toUpperCase() : '—'}`,
+    `VAC ${vac.armed ? 'ARMED' : 'OFF'}`,
+    `SND ${muted ? 'MUTED' : 'ON'}`,
   ];
   $('hud').textContent = 'SYS \u25b8 ' + parts.join(' \u00b7 ');
 
@@ -165,7 +237,9 @@ function render() {
   if (url) open.href = url;
   open.setAttribute('aria-disabled', String(!(r.web_up && url)));
   if (r.web_up && url) {
-    if (frame.dataset.src !== url) { frame.src = url; frame.dataset.src = url; }
+    // The robot page's three-view layout (camera, map, depth); the frame's name keeps it through the robot page's login.
+    const mfd = url + '?layout=mfd';
+    if (frame.dataset.src !== mfd) { frame.src = mfd; frame.dataset.src = mfd; }
     frame.hidden = false;
     $('nosignal').hidden = true;
   } else {
@@ -257,28 +331,44 @@ async function act(op) {
   poll();
 }
 
-function closeGuard() {
-  clearTimeout(guardTimer);
-  $('guarded').classList.remove('open');
-  $('guard').setAttribute('aria-expanded', 'false');
-  $('sd').disabled = true;
-  $('sd-state').textContent = 'Guard closed';
+// Flip-up guards: 'sd' (JETSON SHUTDOWN) and 'vac' (VACUUM ARMED).
+const GUARDS = {
+  sd: { box: 'guarded', guard: 'guard', sw: 'sd', state: 'sd-state', closed: 'Guard closed', open: 'Guard lifted: flip the switch to shut down' },
+  vac: { box: 'vac-guarded', guard: 'vac-guard', sw: 'vac', state: null, closed: '', open: '' },
+};
+const guardTimers = {};
+
+function guardOpen(name) { return $(GUARDS[name].box).classList.contains('open'); }
+
+function closeGuard(name) {
+  const g = GUARDS[name];
+  clearTimeout(guardTimers[name]);
+  $(g.box).classList.remove('open');
+  $(g.guard).setAttribute('aria-expanded', 'false');
+  $(g.sw).disabled = true;
+  if (g.state) $(g.state).textContent = g.closed;
 }
 
-function openGuard() {
-  $('guarded').classList.add('open');
-  $('guard').setAttribute('aria-expanded', 'true');
-  $('sd').disabled = false;
-  $('sd-state').textContent = 'Guard lifted: flip the switch to shut down';
-  clearTimeout(guardTimer);
-  guardTimer = setTimeout(closeGuard, GUARD_CLOSE_MS);
+function openGuard(name, autoClose = true) {
+  const g = GUARDS[name];
+  $(g.box).classList.add('open');
+  $(g.guard).setAttribute('aria-expanded', 'true');
+  $(g.sw).disabled = false;
+  if (g.state) $(g.state).textContent = g.open;
+  clearTimeout(guardTimers[name]);
+  if (autoClose) {
+    guardTimers[name] = setTimeout(() => {
+      // An armed vacuum switch keeps its guard up (closing it switches the vacuum off).
+      if (name === 'vac' && st && st.vacuum.armed) return;
+      closeGuard(name);
+    }, GUARD_CLOSE_MS);
+  }
 }
-
 function confirmShutdown() {
   const dlg = $('confirm');
   if (typeof dlg.showModal !== 'function') {
     if (window.confirm('Shut down the Jetson? The robot stops first (saving the map), then the Jetson powers off.')) act('shutdown');
-    closeGuard();
+    closeGuard('sd');
     return;
   }
   dlg.returnValue = '';
@@ -292,17 +382,37 @@ document.addEventListener('DOMContentLoaded', () => {
     else if (st.robot.state === 'running') act('stop');
   });
   $('comms').addEventListener('click', () => act('comms'));
-  $('guard').addEventListener('click', () => {
-    if ($('guarded').classList.contains('open')) closeGuard(); else openGuard();
+  $('snd').addEventListener('click', () => {
+    if (st) act(st.sound && st.sound.muted ? 'sound/unmute' : 'sound/mute');
   });
+  $('guard').addEventListener('click', () => {
+    if (guardOpen('sd')) closeGuard('sd'); else openGuard('sd');
+  });
+  $('vac-guard').addEventListener('click', () => {
+    if (!guardOpen('vac')) { openGuard('vac'); return; }
+    // Closing the guard over an armed switch pushes it off, as on a real panel.
+    if (st && (st.vacuum.armed || st.vacuum.pending === 'arm')) act('vacuum/disarm');
+    closeGuard('vac');
+  });
+  $('vac').addEventListener('click', () => {
+    if (!st || !guardOpen('vac')) return;
+    act(st.vacuum.armed ? 'vacuum/disarm' : 'vacuum/arm');
+    openGuard('vac');
+  });
+  document.querySelectorAll('.tone').forEach((b) => b.addEventListener('click', () => {
+    if (lastTonePress && Date.now() - lastTonePress < 1000) return;
+    lastTonePress = Date.now();
+    act('tone/' + b.dataset.tone);
+    setTimeout(() => { if (st) render(); }, 1050);
+  }));
   $('sd').addEventListener('click', () => {
-    if (!$('guarded').classList.contains('open')) return;
+    if (!guardOpen('sd')) return;
     $('sd').dataset.pos = 'mid';
     confirmShutdown();
   });
   $('confirm').addEventListener('close', () => {
     const ok = $('confirm').returnValue === 'ok';
-    closeGuard();
+    closeGuard('sd');
     if (ok) act('shutdown'); else if (st) render();
   });
   $('ov-close').addEventListener('click', () => { dryRunDismissed = true; $('overlay').hidden = true; });

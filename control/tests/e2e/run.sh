@@ -16,6 +16,7 @@ FAKE_DRIVER="fake-roomba-driver-$$"
 export FAKE_START_DELAY=2
 rm -rf "$FAKE_DIR" && mkdir -p "$FAKE_DIR"
 JAR="$FAKE_DIR/jar"
+MUTE="$FAKE_DIR/cfg/roomba/sound_muted"
 
 fails=0
 check() { if [ "$2" = "$3" ]; then echo "ok   $1"; else echo "FAIL $1: expected '$3', got '$2'"; fails=$((fails + 1)); fi; }
@@ -37,7 +38,7 @@ start_instance() {
     "$BIN" --listen "127.0.0.1:$PORT" --auth-file "$AUTH" --pid-file "$FAKE_DIR/robot.pid" \
         --log-file "$FAKE_DIR/robot.log" --start-cmd "$HERE/fake_run_robot.sh" \
         --force-stop-cmd "$HERE/fake_stop_slam.sh" --launch-match "$FAKE_MATCH" --driver-match "$FAKE_DRIVER" \
-        --serial-dev "$FAKE_DIR/no-such-tty" --ros-setup "sleep 1; false" --robot-web-port 18099 "$@" \
+        --serial-dev "$FAKE_DIR/no-such-tty" --ros-setup "sleep 1; false" --robot-web-port 18099 --sound-mute-file "$MUTE" "$@" \
         >> "$FAKE_DIR/server.log" 2>&1 &
     SERVER=$!
     for _ in $(seq 1 40); do [ "$(code "$BASE/login")" = 200 ] && return; sleep 0.25; done
@@ -131,6 +132,17 @@ check "driver running: comms check" "$(post comms)" 202
 wait_for 'd["roomba"]["checking"]' null 30
 check "the port is left to the driver: ROS" "$(st 'd["roomba"]["result"]["via"]')" ros
 kill -9 "$driver"
+
+echo "== sound switch"
+check "sound on at first" "$(st 'd["sound"]["muted"]')" false
+check "mute" "$(post sound/mute)" 202
+check "mute file created, with its directory" "$([ -e "$MUTE" ] && echo yes || echo no)" yes
+check "status shows muted" "$(st 'd["sound"]["muted"]')" true
+check "unmute without Origin" "$(code -b "$JAR" -X POST "$BASE/api/sound/unmute")" 403
+check "unmute" "$(post sound/unmute)" 202
+check "mute file removed" "$([ -e "$MUTE" ] && echo yes || echo no)" no
+check "unmute when not muted" "$(post sound/unmute)" 202
+check "GET on the sound switch" "$(code -b "$JAR" "$BASE/api/sound/mute")" 405
 
 echo "== shut down (dry run)"
 post start > /dev/null
