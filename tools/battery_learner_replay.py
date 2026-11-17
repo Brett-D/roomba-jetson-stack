@@ -16,6 +16,7 @@ times everything by the frame stamps). The run:
   5. a third pack down to 50 %: the published charge tracks the truth; a 30 s sensor gap without a
      jump (a driver restart) is the same pack
   6. ~/pack_swapped with no swap detected: a new pack at 100 %, nothing learned from the old one
+  7. the service call gives up (no hang) on a learner that stops answering (SIGSTOP) or exits
 Needs rclpy, roomba_msgs and the built node (default: roomba_rs's install, `colcon build`).
 Writes only under --work (default ./battery_learner_replay).
 """
@@ -171,6 +172,17 @@ def main():
         m = latest()
         check(False, f"{what} (last: {m.percentage if m else None})")
 
+    def call_pack_swapped(wall_s=10.0):
+        """~/pack_swapped; None if there is no answer within wall_s or the learner has exited."""
+        future = client.call_async(Trigger.Request())
+        end = time.monotonic() + wall_s
+        while not future.done():
+            if proc['p'].poll() is not None or time.monotonic() > end:
+                client.remove_pending_request(future)
+                return None
+            frame(-200.0)
+        return future.result()
+
     def log_text():
         return log_path.read_text(errors='replace')
 
@@ -223,6 +235,11 @@ def main():
 
     try:
         print(f'battery_learner replay: {binary}, domain {args.domain}, {args.speed:g}x, work {work}')
+        spin(2.0)  # discovery: anything else on these topics would mix into the replay
+        others = sorted({i.node_name for t in ('/roomba/sensors', '/battery_state')
+                         for i in node.get_publishers_info_by_topic(t) if i.node_name != node.get_name()})
+        check(not others, f'domain {args.domain} has no other publishers on /roomba/sensors or /battery_state'
+                          + (f' (found {others}: pick another --domain)' if others else ''))
         print('1. first run, pack 1 truly at 55 %')
         start()
         m = wait_battery(lambda m: True, 10, 'first /battery_state')
@@ -285,11 +302,9 @@ def main():
         check('sensor data back after 31 s' in log_text() and 'same pack' in log_text(), 'logged the gap')
 
         print('6. ~/pack_swapped (no swap detected: re-anchors, teaches nothing)')
-        future = client.call_async(Trigger.Request())
-        while not future.done():
-            frame(-200.0)
-        r = future.result()
-        check(r.success and r.message.startswith('new pack 4 at 100 %'), f'service reply: {r.message}')
+        r = call_pack_swapped()
+        check(r is not None and r.success and r.message.startswith('new pack 4 at 100 %'),
+              f'service reply: {r.message if r else "none within 10 s"}')
         m = wait_battery(lambda m: m.serial_number == 'pack 4', 10, 'pack 4 published')
         check(m.percentage > 0.99, f'manual reset to 100 % ({m.percentage:.3f})')
         check('pack 3 out after' in log_text() and 'not learned from (no swap was detected)' in log_text(),
@@ -301,6 +316,21 @@ def main():
         check(s['learned_capacity_mah'] == learned, 'learned capacity unchanged by the manual reset')
         rows = {p: len((state_dir / f'battery_pack_{p:04d}.csv').read_text().splitlines()) - 1 for p in (1, 2, 3)}
         check(all(n > 100 for n in rows.values()), f'discharge CSV rows per pack {rows}')
+
+        print('7. the service wait gives up on a learner that stops answering or exits')
+        start()
+        os.kill(proc['p'].pid, signal.SIGSTOP)
+        t0 = time.monotonic()
+        r = call_pack_swapped(wall_s=3.0)
+        waited = time.monotonic() - t0
+        check(r is None and 2.9 < waited < 5.0, f'no answer from a stopped learner: gave up after {waited:.1f} s')
+        proc['p'].kill()  # SIGKILL ends a stopped process too
+        proc['p'].wait()
+        t0 = time.monotonic()
+        r = call_pack_swapped(wall_s=30.0)
+        waited = time.monotonic() - t0
+        check(r is None and waited < 1.0, f'learner gone: gave up at once ({waited:.2f} s)')
+
         print('\nPacks:')
         for r in s['history']:
             cap = f"{r['capacity_mah']:.0f} mAh" if r['capacity_mah'] else '-'
