@@ -1043,7 +1043,6 @@ fn main() -> Result<()> {
             auth_paths.initial_file.display()
         );
     }
-    log!(node.info(), "Web app on http://0.0.0.0:{port}/");
 
     let app = Arc::new(App {
         ros: Arc::clone(&ros),
@@ -1054,10 +1053,32 @@ fn main() -> Result<()> {
         scrypt_slots: tokio::sync::Semaphore::new(10),
         streams: AtomicUsize::new(0),
     });
-    let listener = rt
-        .block_on(async { tokio::net::TcpListener::bind(("0.0.0.0", port)).await })
-        .with_context(|| format!("cannot listen on port {port}"))?;
-    std::thread::Builder::new().name("http".into()).spawn(move || rt.block_on(serve(app, listener)))?;
+    // IPv6 and IPv4: [::] takes both where the system allows it, and then 0.0.0.0 can't bind (in
+    // use); where it keeps IPv6 sockets IPv6-only, 0.0.0.0 binds too; without IPv6, only 0.0.0.0.
+    let (v6, v4) = rt.block_on(async {
+        (tokio::net::TcpListener::bind(("::", port)).await, tokio::net::TcpListener::bind(("0.0.0.0", port)).await)
+    });
+    let listeners: Vec<_> = match (v6, v4) {
+        (Err(e), Err(_)) => return Err(anyhow!("cannot listen on port {port}: {e}")),
+        (v6, v4) => {
+            let what = match (&v6, &v4) {
+                (Ok(_), Ok(_)) => "[::] (IPv6) and 0.0.0.0 (IPv4)".to_string(),
+                (Ok(_), Err(e)) if e.kind() == std::io::ErrorKind::AddrInUse => "[::] (IPv6 and IPv4)".to_string(),
+                (Ok(_), Err(e)) => format!("[::] (IPv6; not IPv4: {e})"),
+                (Err(e), _) => format!("0.0.0.0 (IPv4 only: IPv6 {e})"),
+            };
+            log!(node.info(), "Web app on port {port}: listening on {what}");
+            [v6.ok(), v4.ok()].into_iter().flatten().collect()
+        }
+    };
+    std::thread::Builder::new().name("http".into()).spawn(move || {
+        rt.block_on(async move {
+            for l in listeners {
+                tokio::spawn(serve(Arc::clone(&app), l));
+            }
+            std::future::pending::<()>().await
+        })
+    })?;
     // The executor also runs the drive pad deadman: if it stops, the whole node stops.
     roomba_rs::node_params::spin(&mut executor)?;
     drop(keep);
