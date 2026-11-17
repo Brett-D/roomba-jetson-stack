@@ -277,6 +277,8 @@ On a phone, "Add to Home Screen" adds it as an app.
   - Motor commands go out one at a time, so an OFF asked for while an ON is on its way follows it.
   - If a command fails, or the page has just started (a restart can leave a robot running), the state is
     unknown: the switch shows UNKNOWN, hazards stay watched and all-off is sent (and retried) until it goes out.
+    A driver that stopped while the motors may have been on (it could have crashed) is owed an all-off too:
+    it goes to the next driver as soon as one runs.
 - **SOUND** panel:
   - AUTO SOUND (toggle): MUTE creates `~/.config/roomba/sound_muted`, which keeps the `sound_events` node quiet.
   - Push-buttons OW, ARMED, CHATTER, HELLO and UH-OH: each press defines its song and plays it

@@ -9,7 +9,8 @@
 //! stops, the OI mode leaves Safe / Full (the Roomba stops its motors then) or a cliff or wheel drop
 //! is reported (then it also sends all-off, for Full mode). After a failed command the state is
 //! unknown: hazards stay watched and OFF is retried until it goes out. At the page's start the
-//! state is unknown too (a restart leaves the robot running), so it begins by sending OFF.
+//! state is unknown too (a restart leaves the robot running), so it begins by sending OFF, and a
+//! driver that went away (it may have crashed with the motors on) is owed an OFF by the next one.
 
 use std::io::{BufRead, BufReader};
 use std::process::Child;
@@ -270,9 +271,18 @@ pub fn published(r: &CmdResult) -> Result<(), String> {
 
 /// Why the tone buttons and arming are unavailable right now (None: available).
 pub fn unavailable(app: &App) -> Option<String> {
+    let (stack, driver) = stack_and_driver(app);
+    unavailable_locked(&robot::lock(app), stack, driver)
+}
+
+/// Whether a robot stack and a driver run (process scans, done before taking the control lock).
+fn stack_and_driver(app: &App) -> (bool, bool) {
     let driver = !robot::drivers(app).is_empty();
-    let stack = driver || robot::launches(app).any();
-    let ctl = robot::lock(app);
+    (driver || robot::launches(app).any(), driver)
+}
+
+/// `unavailable` with the control lock held, so a request can check and commit under one lock.
+fn unavailable_locked(ctl: &robot::Ctl, stack: bool, driver: bool) -> Option<String> {
     if ctl.power != Power::On {
         return Some("The Jetson is shutting down.".into());
     }
@@ -296,10 +306,11 @@ pub fn unavailable(app: &App) -> Option<String> {
 
 pub fn request_tone(app: &Arc<App>, key: &str) -> Result<String, String> {
     let tone = TONES.iter().find(|t| t.key == key).ok_or("No such sound.")?;
-    if let Some(why) = unavailable(app) {
+    let (stack, driver) = stack_and_driver(app);
+    let mut ctl = robot::lock(app);
+    if let Some(why) = unavailable_locked(&ctl, stack, driver) {
         return Err(why);
     }
-    let mut ctl = robot::lock(app);
     if ctl.ros.last_press.is_some_and(|t| t.elapsed() < DEBOUNCE) {
         return Err("One press a second.".into());
     }
@@ -329,12 +340,15 @@ fn play(app: &App, tone: &'static Tone) {
 }
 
 pub fn request_vacuum(app: &Arc<App>, arm: bool) -> Result<String, String> {
+    let (stack, driver) = stack_and_driver(app);
+    let mut ctl = robot::lock(app);
+    // Checked under the lock that commits the arming: a stop or shutdown that has begun (and sends
+    // the final OFF) or a mode change can't slip in between.
     if arm {
-        if let Some(why) = unavailable(app) {
+        if let Some(why) = unavailable_locked(&ctl, stack, driver) {
             return Err(why);
         }
     }
-    let mut ctl = robot::lock(app);
     let r = &mut ctl.ros;
     if arm {
         if r.armed() {
@@ -429,7 +443,8 @@ pub fn motor_worker(app: Arc<App>) {
 }
 
 /// All-off before the robot is stopped (stop and shut down), whether or not the page armed it:
-/// waits until OFF has gone out after anything already on its way (at most 40 s).
+/// waits until OFF has gone out after anything already on its way (at most 40 s, or until the
+/// driver is gone: then the OFF waits for the next driver).
 pub fn vacuum_off_before_stop(app: &App) {
     let mut ctl = robot::lock(app);
     ctl.ros.vac_want = false;
@@ -449,6 +464,12 @@ pub fn vacuum_off_before_stop(app: &App) {
             break Err("no answer in 40 s");
         }
         ctl = app.ctl_cv.wait_timeout(ctl, Duration::from_millis(500)).unwrap_or_else(|e| e.into_inner()).0;
+        drop(ctl);
+        let gone = robot::drivers(app).is_empty();
+        ctl = robot::lock(app);
+        if gone {
+            break Err("the driver has stopped (OFF goes to the next one)");
+        }
     };
     eprintln!("vacuum off before the stop: {result:?}");
     let note = match result {
@@ -459,7 +480,8 @@ pub fn vacuum_off_before_stop(app: &App) {
 }
 
 /// A hazard, a mode change or the stack stopping: off, with the reason shown. `publish`: send OFF
-/// (a hazard in Full mode); else the Roomba has stopped its motors itself.
+/// (a hazard in Full mode; the driver gone: to the next driver); else the Roomba has stopped its
+/// motors itself (it leaves Safe / Full).
 fn auto_disarm(app: &Arc<App>, reason: &str, publish: bool) {
     let mut ctl = robot::lock(app);
     let r = &mut ctl.ros;
@@ -585,20 +607,15 @@ pub fn supervise(app: Arc<App>) {
         sensors.keep(driver && power_on && watch_hazards, &app, Kind::Sensors);
         battery.keep(driver && power_on, &app, Kind::Battery);
         if !driver {
-            auto_disarm(&app, "robot stack stopped", false);
-            // No driver: the motors are off (the driver stops them when it ends) and nothing can be
-            // sent; a driver that starts finds them off.
+            // The driver stops the motors when it ends, but not if it crashed or was killed: if they
+            // may have been on, an OFF is owed to the next driver (sent as soon as one runs).
+            auto_disarm(&app, "robot stack stopped", true);
             let mut ctl = robot::lock(&app);
             let r = &mut ctl.ros;
             r.mode = None;
             r.battery = None;
-            if r.vac_sending.is_none() {
-                r.vac_want = false;
-                r.vac_sent = Some(false);
-                r.vac_force_off = false;
-                r.vac_retry_at = None;
-                r.vac_failures = 0;
-            }
+            r.vac_retry_at = None;
+            r.vac_failures = 0;
         }
         check_learner(&app, power_on && learner_running(&app));
         std::thread::sleep(Duration::from_secs(1));

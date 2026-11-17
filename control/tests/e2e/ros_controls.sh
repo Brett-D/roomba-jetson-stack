@@ -205,10 +205,15 @@ kill "$DRIVER"
 wait_for 'd["vacuum"]["armed"]' false 15
 check_has "why" "$(st 'd["vacuum"]["note"]["message"]')" "robot stack stopped"
 check "sounds unavailable" "$(st 'd["ros"]["available"], d["ros"]["reason"]')" '[false, "Waiting for roomba_driver\u2026"]'
+n_gone=$(lines)
 
-echo "== the page restarted while armed: the state is unknown, so OFF goes out"
+echo "== a driver that comes back gets the OFF (the last one may have died with the motors on)"
 driver_up
 wait_for 'd["ros"]["available"]' true 40
+settled
+check "OFF to the new driver" "$(vac_seq "$n_gone")" '[false]'
+
+echo "== the page restarted while armed: the state is unknown, so OFF goes out"
 settled; post vacuum/arm > /dev/null
 wait_for 'd["vacuum"]["armed"]' true 40
 kill "$SERVER"
