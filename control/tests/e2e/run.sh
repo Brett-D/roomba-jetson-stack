@@ -41,7 +41,7 @@ kill_fakes() {
     for p in $(pgrep -f -- "$FAKE_MATCH"); do [ "$(cat /proc/$p/comm 2>/dev/null)" = bash ] && kill -9 "$p"; done
 }
 start_instance() {
-    "$BIN" --listen "127.0.0.1:$PORT" --auth-file "$AUTH" --pid-file "$FAKE_DIR/robot.pid" \
+    "$BIN" --listen "${LISTEN:-127.0.0.1:$PORT}" --auth-file "$AUTH" --pid-file "$FAKE_DIR/robot.pid" \
         --log-file "$FAKE_DIR/robot.log" --start-cmd "$HERE/fake_run_robot.sh" \
         --force-stop-cmd "$HERE/fake_stop_slam.sh" --launch-match "$FAKE_MATCH" --driver-match "$FAKE_DRIVER" --learner-match "fake-battery-learner-$$" \
         --serial-dev "$FAKE_DIR/no-such-tty" --ros-setup "sleep 1; false" --robot-web-port 18099 --sound-mute-file "$MUTE" --state-dir "$FAKE_DIR/state" "$@" \
@@ -177,6 +177,27 @@ check "mute file removed" "$([ -e "$MUTE" ] && echo yes || echo no)" no
 check "unmute when not muted" "$(post sound/unmute)" 202
 check "GET on the sound switch" "$(code -b "$JAR" "$BASE/api/sound/mute")" 405
 
+echo "== stalled clients can't hold up a Stop"
+# 160 connections from 8 other addresses: silent, slowloris headers, login bodies a byte a second
+# (80: more than the old 64 request threads), and app.js requests that are never read.
+post start > /dev/null
+wait_for 'd["robot"]["state"]' running 15
+python3 "$HERE/stall_clients.py" stall "$PORT" "$FAKE_DIR/stall_ready" 13 > "$FAKE_DIR/stall_report" 2>&1 &
+STALL=$!
+for _ in $(seq 1 40); do [ -e "$FAKE_DIR/stall_ready" ] && break; sleep 0.25; done
+check "stalled clients connected" "$([ -e "$FAKE_DIR/stall_ready" ] && echo yes || echo no)" yes
+# The status code if answered within 2 s.
+fast() { curl -s -o /dev/null -m 10 -w '%{http_code} %{time_total}' "$@" | python3 -c 'import sys; c, t = sys.stdin.read().split(); print(c if float(t) < 2 else f"{c} after {t} s")'; }
+check "status at once" "$(fast -b "$JAR" "$BASE/api/status")" 200
+check "disarm at once" "$(fast -b "$JAR" -X POST -H "$ORIGIN" "$BASE/api/vacuum/disarm")" 202
+check "stop at once" "$(fast -b "$JAR" -X POST -H "$ORIGIN" "$BASE/api/stop")" 202
+wait_for 'd["robot"]["state"]' stopped 20
+wait "$STALL"
+check "the stalled clients dropped at their deadlines" "$(cat "$FAKE_DIR/stall_report")" "idle 32/32, slowloris 32/32, slowbody 80/80"
+check "one address gets at most 32 connections" "$(python3 "$HERE/stall_clients.py" cap "$PORT")" "refused 8/40"
+check "headers over 16 KB" "$(python3 "$HERE/stall_clients.py" bighead "$PORT")" 431
+check "a body over 16 KB" "$(python3 "$HERE/stall_clients.py" bigbody "$PORT")" 413
+
 echo "== shut down (dry run)"
 post start > /dev/null
 wait_for 'd["robot"]["state"]' running 15
@@ -228,6 +249,26 @@ post shutdown > /dev/null
 wait_for 'd["busy"]' null 10
 check "power stays on" "$(st 'd["power"], d["last"]["ok"]')" '["on", false]'
 check_has "failure message" "$(st 'd["last"]["message"]')" "Power-off failed: sudo: a password is required"
+stop_instance
+
+echo "== instance D: [::] takes IPv6 and IPv4"
+LISTEN="[::]:$PORT" start_instance
+check "logged" "$(grep -c "listening on \[::\]:$PORT (IPv6 and IPv4)" "$FAKE_DIR/server.log")" 1
+check "IPv4" "$(code -4 "http://127.0.0.1:$PORT/login")" 200
+check "IPv6" "$(code -6 -g "http://[::1]:$PORT/login")" 200
+B6="http://[::1]:$PORT"
+check "login over IPv6 (Host and Origin [::1]:port)" "$(code -g -c "$JAR" -H "Origin: $B6" --data-urlencode password=fixture-password "$B6/login")" 303
+check "page and robot page URLs" "$(curl -s -g -b "$JAR" "$B6/api/status" | J '[d["page_url"], d["robot_url"]]')" "[\"http://[::1]:$PORT/\", \"http://[::1]:18099/\"]"
+check "an action from the IPv6 page" "$(code -g -b "$JAR" -X POST -H "Origin: $B6" "$B6/api/sound/mute")" 202
+check "Origin: the robot web app's port refused" "$(code -g -b "$JAR" -X POST -H "Origin: http://[::1]:18099" "$B6/api/sound/unmute")" 403
+check "frame-src for an IPv6 host (CSP has no IPv6 literals)" "$(curl -s -g -D - -o /dev/null -b "$JAR" "$B6/" | grep -i -o 'frame-src [^;]*')" "frame-src http://*:18099"
+stop_instance
+
+echo "== instance E: [::] without IPv6 (--no-ipv6)"
+LISTEN="[::]:$PORT" start_instance --no-ipv6
+check "logged" "$(grep -c "listening on 0.0.0.0:$PORT (IPv4 only: IPv6 turned off)" "$FAKE_DIR/server.log")" 1
+check "IPv4" "$(code -4 "http://127.0.0.1:$PORT/login")" 200
+check "no IPv6" "$(code -6 -g -m 3 "http://[::1]:$PORT/login")" 000
 stop_instance
 
 if [ "$fails" -eq 0 ]; then echo "ALL PASSED"; else echo "$fails FAILED"; exit 1; fi

@@ -1,15 +1,14 @@
 //! HTTP: login, the page, /api/status and the actions. Every action is a POST from this page's own
 //! origin (Origin header == http://<Host>) with a valid session cookie.
 
-use std::io::Read;
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
-use tiny_http::{Header, Request, Response};
 
 use crate::auth::{self, COOKIE};
+use crate::http::{Request, Response};
 use crate::robot;
 use crate::ros;
 use crate::status;
@@ -57,7 +56,7 @@ impl Reply {
 }
 
 fn header<'a>(rq: &'a Request, name: &str) -> Option<&'a str> {
-    rq.headers().iter().find(|h| h.field.as_str().as_str().eq_ignore_ascii_case(name)).map(|h| h.value.as_str())
+    rq.header(name)
 }
 
 /// The Origin header must be this page's own origin: blocks requests from other sites and from
@@ -72,7 +71,7 @@ pub fn same_origin(host: Option<&str>, origin: Option<&str>) -> bool {
 }
 
 fn client_ip(rq: &Request) -> IpAddr {
-    rq.remote_addr().map_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED), |a| a.ip().to_canonical())
+    rq.client_ip()
 }
 
 fn html_escape(s: &str) -> String {
@@ -88,27 +87,27 @@ fn cookie_header(token: &str, max_age: u64) -> String {
     format!("{COOKIE}={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age={max_age}")
 }
 
-fn read_body(rq: &mut Request, limit: u64) -> Vec<u8> {
-    let mut body = Vec::new();
-    let _ = rq.as_reader().take(limit).read_to_end(&mut body);
-    body
+/// CSP frame-src for the robot web app on this host. CSP has no IPv6 literals, so for those any
+/// host on its port.
+pub fn frame_src(host: Option<&str>, port: u16) -> String {
+    match status::clean_host(host) {
+        None => "http:".to_string(),
+        Some(h) if status::host_name(&h).starts_with('[') => format!("http://*:{port}"),
+        Some(h) => format!("http://{}:{port}", status::host_name(&h)),
+    }
 }
 
-pub fn handle(app: &Arc<App>, mut rq: Request) {
+/// Answers one request (http.rs runs each on its connection's own thread).
+pub fn handle(app: &Arc<App>, rq: Request) -> Response {
     let host = header(&rq, "Host").map(str::to_string);
-    let reply = route(app, &mut rq, host.as_deref());
-    let frame_src = status::clean_host(host.as_deref())
-        .map_or("http:".to_string(), |h| format!("http://{}:{}", status::host_name(&h), app.cfg.robot_web_port));
+    let reply = route(app, &rq, host.as_deref());
+    let frame_src = frame_src(host.as_deref(), app.cfg.robot_web_port);
     let csp = format!(
         "default-src 'self'; img-src 'self' data:; frame-src {frame_src}; frame-ancestors 'none'; \
          form-action 'self'; base-uri 'none'; object-src 'none'"
     );
-    let mut resp = Response::from_data(reply.body).with_status_code(reply.status);
-    let mut add = |name: &str, value: &str| {
-        if let Ok(h) = Header::from_bytes(name.as_bytes(), value.as_bytes()) {
-            resp.add_header(h);
-        }
-    };
+    let mut headers = Vec::new();
+    let mut add = |name: &str, value: &str| headers.push((name.to_string(), value.to_string()));
     add("Content-Type", reply.ctype);
     add("Cache-Control", "no-cache, no-store");
     add("X-Content-Type-Options", "nosniff");
@@ -120,13 +119,13 @@ pub fn handle(app: &Arc<App>, mut rq: Request) {
     for (name, value) in &reply.headers {
         add(name, value);
     }
-    let _ = rq.respond(resp);
+    Response { status: reply.status, headers, body: reply.body }
 }
 
-fn route(app: &Arc<App>, rq: &mut Request, host: Option<&str>) -> Reply {
-    let url = rq.url().to_string();
+fn route(app: &Arc<App>, rq: &Request, host: Option<&str>) -> Reply {
+    let url = rq.url.clone();
     let path = url.split('?').next().unwrap_or("/");
-    let method = rq.method().as_str().to_ascii_uppercase();
+    let method = rq.method.to_ascii_uppercase();
     let get = method == "GET" || method == "HEAD";
     let post = method == "POST";
     let now = Instant::now();
@@ -198,7 +197,7 @@ fn limiter(app: &App) -> std::sync::MutexGuard<'_, auth::Limiter> {
     app.limiter.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-fn login(app: &Arc<App>, rq: &mut Request, origin_ok: bool) -> Reply {
+fn login(app: &Arc<App>, rq: &Request, origin_ok: bool) -> Reply {
     if !origin_ok {
         return login_page(403, Some("Blocked by the origin check: reload this page and try again."));
     }
@@ -207,22 +206,26 @@ fn login(app: &Arc<App>, rq: &mut Request, origin_ok: bool) -> Reply {
     if let Some(wait) = lock(app).locked(ip, Instant::now()) {
         return login_page(429, Some(&format!("Too many wrong passwords: try again in {wait} s.")));
     }
-    let body = read_body(rq, 4096);
-    let password = auth::form_field(&body, "password").unwrap_or_default();
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let _gate = loop {
-        match app.login_gate.try_lock() {
-            Ok(g) => break g,
-            Err(std::sync::TryLockError::Poisoned(e)) => break e.into_inner(),
-            Err(_) if Instant::now() > deadline => return login_page(429, Some("Busy: try again in a moment.")),
-            Err(_) => std::thread::sleep(Duration::from_millis(50)),
+    // The body was read in full (with its deadline) before this request got here.
+    let password = auth::form_field(&rq.body, "password").unwrap_or_default();
+    let checked = {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let _gate = loop {
+            match app.login_gate.try_lock() {
+                Ok(g) => break g,
+                Err(std::sync::TryLockError::Poisoned(e)) => break e.into_inner(),
+                Err(_) if Instant::now() > deadline => return login_page(429, Some("Busy: try again in a moment.")),
+                Err(_) => std::thread::sleep(Duration::from_millis(50)),
+            }
+        };
+        // Other requests from this address may have failed while this one waited for the gate.
+        if let Some(wait) = lock(app).locked(ip, Instant::now()) {
+            return login_page(429, Some(&format!("Too many wrong passwords: try again in {wait} s.")));
         }
+        auth::check_password(&app.cfg.auth_file, &password)
     };
-    // Other requests from this address may have failed while this one waited for the gate.
-    if let Some(wait) = lock(app).locked(ip, Instant::now()) {
-        return login_page(429, Some(&format!("Too many wrong passwords: try again in {wait} s.")));
-    }
-    match auth::check_password(&app.cfg.auth_file, &password) {
+    // The gate is free again: a wrong password's 1 s delay holds up only its own client.
+    match checked {
         Ok(true) => {
             lock(app).success(ip);
             let mut sessions = app.sessions.lock().unwrap_or_else(|e| e.into_inner());
@@ -257,5 +260,20 @@ mod tests {
         assert!(!same_origin(Some("robot.local"), Some("null")));
         assert!(!same_origin(Some("robot.local"), None));
         assert!(!same_origin(None, Some("http://")));
+        // IPv6 literal hosts, with and without a port
+        assert!(same_origin(Some("[::1]:18081"), Some("http://[::1]:18081")));
+        assert!(same_origin(Some("[fe80::1]"), Some("http://[fe80::1]")));
+        assert!(!same_origin(Some("[fe80::1]"), Some("http://[fe80::1]:8080")));
+        assert!(!same_origin(Some("[fe80::1]"), Some("http://[fe80::2]")));
+    }
+
+    #[test]
+    fn frames_the_robot_page_on_this_host() {
+        assert_eq!(frame_src(Some("robot.local"), 8080), "http://robot.local:8080");
+        assert_eq!(frame_src(Some("10.0.0.5:80"), 8080), "http://10.0.0.5:8080");
+        // CSP has no IPv6 literals: any host on the robot web app's port
+        assert_eq!(frame_src(Some("[fe80::1]"), 8080), "http://*:8080");
+        assert_eq!(frame_src(Some("[::1]:80"), 8080), "http://*:8080");
+        assert_eq!(frame_src(Some("bad host\""), 8080), "http:");
     }
 }

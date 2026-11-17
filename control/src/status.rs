@@ -228,6 +228,7 @@ mod tests {
         assert_eq!(host_name("robot.local:8000"), "robot.local");
         assert_eq!(host_name("[fe80::1]:80"), "[fe80::1]");
         assert_eq!(host_name("[fe80::1]"), "[fe80::1]");
+        assert_eq!(clean_host(Some("[::1]:80")).as_deref(), Some("[::1]:80"));
     }
 
     #[test]

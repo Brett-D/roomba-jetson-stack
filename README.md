@@ -309,6 +309,11 @@ The page talks to ROS only through the `ros2` CLI (`ros2 service call`, `ros2 to
 and `ros2 topic echo` of `roomba/mode` and `battery_state`, plus `roomba/sensors` while the vacuum may be on).
 A sound or a vacuum switch takes a few seconds while the CLI starts.
 
+It listens on `[::]:80`, IPv6 and IPv4 (IPv4 on a socket of its own where the system keeps IPv6 sockets
+IPv6-only, and IPv4 only without IPv6 or with `--no-ipv6`; the journal says which). Each connection has its
+own thread, at most 32 from one address, and 10 s for its request and 10 s for the answer, with requests up to
+16 KB of headers and 16 KB of body: a client that stalls or never reads can't hold up anyone's Stop.
+
 Power-on is physical: apply power, and the Jetson boots and brings the page back by itself. The page logs to the
 journal (`journalctl -u roomba-control`). `roomba-control --check-comms` runs the comms check from a shell.
 Tests with stand-ins (no robot, serial port or power-off):

@@ -9,20 +9,20 @@
 mod auth;
 mod cmd;
 mod comms;
+mod http;
 mod robot;
 mod ros;
 mod status;
 mod web;
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
-const MAX_ACTIVE_REQUESTS: usize = 64;
-
 pub struct Config {
     pub listen: String,
+    /// Off: listen as if the machine had no IPv6 (--no-ipv6).
+    pub ipv6: bool,
     pub start_cmd: String,
     pub force_stop_cmd: String,
     pub poweroff_cmd: String,
@@ -54,6 +54,7 @@ roomba-control --check-comms  run COMMS CHECK once and print the result
 
   --listen ADDR            address:port to serve on ([::]:80: IPv6 and IPv4; mDNS gives
                            phones the IPv6 address first)
+  --no-ipv6                with [::]:PORT, listen on 0.0.0.0:PORT only (as without IPv6)
   --robot-ws DIR           robot workspace ($HOME/roomba_ws): its scripts/, install/ and
                            src/roomba_bringup/config/roomba_driver_robot.yaml
   --start-cmd CMD          bash command for Start (<ws>/scripts/run_robot.sh auto)
@@ -86,13 +87,14 @@ roomba-control --check-comms  run COMMS CHECK once and print the result
 fn parse_args(args: impl IntoIterator<Item = String>) -> Result<(Config, bool), String> {
     let home = cmd::home();
     let mut v: std::collections::HashMap<String, String> = Default::default();
-    let (mut dry_run, mut check) = (false, false);
+    let (mut dry_run, mut check, mut ipv6) = (false, false, true);
     let mut it = args.into_iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "-h" | "--help" => return Err(String::new()),
             "--dry-run-poweroff" => dry_run = true,
             "--check-comms" => check = true,
+            "--no-ipv6" => ipv6 = false,
             "--listen" | "--robot-ws" | "--start-cmd" | "--force-stop-cmd" | "--poweroff-cmd" | "--pid-file" | "--log-file"
             | "--auth-file" | "--stop-timeout-s" | "--start-timeout-s" | "--session-ttl-s" | "--robot-web-port"
             | "--driver-config" | "--serial-dev" | "--camera-usb" | "--launch-match" | "--driver-match" | "--learner-match" | "--ros-setup" | "--sound-mute-file" | "--state-dir" => {
@@ -115,6 +117,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<(Config, bool), 
     let camera_usb = camera.split_once(':').map(|(a, b)| (a.to_string(), b.to_string())).ok_or("--camera-usb: VID:PID")?;
     let cfg = Config {
         listen: v.remove("listen").unwrap_or_else(|| "[::]:80".into()),
+        ipv6,
         start_cmd: v.remove("start-cmd").unwrap_or_else(|| format!("{} auto", q(ws.join("scripts/run_robot.sh")))),
         force_stop_cmd: v.remove("force-stop-cmd").unwrap_or_else(|| q(ws.join("scripts/stop_slam.sh"))),
         poweroff_cmd: v.remove("poweroff-cmd").unwrap_or_else(|| "sudo -n /usr/bin/systemctl poweroff".into()),
@@ -149,7 +152,7 @@ pub struct App {
     pub ctl_cv: Condvar,
     pub sessions: Mutex<auth::Sessions>,
     pub limiter: Mutex<auth::Limiter>,
-    /// One password check at a time (scrypt is deliberately slow, and so is a wrong answer).
+    /// One password check (scrypt, deliberately slow) at a time.
     pub login_gate: Mutex<()>,
 }
 
@@ -171,13 +174,6 @@ impl App {
     }
 }
 
-struct Active(Arc<AtomicUsize>);
-
-impl Drop for Active {
-    fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::SeqCst);
-    }
-}
 
 fn main() {
     let (cfg, check) = match parse_args(std::env::args().skip(1)) {
@@ -208,24 +204,18 @@ fn main() {
     if !Path::new(&app.cfg.auth_file).exists() {
         eprintln!("warning: {} doesn't exist: nobody can log in (set the password with set_password)", app.cfg.auth_file.display());
     }
-    // [::] also takes IPv4 (bindv6only=0); without IPv6 on the machine, fall back to IPv4 only.
-    let fallback = app.cfg.listen.strip_prefix("[::]:").map(|port| format!("0.0.0.0:{port}"));
-    let server = tiny_http::Server::http(&app.cfg.listen)
-        .map(|s| (s, app.cfg.listen.clone()))
-        .or_else(|e| match &fallback {
-            Some(v4) => tiny_http::Server::http(v4).map(|s| (s, v4.clone())),
-            None => Err(e),
-        });
-    let server = match server {
-        Ok((s, addr)) => {
-            eprintln!("roomba-control listening on {addr}");
-            s
-        }
+    // [::]: IPv6 and IPv4 (see http.rs), or IPv4 only without IPv6.
+    let ipv6 = if app.cfg.ipv6 { http::Ipv6::Use } else { http::Ipv6::Off };
+    let listeners = match http::bind(&app.cfg.listen, ipv6) {
+        Ok(l) => l,
         Err(e) => {
             eprintln!("cannot listen on {}: {e}", app.cfg.listen);
             std::process::exit(1);
         }
     };
+    for (_, what) in &listeners {
+        eprintln!("roomba-control listening on {what}");
+    }
     {
         let app = Arc::clone(&app);
         std::thread::Builder::new().name("ros-monitor".into()).spawn(move || ros::supervise(app)).expect("monitor thread");
@@ -234,21 +224,10 @@ fn main() {
         let app = Arc::clone(&app);
         std::thread::Builder::new().name("motors".into()).spawn(move || ros::motor_worker(app)).expect("motor thread");
     }
-    let active = Arc::new(AtomicUsize::new(0));
-    for rq in server.incoming_requests() {
-        if active.load(Ordering::SeqCst) >= MAX_ACTIVE_REQUESTS {
-            let _ = rq.respond(tiny_http::Response::from_string("busy").with_status_code(503));
-            continue;
-        }
-        active.fetch_add(1, Ordering::SeqCst);
-        let guard = Active(Arc::clone(&active));
-        let app = Arc::clone(&app);
-        // A request that can't get a thread is dropped (the connection closes).
-        let _ = std::thread::Builder::new().spawn(move || {
-            let _guard = guard;
-            web::handle(&app, rq);
-        });
-    }
+    // Every connection on its own thread, with deadlines and size limits: see http.rs.
+    let web_app = Arc::clone(&app);
+    let handler: http::Handler = Arc::new(move |rq| web::handle(&web_app, rq));
+    http::serve(listeners.into_iter().map(|(l, _)| l).collect(), http::Limits::default(), handler);
 }
 
 #[cfg(test)]
