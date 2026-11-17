@@ -545,6 +545,11 @@ impl Learner {
         // A stamp going backwards (clock step) counts as a gap too.
         let dt = self.last_stamp.map(|t| stamp - t);
         let gap = dt.is_some_and(|dt| !(dt > 0.0 && dt <= self.p.gap_s));
+        if gap {
+            // Sample again at once: after a clock step back the old deadline lies ahead of the new
+            // timeline and would hold the samples back until the clock caught up.
+            self.next_sample = f64::NEG_INFINITY;
+        }
         if gap && self.pending.is_none() {
             let gap_s = dt.unwrap_or(0.0);
             self.pending = Some(Pending { kind: Kind::Gap { before: self.ocv, gap_s }, readings: Vec::new() });
@@ -651,7 +656,9 @@ impl Learner {
                 self.swap(How::Gap, m, before, unix, out);
             }
             Kind::Gap { before, gap_s } => {
-                if gap_s.abs() >= 10.0 {
+                if gap_s < 0.0 {
+                    out.logs.push(format!("sensor stamps went back {:.0} s (clock step): same pack", -gap_s));
+                } else if gap_s >= 10.0 {
                     let change = before.map_or(String::new(), |b| format!(", {:+.2} V", m - b));
                     out.logs.push(format!("sensor data back after {gap_s:.0} s{change}: same pack"));
                 }
@@ -1202,6 +1209,28 @@ mod tests {
         assert!(logs.iter().any(|m| m.contains("too little to learn from")), "{logs:?}");
         assert_eq!(l.state.learned_capacity_mah, None);
         assert_eq!(l.capacity_mah(), 2000.0);
+    }
+
+    #[test]
+    fn clock_step_back_keeps_sampling() {
+        let mut t = 0.0;
+        let mut sim = Sim { offset: 0.0, capacity: 2000.0, soc: 0.6, r: 0.2 };
+        let (mut l, _) = started(None, &sim, &mut t);
+        run(&mut l, &mut sim, &mut t, 100.0, -400.0);
+        // NTP steps the clock back an hour: a gap without a jump, and the samples go on.
+        t -= 3600.0;
+        let (mut samples, mut logs) = (0, Vec::new());
+        for _ in 0..30 {
+            sim.draw(-400.0, 1.0);
+            t += 1.0;
+            let out = l.on_frame(t, t, sim.mv(-400.0), -400);
+            samples += out.sample.is_some() as usize;
+            logs.extend(out.logs);
+        }
+        // 25 frames after the 5 settling ones, a sample every 10 s
+        assert_eq!(samples, 3);
+        assert_eq!(l.state.pack.id, 1);
+        assert_eq!(logs, ["sensor stamps went back 3599 s (clock step): same pack"]);
     }
 
     #[test]
