@@ -79,7 +79,8 @@ function render() {
   const off = st.power !== 'on';
   pwr.disabled = off || !!busy || !!p;
   const stateWord = { running: 'Running', stopped: 'Stopped', starting: 'Starting', stopping: 'Stopping, saving map' }[r.state];
-  $('pwr-state').textContent = stateWord + (r.external ? ' (launch not started from this page)' : '');
+  $('pwr-state').textContent = stateWord + (r.leftover ? ' (roomba_driver without its launch: switch off to clean up)'
+    : (r.external ? ' (launch not started from this page)' : ''));
   cls($('l-run'), r.state === 'running' ? 'g' : null);
   cls($('l-xfer'), (r.state === 'starting' || p === 'start') ? 'a' : null, r.state === 'starting' || p === 'start');
   cls($('l-save'), (r.state === 'stopping' || p === 'stop') ? 'a' : null, r.state === 'stopping' || p === 'stop');
@@ -216,7 +217,7 @@ function render() {
 
   // Annunciators
   const recentFault = st.last && !st.last.ok && st.last.ago_s < 600 && st.last.op !== 'shutdown';
-  if (r.state === 'running') ann('a-stack', 'g', r.external ? 'RUN (EXT)' : 'RUN');
+  if (r.state === 'running') ann('a-stack', r.leftover ? 'a' : 'g', r.leftover ? 'LEFTOVER' : (r.external ? 'RUN (EXT)' : 'RUN'));
   else if (r.state === 'starting') ann('a-stack', 'a', 'STARTING', true);
   else if (r.state === 'stopping') ann('a-stack', 'a', 'SAVING MAP', true);
   else if (recentFault) ann('a-stack', 'r', 'FAULT');

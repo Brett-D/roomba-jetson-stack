@@ -259,7 +259,8 @@ On a phone, "Add to Home Screen" adds it as an app.
   map). Down first switches the vacuum and brushes off (`roomba/cleaning_motors`, all off), then sends SIGTERM to
   the launch in `~/robot.pid` (a clean Ctrl-C-like stop: RTAB-Map saves the map, and the amber SAVING MAP light
   shows it). If the launch is still running after 100 s (graceful.py's own SIGTERM and SIGKILL escalation ends by
-  90 s), it runs `stop_slam.sh`. A launch without a PID file is stopped with `stop_slam.sh`. The lever moves only
+  90 s), it runs `stop_slam.sh`. A launch without a PID file is stopped with `stop_slam.sh`, and so is a
+  `roomba_driver` left running without its launch (the page shows the robot running, STACK LEFTOVER, until then). The lever moves only
   when the Jetson reports the new state.
 - **COMMS CHECK** (push-button) tests the Jetson ↔ Roomba serial link:
   - While the robot runs, the driver owns the port, so the page asks the driver over ROS (`roomba/mode`,

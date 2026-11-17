@@ -121,7 +121,7 @@ pub fn status(app: &App, host: Option<&str>) -> Value {
     let launches = robot::launches(app);
     let port = app.port_config();
     let port_present = port.port.exists();
-    let web_up = launches.any() && port_open(cfg.robot_web_port);
+    let web_up = launches.launch() && port_open(cfg.robot_web_port);
     let (log_lines, log_age) = log_tail(&cfg.log_file, 10);
     let wifi = std::fs::read_to_string("/proc/net/wireless").ok().as_deref().and_then(parse_wireless);
     let host = clean_host(host);
@@ -162,6 +162,7 @@ pub fn status(app: &App, host: Option<&str>) -> Value {
             "state": state,
             "pid": launches.ours,
             "external": !launches.others.is_empty(),
+            "leftover": launches.leftover(),
             "web_up": web_up,
             "web_port": cfg.robot_web_port,
         },

@@ -87,17 +87,32 @@ pub fn lock(app: &App) -> MutexGuard<'_, Ctl> {
 /// Robot launches: the one whose PID run_robot.sh wrote to the PID file, and any other (started
 /// some other way). A PID only counts while that process's command line still contains the launch
 /// pattern ("ros2 launch roomba_bringup"), so a stale PID file (after a reboot, or a reused PID)
-/// never points at an unrelated process.
+/// never points at an unrelated process. Plus the Roomba drivers: one that runs without a launch
+/// is a robot node left over (the launch crashed or was killed), still owning the motors and the
+/// serial port, so the robot counts as running until it is stopped too.
 pub struct Launches {
     pub ours: Option<i32>,
     pub others: Vec<i32>,
+    pub drivers: Vec<i32>,
 }
 
 impl Launches {
+    /// A launch, or a driver left without one.
     pub fn any(&self) -> bool {
+        self.launch() || !self.drivers.is_empty()
+    }
+
+    pub fn launch(&self) -> bool {
         self.ours.is_some() || !self.others.is_empty()
     }
+
+    pub fn leftover(&self) -> bool {
+        !self.launch() && !self.drivers.is_empty()
+    }
 }
+
+/// How long a driver may take to go after its launch has ended before it counts as left over.
+const LEFTOVER_GRACE: Duration = Duration::from_secs(3);
 
 pub fn read_pid(pid_file: &Path) -> Option<i32> {
     std::fs::read_to_string(pid_file).ok()?.trim().parse().ok().filter(|p| *p > 1)
@@ -111,8 +126,11 @@ pub fn launches(app: &App) -> Launches {
     let cfg = &app.cfg;
     let me = unsafe { libc::getuid() };
     let file_pid = read_pid(&cfg.pid_file);
-    let mut out = Launches { ours: None, others: Vec::new() };
+    let mut out = Launches { ours: None, others: Vec::new(), drivers: Vec::new() };
     for p in cmd::processes() {
+        if p.cmdline.contains(&cfg.driver_match) {
+            out.drivers.push(p.pid);
+        }
         if p.uid != me || !p.cmdline.contains(&cfg.launch_match) {
             continue;
         }
@@ -172,6 +190,9 @@ pub fn request_start(app: &Arc<App>) -> Result<String, String> {
     refuse_when_busy(&ctl)?;
     if matches!(ctl.checking, Some((CheckVia::Serial, _))) {
         return Err("COMMS CHECK has the serial port: try again in a few seconds.".into());
+    }
+    if l.leftover() {
+        return Err("roomba_driver is running without its launch: switch ROBOT PWR off first (it runs stop_slam.sh).".into());
     }
     if l.any() {
         return Err("The robot is already running.".into());
@@ -273,17 +294,27 @@ fn stop_robot(app: &Arc<App>) -> (bool, String) {
             }
         }
     }
-    let rest = launches(app);
+    // ros2 launch waits for its nodes, so a driver still there when it has ended is left over (a
+    // moment's grace, in case it is just exiting): it is stopped with stop_slam.sh like the rest.
+    let mut rest = launches(app);
+    let grace = Instant::now() + LEFTOVER_GRACE;
+    while clean && rest.leftover() && Instant::now() < grace {
+        std::thread::sleep(Duration::from_millis(250));
+        rest = launches(app);
+    }
     if !rest.any() {
         return match first.ours {
             Some(_) => (true, format!("Stopped after {} s.", t0.elapsed().as_secs())),
+            None if first.any() => (true, "Stopped.".into()),
             None => (true, "The robot was not running.".into()),
         };
     }
     let why = if first.ours.is_some() && !clean {
         format!("Still running {} s after SIGTERM: forcing stop (stop_slam.sh)…", cfg.stop_timeout.as_secs())
-    } else {
+    } else if rest.launch() {
         "A robot launch not started from here is running: stopping it (stop_slam.sh)…".to_string()
+    } else {
+        "roomba_driver is still running without its launch: stopping it (stop_slam.sh)…".to_string()
     };
     set_phase(app, &why, true);
     let r = cmd::run(&cfg.force_stop_cmd, Duration::from_secs(300));
@@ -414,7 +445,7 @@ pub fn check_comms(app: &App, via: CheckVia) -> comms::Outcome {
             if let Some(pid) = drivers(app).first() {
                 return comms::Outcome { link: Link::Busy, message: format!("roomba_driver is running (PID {pid}): press COMMS CHECK again to ask it over ROS.") };
             }
-            if launches(app).any() {
+            if launches(app).launch() {
                 return comms::Outcome { link: Link::Busy, message: "The robot stack is starting: press COMMS CHECK again.".into() };
             }
             let port = app.port_config();

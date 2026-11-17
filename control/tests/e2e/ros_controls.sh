@@ -19,6 +19,10 @@ export FAKE_START_DELAY=1
 TOKEN="fake-roomba-driver-$$"
 LTOKEN="fake-battery-learner-$$"
 rm -rf "$FAKE_DIR" && mkdir -p "$FAKE_DIR"
+# As on the robot, the driver is one of the launch's nodes (and stop_slam.sh kills a leftover one).
+printf '#!/usr/bin/env bash\n%s\nexec python3 %q %q\n' "$SETUP" "$HERE/fake_driver.py" "$TOKEN" > "$FAKE_DIR/launch_driver.sh"
+chmod +x "$FAKE_DIR/launch_driver.sh"
+export FAKE_LAUNCH_CHILD="$FAKE_DIR/launch_driver.sh" FAKE_DRIVER_MATCH="$TOKEN"
 JAR="$FAKE_DIR/jar"
 LOG="$FAKE_DIR/driver.jsonl"
 
@@ -50,6 +54,8 @@ wait_entry() {   # kind, expression, value, seconds
     for i in $(seq 1 $(($4 * 2))); do [ "$(last_entry "$1" "$2")" = "$3" ] && return 0; sleep 0.5; done
     return 1
 }
+# The fake drivers (python3 with $TOKEN; not the control page, which has it too).
+kill_drivers() { for p in $(pgrep -f -- "$TOKEN"); do [ "$(cat /proc/$p/comm 2>/dev/null)" = python3 ] && kill "$p"; done; }
 driver_up() {
     bash -c "$SETUP && exec python3 '$HERE/fake_driver.py' '$TOKEN'" > "$FAKE_DIR/driver.out" 2>&1 < /dev/null &
     DRIVER=$!
@@ -70,14 +76,14 @@ server_up() {
     code -c "$JAR" -H "$ORIGIN" --data-urlencode password=fixture-password "$BASE/login" > /dev/null
 }
 cleanup() {
-    kill "$SERVER" "$DRIVER" "${LEARNER:-}" 2>/dev/null
+    kill "$SERVER" "${LEARNER:-}" 2>/dev/null
+    kill_drivers
     for p in $(pgrep -f -- "$FAKE_MATCH"); do [ "$(cat /proc/$p/comm 2>/dev/null)" = bash ] && kill -9 "$p"; done
     bash -c "$SETUP && ros2 daemon stop" > /dev/null 2>&1
 }
 trap cleanup EXIT
 
 echo 'passive' > "$FAKE_DIR/mode"
-driver_up
 server_up
 post start > /dev/null
 wait_for 'd["robot"]["state"]' running 15
@@ -214,16 +220,17 @@ check "disarmed" "$(st 'd["vacuum"]["armed"]')" false
 echo "== disarmed when the driver goes away"
 post start > /dev/null
 wait_for 'd["robot"]["state"]' running 15
+wait_for 'd["ros"]["available"]' true 40
 settled; post vacuum/arm > /dev/null
 wait_for 'd["vacuum"]["armed"]' true 40
-kill "$DRIVER"
+kill_drivers
 wait_for 'd["vacuum"]["armed"]' false 15
 check_has "why" "$(st 'd["vacuum"]["note"]["message"]')" "robot stack stopped"
 check "sounds unavailable" "$(st 'd["ros"]["available"], d["ros"]["reason"]')" '[false, "Waiting for roomba_driver\u2026"]'
 n_gone=$(lines)
 
 echo "== a driver that comes back gets the OFF (the last one may have died with the motors on)"
-driver_up
+driver_up   # outside the launch from here on: a leftover when the launch ends
 wait_for 'd["ros"]["available"]' true 40
 settled
 check "OFF to the new driver" "$(vac_seq "$n_gone")" '[false]'
@@ -268,5 +275,7 @@ check "shutdown" "$(post shutdown)" 202
 wait_for 'd["power"]' off 60
 off_at=$(last_entry motors 'e["t"] if not e["vacuum"] else None')
 check "all off before SIGTERM" "$(python3 -c "print($off_at < $(cat "$FAKE_DIR/sigterm_at"))")" True
+check "the driver left without its launch was stopped (stop_slam.sh)" "$([ -e "$FAKE_DIR/force_stop_called" ] && echo yes || echo no)" yes
+check "robot stopped" "$(st 'd["robot"]["state"]')" stopped
 
 if [ "$fails" -eq 0 ]; then echo "ALL PASSED"; else echo "$fails FAILED"; exit 1; fi

@@ -13,6 +13,7 @@ AUTH="$CONTROL/tests/fixtures/auth_roomba_rs.json"   # password: fixture-passwor
 export FAKE_DIR="$CONTROL/target/e2e"
 export FAKE_MATCH="fake-robot-launch-$$"
 FAKE_DRIVER="fake-roomba-driver-$$"
+export FAKE_DRIVER_MATCH="$FAKE_DRIVER"   # fake_stop_slam.sh kills these, like stop_slam.sh the driver
 export FAKE_START_DELAY=2
 rm -rf "$FAKE_DIR" && mkdir -p "$FAKE_DIR"
 JAR="$FAKE_DIR/jar"
@@ -31,6 +32,8 @@ wait_for() {   # expression, value, seconds
 }
 login() { code -c "$JAR" -H "$ORIGIN" --data-urlencode "password=$1" "$BASE/login"; }
 post() { code -b "$JAR" -X POST -H "$ORIGIN" "$BASE/api/$1"; }
+# PIDs of the fake drivers (bash loops with $FAKE_DRIVER; not the control page, which has it too).
+fake_drivers() { for p in $(pgrep -f -- "$FAKE_DRIVER"); do [ "$(cat /proc/$p/comm 2>/dev/null)" = bash ] && echo "$p"; done; }
 kill_fakes() {
     for p in $(pgrep -f -- "$FAKE_MATCH"); do [ "$(cat /proc/$p/comm 2>/dev/null)" = bash ] && kill -9 "$p"; done
 }
@@ -118,6 +121,30 @@ check "start refused" "$(post start)" 409
 check "stop" "$(post stop)" 202
 wait_for 'd["robot"]["state"]' stopped 10 || echo "FAIL: never stopped"
 check "stopped with stop_slam.sh" "$([ -e "$FAKE_DIR/force_stop_called" ] && echo called || echo no)" called
+rm -f "$FAKE_DIR/force_stop_called"
+
+echo "== roomba_driver left without its launch"
+setsid bash -c 'while :; do sleep 0.2; done' "$FAKE_DRIVER" > /dev/null 2>&1 < /dev/null &
+disown
+sleep 0.5
+check "seen as running, left over" "$(st 'd["robot"]["state"], d["robot"]["leftover"], d["robot"]["pid"]')" '["running", true, null]'
+check "start refused" "$(post start)" 409
+check "stop" "$(post stop)" 202
+wait_for 'd["robot"]["state"]' stopped 15 || echo "FAIL: never stopped"
+check "stopped with stop_slam.sh" "$([ -e "$FAKE_DIR/force_stop_called" ] && echo called || echo no)" called
+check "the driver is gone" "$(fake_drivers)" ""
+rm -f "$FAKE_DIR/force_stop_called"
+
+echo "== the launch ends but its driver doesn't"
+post start > /dev/null
+wait_for 'd["robot"]["state"]' running 15
+setsid bash -c 'while :; do sleep 0.2; done' "$FAKE_DRIVER" > /dev/null 2>&1 < /dev/null &
+disown
+check "stop" "$(post stop)" 202
+wait_for 'd["robot"]["state"]' stopped 30 || echo "FAIL: never stopped"
+check "stop_slam.sh for the leftover driver" "$([ -e "$FAKE_DIR/force_stop_called" ] && echo called || echo no)" called
+check_has "message" "$(st 'd["last"]["message"]')" "stop_slam.sh"
+check "the driver is gone" "$(fake_drivers)" ""
 rm -f "$FAKE_DIR/force_stop_called"
 
 echo "== comms check, stack stopped"
