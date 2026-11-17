@@ -796,11 +796,12 @@ let depthAvailable = null;   // false: this server has no /depth.mjpg (the Pytho
 function tab() { return document.body.dataset.tab; }
 
 function cameraVisible() {
-  return !document.hidden && !camPaused && (!phone.matches || tab() === 'camera' || tab() === 'mfd');
+  return !document.hidden && !camPaused && !viewCollapsed('camera') && (!phone.matches || tab() === 'camera' || tab() === 'mfd');
 }
 
 function depthVisible() {
-  return !document.hidden && !depthPaused && depthAvailable !== false && (!phone.matches || tab() === 'depth' || tab() === 'mfd');
+  return !document.hidden && !depthPaused && depthAvailable !== false && !viewCollapsed('depth')
+    && (!phone.matches || tab() === 'depth' || tab() === 'mfd');
 }
 
 // Only stream while the camera is on screen: saves ~0.4 MB/s and phone battery.
@@ -863,9 +864,7 @@ function setTab(t, persist = true) {
     if (persist) localStorage.setItem('roomba.tab', t);
   } catch (e) { /* private mode */ }
   $('btn-layout').textContent = t === 'mfd' ? '☰ Full page' : '▦ 3-view';
-  updateStream();
-  updateDepth();
-  resize();
+  mfdApply();
 }
 
 document.querySelectorAll('.tabs button').forEach((b) => { b.onclick = () => setTab(b.dataset.tab); });
@@ -873,7 +872,7 @@ $('btn-layout').onclick = () => setTab(tab() === 'mfd' ? 'camera' : 'mfd');
 $('btn-pause').onclick = () => { camPaused = !camPaused; updateStream(); };
 $('btn-depth-pause').onclick = () => { depthPaused = !depthPaused; updateDepth(); };
 document.addEventListener('visibilitychange', () => { updateStream(); updateDepth(); });
-phone.addEventListener('change', () => { updateStream(); updateDepth(); resize(); });
+phone.addEventListener('change', mfdApply);
 
 // Reload the camera stream if it stalls (e.g. after the robot restarts).
 cam.onerror = () => {
@@ -889,12 +888,189 @@ depth.onerror = async () => {
   setTimeout(updateDepth, 2000);
 };
 
+// ---------- three-view: draggable dividers, collapsible views, saved per device ----------
+// Wide screen: the views sit side by side; drag a divider to share the width between its two
+// neighbours. Phone: they stack; drag a divider to set the height of the view above it. Tap a
+// view's title to collapse it (a collapsed camera or depth view stops its stream). Double-click
+// a divider to reset it; "Reset views" resets everything.
+const MFD_KEY = 'roomba.mfd.v1';
+const VIEWS = ['camera', 'map', 'depth'];
+const WRAPS = { camera: '.camera-wrap', map: '.map-wrap', depth: '.depth-wrap' };
+let MFD = mfdLoad();
+
+function mfdDefault() { return { grow: { camera: 1, map: 1, depth: 1 }, h: {}, collapsed: {} }; }
+
+function mfdLoad() {
+  try {
+    const m = JSON.parse(localStorage.getItem(MFD_KEY));
+    if (m && m.grow && m.h && m.collapsed) return m;
+  } catch (e) { /* none saved, or private mode */ }
+  return mfdDefault();
+}
+
+function mfdSave() {
+  try { localStorage.setItem(MFD_KEY, JSON.stringify(MFD)); } catch (e) { /* private mode */ }
+}
+
+function viewSec(v) { return $('sec-' + v); }
+function viewWrap(v) { return viewSec(v).querySelector(WRAPS[v]); }
+function viewTitle(v) { return viewSec(v).querySelector('h2'); }
+function viewCollapsed(v) { return tab() === 'mfd' && !!MFD.collapsed[v]; }
+
+function mfdApply() {
+  const on = tab() === 'mfd';
+  for (const v of VIEWS) {
+    const s = viewSec(v);
+    const w = viewWrap(v);
+    s.classList.toggle('collapsed', on && !!MFD.collapsed[v]);
+    s.style.flexGrow = on && !phone.matches ? String(MFD.grow[v] || 1) : '';
+    const h = on && phone.matches ? MFD.h[v] : null;
+    w.style.height = h ? h + 'px' : '';
+    w.classList.toggle('sized', !!h);
+    const title = viewTitle(v);
+    if (on) {
+      title.setAttribute('role', 'button');
+      title.tabIndex = 0;
+      title.setAttribute('aria-expanded', String(!MFD.collapsed[v]));
+    } else {
+      title.removeAttribute('role');
+      title.removeAttribute('tabindex');
+      title.removeAttribute('aria-expanded');
+    }
+  }
+  updateStream();
+  updateDepth();
+  resize();
+  postHeight();
+}
+
+function toggleView(v) {
+  MFD.collapsed[v] = !MFD.collapsed[v];
+  mfdSave();
+  mfdApply();
+}
+
+// The nearest open view on one side of divider i (between VIEWS[i] and VIEWS[i + 1]).
+function openView(i, dir) {
+  for (let k = dir < 0 ? i : i + 1; k >= 0 && k < VIEWS.length; k += dir) {
+    if (!MFD.collapsed[VIEWS[k]]) return VIEWS[k];
+  }
+  return null;
+}
+
+// Wide: move `dx` pixels of width from the right neighbour to the left one (flex-grow shares).
+function shareWidth(a, b, wa, wb, dx) {
+  const g = (MFD.grow[a] || 1) + (MFD.grow[b] || 1);
+  const na = Math.max(140, Math.min(wa + wb - 140, wa + dx));
+  MFD.grow[a] = g * na / (wa + wb);
+  MFD.grow[b] = g - MFD.grow[a];
+  viewSec(a).style.flexGrow = String(MFD.grow[a]);
+  viewSec(b).style.flexGrow = String(MFD.grow[b]);
+}
+
+// Phone: the height of the view above the divider.
+function setViewHeight(v, h) {
+  MFD.h[v] = Math.round(Math.max(100, Math.min(h, 1600)));
+  viewWrap(v).style.height = MFD.h[v] + 'px';
+  viewWrap(v).classList.add('sized');
+}
+
+function initMfd() {
+  for (const v of VIEWS) {
+    const title = viewTitle(v);
+    title.addEventListener('click', () => { if (tab() === 'mfd') toggleView(v); });
+    title.addEventListener('keydown', (e) => {
+      if (tab() === 'mfd' && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); toggleView(v); }
+    });
+  }
+  document.querySelectorAll('.mfd-split').forEach((sp) => {
+    const i = Number(sp.dataset.split);
+    sp.addEventListener('pointerdown', (ev) => {
+      if (tab() !== 'mfd' || ev.button !== 0) return;
+      const a = openView(i, -1);
+      const b = openView(i, 1);
+      if (!a || (!phone.matches && !b)) return;
+      ev.preventDefault();
+      try { sp.setPointerCapture(ev.pointerId); } catch (e) { /* synthetic */ }
+      const s = {
+        x: ev.clientX, y: ev.clientY,
+        wa: viewSec(a).getBoundingClientRect().width, wb: b ? viewSec(b).getBoundingClientRect().width : 0,
+        ga: MFD.grow[a] || 1, gb: b ? MFD.grow[b] || 1 : 0,
+        h: viewWrap(a).getBoundingClientRect().height,
+      };
+      sp.classList.add('dragging');
+      document.body.classList.add('resizing');
+      const move = (e) => {
+        if (phone.matches) setViewHeight(a, s.h + e.clientY - s.y);
+        else {
+          MFD.grow[a] = s.ga;
+          MFD.grow[b] = s.gb;
+          shareWidth(a, b, s.wa, s.wb, e.clientX - s.x);
+        }
+      };
+      const up = () => {
+        sp.removeEventListener('pointermove', move);
+        sp.removeEventListener('pointerup', up);
+        sp.removeEventListener('pointercancel', up);
+        sp.classList.remove('dragging');
+        document.body.classList.remove('resizing');
+        mfdSave();
+        postHeight();
+      };
+      sp.addEventListener('pointermove', move);
+      sp.addEventListener('pointerup', up);
+      sp.addEventListener('pointercancel', up);
+    });
+    sp.addEventListener('dblclick', () => {
+      const a = openView(i, -1);
+      const b = openView(i, 1);
+      if (phone.matches) { if (a) delete MFD.h[a]; } else { if (a) MFD.grow[a] = 1; if (b) MFD.grow[b] = 1; }
+      mfdSave();
+      mfdApply();
+    });
+    sp.addEventListener('keydown', (e) => {
+      const keys = phone.matches ? { ArrowDown: 20, ArrowUp: -20 } : { ArrowRight: 20, ArrowLeft: -20 };
+      const step = keys[e.key];
+      const a = openView(i, -1);
+      const b = openView(i, 1);
+      if (!step || !a || (!phone.matches && !b)) return;
+      e.preventDefault();
+      if (phone.matches) setViewHeight(a, viewWrap(a).getBoundingClientRect().height + step);
+      else shareWidth(a, b, viewSec(a).getBoundingClientRect().width, viewSec(b).getBoundingClientRect().width, step);
+      mfdSave();
+      postHeight();
+    });
+  });
+  $('btn-mfd-reset').onclick = mfdReset;
+  // In the control page's display: its RESET LAYOUT resets the views too.
+  window.addEventListener('message', (e) => {
+    if (e.source === window.parent && e.data && e.data.type === 'roomba-mfd-reset') mfdReset();
+  });
+  if ('ResizeObserver' in window) new ResizeObserver(postHeight).observe(document.querySelector('main.grid'));
+}
+
+function mfdReset() {
+  MFD = mfdDefault();
+  mfdSave();
+  mfdApply();
+}
+
+// Inside a frame (the control page), report the content height so a phone layout can show it
+// all without a scrollbar inside the frame.
+function postHeight() {
+  if (window.parent === window) return;
+  const g = document.querySelector('main.grid');
+  const height = Math.ceil(g.getBoundingClientRect().bottom + window.scrollY + 12);
+  window.parent.postMessage({ type: 'roomba-mfd-height', height }, '*');
+}
+
 let savedTab = 'camera';
 try {
   const embedded = window.name === 'roomba-mfd' && !sessionStorage.getItem('roomba.tab');
   if (new URLSearchParams(location.search).get('layout') === 'mfd' || embedded) sessionStorage.setItem('roomba.tab', 'mfd');
   savedTab = sessionStorage.getItem('roomba.tab') || localStorage.getItem('roomba.tab') || 'camera';
 } catch (e) { /* private mode */ }
+initMfd();
 setTab(TABS.includes(savedTab) ? savedTab : 'camera', false);
 loadDepthInfo().then(updateDepth);
 renderZones();

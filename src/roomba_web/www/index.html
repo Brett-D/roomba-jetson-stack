@@ -9,7 +9,7 @@
   <link rel="manifest" href="/static/manifest.json">
   <link rel="icon" href="/static/icon-192.png">
   <link rel="apple-touch-icon" href="/static/icon-192.png">
-  <link rel="stylesheet" href="/static/style.css?v=20261116a">
+  <link rel="stylesheet" href="/static/style.css?v=20261116b">
 </head>
 <body data-tab="camera">
   <header class="topbar">
@@ -21,6 +21,7 @@
       <span id="pill-robot" class="pill" hidden></span>
     </div>
     <button id="btn-layout" class="ghost layout-btn" type="button" title="Camera, map and depth only, side by side">▦ 3-view</button>
+    <button id="btn-mfd-reset" class="ghost mfd-reset" type="button" title="Three-view: equal sizes, every view open">↺ Reset views</button>
     <form method="post" action="/logout"><button class="ghost" type="submit">Log out</button></form>
   </header>
 
@@ -43,7 +44,7 @@
 
   <main class="grid">
     <section class="card" id="sec-camera">
-      <div class="row-between mfd-keep">
+      <div class="row-between mfd-keep mfd-head">
         <h2>Camera</h2>
         <div>
           <button id="btn-grid" type="button" class="ghost small" title="Floor grid: 25 cm squares drawn on the floor. They should sit flat on the floor and stay put while the robot moves.">▦ Grid on</button>
@@ -81,8 +82,9 @@
       <ul id="det-list" class="det-list"></ul>
     </section>
 
+    <div class="mfd-split" data-split="0" role="separator" tabindex="0" aria-label="Resize camera and map: drag or use the arrow keys; double-click resets"></div>
     <section class="card" id="sec-map">
-      <h2 class="mfd-keep">Top-down map</h2>
+      <h2 class="mfd-keep mfd-head">Top-down map</h2>
       <div class="toolbar">
         <button id="btn-goal" type="button">🎯 Go to…</button>
         <button id="btn-draw" type="button" class="ghost">✏️ Draw exclusion zone</button>
@@ -119,8 +121,9 @@
       <p id="zone-note" class="note"></p>
     </section>
 
+    <div class="mfd-split" data-split="1" role="separator" tabindex="0" aria-label="Resize map and depth: drag or use the arrow keys; double-click resets"></div>
     <section class="card" id="sec-depth">
-      <div class="row-between mfd-keep">
+      <div class="row-between mfd-keep mfd-head">
         <h2>Depth</h2>
         <button id="btn-depth-pause" type="button" class="ghost small">⏸ Pause</button>
       </div>
@@ -136,6 +139,6 @@
     </section>
   </main>
 
-  <script src="/static/app.js?v=20261116a"></script>
+  <script src="/static/app.js?v=20261116b"></script>
 </body>
 </html>

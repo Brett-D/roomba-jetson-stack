@@ -301,6 +301,8 @@ Tests with stand-ins (no robot, serial port or power-off):
 On a wide screen the robot page (`http://<jetson-host>.local:8080/`) shows the camera, the map and the depth
 camera side by side. On a phone, tabs pick one of them, or **All 3** stacks them. **▦ 3-view** (or
 `?layout=mfd`) shows only the three views, without their controls: this is what the control page frames.
+In the three-view, drag the dividers between the views to resize them, and click a view's title to collapse
+or expand it (a collapsed camera or depth view stops its stream). **↺ Reset views** restores equal sizes.
 - **Depth** is `/depth.mjpg`: `/camera/depth/image_rect_raw` in turbo colours, red at 0.2 m to blue at 4 m and
   black where there is no depth (parameters `depth_min_m`, `depth_max_m`).
   - It runs at up to `depth_fps` (5) frames a second.
