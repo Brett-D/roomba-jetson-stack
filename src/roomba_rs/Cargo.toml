@@ -60,6 +60,10 @@ path = "src/bin/nav2_guard.rs"
 name = "sound_events"
 path = "src/bin/sound_events.rs"
 
+[[bin]]
+name = "battery_learner"
+path = "src/bin/battery_learner.rs"
+
 # Learned navigation skills (docs/learned-skills.md): opt-in, build with --features learned.
 [[bin]]
 name = "unstuck_skill"

@@ -3,7 +3,7 @@
 <package format="3">
   <name>roomba_rs</name>
   <version>0.1.0</version>
-  <description>Rust ports of the Roomba robot's ROS 2 nodes (floor_obstacles, ekf_inputs, vslam_watchdog, map_gap_filler, ignore_zones, web_server, set_password, explorer, nav_coach, person_detector), sound_events (event sounds on the Roomba's beeper) and twin2d, the 2D digital twin of the house and the robot. Needs a Rust toolchain (rustup) and libclang-dev; cargo fetches rclrs. person_detector also needs TensorRT, CUDA and OpenCV dev files (JetPack).</description>
+  <description>Rust ports of the Roomba robot's ROS 2 nodes (floor_obstacles, ekf_inputs, vslam_watchdog, map_gap_filler, ignore_zones, web_server, set_password, explorer, nav_coach, person_detector), sound_events (event sounds on the Roomba's beeper), battery_learner (the self-learning gauge of the robot's 18 V pack) and twin2d, the 2D digital twin of the house and the robot. Needs a Rust toolchain (rustup) and libclang-dev; cargo fetches rclrs. person_detector also needs TensorRT, CUDA and OpenCV dev files (JetPack).</description>
   <maintainer email="brett@example.com">brett</maintainer>
   <license>MIT</license>
 

@@ -9,7 +9,7 @@ find_package(ament_cmake REQUIRED)
 find_program(CARGO cargo HINTS "$ENV{HOME}/.cargo/bin" REQUIRED)
 
 set(CARGO_TARGET_DIR "${CMAKE_CURRENT_BINARY_DIR}/cargo")
-set(NODES floor_obstacles ekf_inputs vslam_watchdog map_gap_filler ignore_zones web_server set_password explorer nav_coach person_detector twin2d nav2_guard sound_events)
+set(NODES floor_obstacles ekf_inputs vslam_watchdog map_gap_filler ignore_zones web_server set_password explorer nav_coach person_detector twin2d nav2_guard sound_events battery_learner)
 
 # Learned navigation skills (docs/learned-skills.md): on by default since the robot uses them
 # (robot.launch.py: unstuck_skill:=true goal_ranking:=learned). ON adds the cargo feature "learned"

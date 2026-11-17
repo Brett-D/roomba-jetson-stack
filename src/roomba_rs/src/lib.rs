@@ -1,5 +1,6 @@
 //! Processing used by the Rust nodes, kept free of ROS types so it can be unit tested - except
 //! `tf_listener`, the /tf subscriptions feeding `tf_buffer` (tf2's BufferCore for rclrs nodes).
+pub mod battery_learner;
 pub mod cv;
 pub mod ekf;
 pub mod explorer;
