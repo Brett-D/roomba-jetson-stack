@@ -227,6 +227,9 @@ python train_yolo.py --data E:\twin\datasets\v2ae --model E:\twin\runs\train\yol
     --name yolo11s_synth_v2ae_neg --negatives E:\twin\real_frames\left --epochs 10 --lr0 0.002 --warmup-epochs 0.5
 python eval_yolo.py --model <onnx> --synthetic E:\twin\datasets\v2 --list E:\twin\datasets\v2\splits\val.txt `
     --real E:\twin\real_frames\left --real-list E:\twin\datasets\v2ae\splits\real_heldout.txt --tag <name>_ --out E:\twin\eval\v2
+# the robot's detector profiles (person_model:= stock / finetuned / finetuned_n, each with its own classes) side by
+# side on synthetic val and on two people-free robot recordings (fresh_map8, fresh_map7 frames in E:\twin\real_frames_fm7)
+python compare_robot_detectors.py --out E:\twin\eval\hookup
 ```
 `--negatives` adds the first 70 % (by time) of the real frames — the recording has no people, so
 they are true negatives — as background images, and keeps the last 30 % as a held-out false-positive
