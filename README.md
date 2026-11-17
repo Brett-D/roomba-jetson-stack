@@ -147,13 +147,16 @@ Roomba's beeper through the driver's `/roomba/define_song` service:
 
 | Event | Song slot | Notes (MIDI) | Durations (1/64 s) |
 |---|---|---|---|
-| **hello**: the driver first reports Safe or Full mode after start-up (once; `HELO` on the display for 3 s too) | 0 | 67 72 76 | 10 10 24 |
+| **hello**: the driver first reports Safe or Full mode after start-up (once; `HELO` on the display for 3 s too, see below) | 0 | 67 72 76 | 10 10 24 |
 | **uh-oh**: the bumper is pressed (left or right, a new press; not the light bumpers), at most once per 4 s, never over a song that is playing | 1 | 76 76 69 | 12 6 28 |
 | **done**: an exploration run finishes or gets back to its start point (once per run) | 2 | 72 76 79 84 rest 79 84 | 7 7 7 14 4 8 36 |
 
 Each sound is a single `define_song` call with the full notes and `play: true`, so it doesn't matter
 if something else (the web control page, a `ros2 service call`) has used the same slot meanwhile;
 slots 3 and 4 are never touched. Nothing plays outside Safe/Full mode, and the node never changes the mode.
+`HELO` is only shown when the driver reports `auto_reenter_mode: false` (as in `roomba_driver_robot.yaml`;
+the node asks whenever the driver appears): with `true` the driver re-enters Safe mode for a display command
+that arrives in Passive, and the robot can drop to Passive just before one arrives.
 
 - **Mute** without restarting: `mkdir -p ~/.config/roomba && touch ~/.config/roomba/sound_muted`;
   unmute with `rm ~/.config/roomba/sound_muted`. The file is checked at each event (`HELO` still shows).

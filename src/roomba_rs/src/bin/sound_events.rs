@@ -1,7 +1,8 @@
 //! sound_events: event sounds on the Roomba's beeper (logic in roomba_rs::sound_events).
 //!
 //! - "hello" (song 0) and HELO on the display for display_s, once, when the driver first reports
-//!   Safe or Full mode after the node started;
+//!   Safe or Full mode after the node started (HELO only if the driver's auto_reenter_mode is false:
+//!   with true, a display command that crosses a drop to Passive makes it re-enter Safe mode);
 //! - "uh-oh" (song 1) on a rising edge of bump_left / bump_right (not the light bumpers), at most one
 //!   per bump_interval_s and never while a song plays;
 //! - a short "done" jingle (song 2) when an exploration run finishes or gets back to its start point,
@@ -20,7 +21,8 @@
 //!             display_s (3.0)
 //! Subscribes: /roomba/sensors, /explorer/status (latched)
 //! Publishes:  /roomba/display
-//! Uses:       /roomba/define_song (roomba_msgs/srv/DefineSong)
+//! Uses:       /roomba/define_song (roomba_msgs/srv/DefineSong), /roomba_driver/get_parameters
+//!             (auto_reenter_mode, asked whenever the driver appears)
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
@@ -28,22 +30,32 @@ use std::time::Duration;
 
 use anyhow::Result;
 use rclrs::*;
-use ros_env::{roomba_msgs, std_msgs};
+use ros_env::{rcl_interfaces, roomba_msgs, std_msgs};
 
+use rcl_interfaces::srv::{GetParameters, GetParameters_Request, GetParameters_Response};
 use roomba_msgs::srv::{DefineSong, DefineSong_Request, DefineSong_Response};
 use roomba_rs::node_params::{mono, NodeParams};
 use roomba_rs::sound_events::{Action, Event, Params, Sensors, Skip, SoundEvents};
 use roomba_rs::watchdog::ParamSource;
 
 const DEFINE_SONG: &str = "/roomba/define_song";
+const DRIVER_PARAMS: &str = "/roomba_driver/get_parameters";
+const AUTO_REENTER: &str = "auto_reenter_mode";
+/// rcl_interfaces/ParameterType PARAMETER_BOOL.
+const PARAMETER_BOOL: u8 = 1;
 
 struct State {
     core: SoundEvents,
     define: Client<DefineSong>,
+    get_params: Client<GetParameters>,
     display: Publisher<std_msgs::msg::String>,
     mute_file: PathBuf,
     /// The define_song service was available at the last tick.
     driver: bool,
+    /// Driver appearances so far (an answer from an earlier one is ignored), and whether this one
+    /// still has to be asked for its auto_reenter_mode.
+    driver_gen: u64,
+    ask_params: bool,
     node: Node,
     worker: Arc<OnceLock<Worker<State>>>,
 }
@@ -145,14 +157,50 @@ impl State {
         if driver != self.driver && self.core.enabled() {
             if driver {
                 log!(self.node.info(), "Driver found ({DEFINE_SONG})");
+                self.driver_gen += 1;
+                self.ask_params = true;
             } else {
                 log!(self.node.warn(), "{DEFINE_SONG} went away; waiting for the driver");
             }
             self.driver = driver;
         }
+        if driver && self.ask_params && self.get_params.service_is_ready().unwrap_or(false) {
+            self.ask_params = false;
+            self.ask_auto_reenter();
+        }
         let file = &self.mute_file;
         let actions = self.core.tick(mono(), driver, &|| file.exists());
         self.run(actions);
+    }
+
+    fn ask_auto_reenter(&mut self) {
+        let gen = self.driver_gen;
+        let worker = Arc::clone(&self.worker);
+        let request = GetParameters_Request { names: vec![AUTO_REENTER.to_string()] };
+        let sent = self.get_params.call_then(request, move |r: GetParameters_Response| {
+            let value = r.values.first().filter(|v| v.type_ == PARAMETER_BOOL).map(|v| v.bool_value);
+            if let Some(w) = worker.get() {
+                let _ = w.run(move |s: &mut State| s.on_auto_reenter(gen, value));
+            }
+        });
+        if sent.is_err() {
+            self.on_auto_reenter(gen, None);
+        }
+    }
+
+    fn on_auto_reenter(&mut self, gen: u64, value: Option<bool>) {
+        if gen != self.driver_gen {
+            return;
+        }
+        self.core.on_driver_params(value);
+        match value {
+            Some(false) => log!(self.node.info(), "Driver's {AUTO_REENTER}: false: HELO goes on the display"),
+            Some(true) => log!(
+                self.node.info(),
+                "Driver's {AUTO_REENTER}: true: no HELO on the display (a display command in Passive mode would make it re-enter Safe mode)"
+            ),
+            None => log!(self.node.warn(), "Could not read the driver's {AUTO_REENTER}: no HELO on the display"),
+        }
     }
 }
 
@@ -184,9 +232,12 @@ fn main() -> Result<()> {
     let state = State {
         core: SoundEvents::new(p),
         define: node.create_client::<DefineSong>(DEFINE_SONG)?,
+        get_params: node.create_client::<GetParameters>(DRIVER_PARAMS)?,
         display: node.create_publisher("/roomba/display".keep_last(10))?,
         mute_file,
         driver: false,
+        driver_gen: 0,
+        ask_params: false,
         node: node.clone(),
         worker: Arc::clone(&worker_cell),
     };

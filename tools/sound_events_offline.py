@@ -10,12 +10,15 @@ Safe/Full mode) and checks:
   - nothing on the latched status of an earlier run, a bump in Passive mode, the light bumpers alone,
     a second bump within 4 s, a bump while muted or while a song plays, a finished run in Passive mode,
     a second hello;
-  - HELO on the display and cleared ~3 s later, only in Safe/Full mode; the OI mode never changed;
+  - HELO on the display and cleared ~3 s later, only in Safe/Full mode (with --auto-reenter-mode, where the
+    driver would re-enter Safe mode for a display command in Passive: no display command at all);
+  - the OI mode never changed;
   - a slow define_song answer (2.5 s) doesn't hold anything up;
   - the node exits with status 0 on SIGINT.
 
   source /opt/ros/jazzy/setup.bash && source <workspace>/install/setup.bash
   ROS_DOMAIN_ID=77 python3 tools/sound_events_offline.py [--node <sound_events binary>] [--dir D] [--keep]
+                                                        [--auto-reenter-mode]
 
 Without --node it runs `ros2 run roomba_rs sound_events`. The scratch directory is made in --dir (default:
 the current directory) and removed afterwards unless --keep. Exit status 0 when every check passed.
@@ -49,8 +52,10 @@ SONGS = {0: ('hello', [67, 72, 76], [10, 10, 24]),
 
 
 class FakeDriver(Node):
-    def __init__(self):
-        super().__init__('fake_roomba_driver')
+    def __init__(self, auto_reenter_mode):
+        # The driver's node name: sound_events reads its auto_reenter_mode parameter.
+        super().__init__('roomba_driver')
+        self.declare_parameter('auto_reenter_mode', auto_reenter_mode)
         self.t0 = time.monotonic()
         self.lock = threading.Lock()
         self.mode = PASSIVE
@@ -152,6 +157,8 @@ def main():
     ap.add_argument('--node', help='sound_events binary (default: ros2 run roomba_rs sound_events)')
     ap.add_argument('--dir', default='.', help='where to make the scratch directory (default: here)')
     ap.add_argument('--keep', action='store_true', help='keep the scratch directory (node log)')
+    ap.add_argument('--auto-reenter-mode', action='store_true',
+                    help='the fake driver reports auto_reenter_mode: true (expect no display commands)')
     a = ap.parse_args()
     if os.environ.get('ROS_DOMAIN_ID', '0') in ('', '0'):
         sys.exit('Set ROS_DOMAIN_ID to a private domain (e.g. 77) so this cannot reach a running robot.')
@@ -167,7 +174,7 @@ def main():
     proc = subprocess.Popen(cmd, env=env, stdout=log, stderr=subprocess.STDOUT)
 
     rclpy.init()
-    fake = FakeDriver()
+    fake = FakeDriver(a.auto_reenter_mode)
     ex = MultiThreadedExecutor(num_threads=6)
     ex.add_node(fake)
     threading.Thread(target=ex.spin, daemon=True).start()
@@ -258,8 +265,11 @@ def main():
               for _, srv, n, notes, durations, play, _ in fake.calls),
           f'{len(fake.calls)} calls')
     disp = [(round(t, 2), text) for t, text, _ in fake.displays]
-    check('HELO at hello, cleared ~3 s later', [text for _, text in disp] == ['HELO', '    ']
-          and abs(disp[0][0] - 2.0) <= 0.35 and abs(disp[1][0] - 5.0) <= 0.35, str(disp))
+    if a.auto_reenter_mode:
+        check('no display command (driver has auto_reenter_mode: true)', not disp, str(disp))
+    else:
+        check('HELO at hello, cleared ~3 s later', [text for _, text in disp] == ['HELO', '    ']
+              and abs(disp[0][0] - 2.0) <= 0.35 and abs(disp[1][0] - 5.0) <= 0.35, str(disp))
     check('display only written in Safe/Full mode', all(mode in (2, 3) for *_, mode in fake.displays))
     check('OI mode never changed (no set_mode call)', not fake.mode_calls, str(fake.mode_calls))
     check('exits with status 0 on SIGINT', code == 0, str(code))

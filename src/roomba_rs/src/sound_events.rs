@@ -7,8 +7,12 @@
 //! - **done** (song 2), a short jingle, when an exploration run ends with "finished" or "back at the
 //!   start point": once per run (the explorer repeats its status every second).
 //!
-//! Nothing plays outside Safe/Full mode, and the node never changes the mode (the driver re-enters
-//! Safe mode for display commands outside it, so the display is only written in Safe/Full too).
+//! Nothing plays outside Safe/Full mode, and the node never changes the mode: songs go through
+//! define_song, which the driver refuses outside Safe/Full. Display commands have no such refusal: a
+//! driver with `auto_reenter_mode: true` re-enters Safe mode for one that arrives in Passive, and the
+//! mode this node last saw can be a sensor message old. So HELO is only shown when the driver reports
+//! `auto_reenter_mode: false` (it reads it once at start-up; asked whenever the driver appears), where a
+//! display command in Passive is just ignored.
 //! Muted while the mute file exists: checked at each event, so it can be toggled live.
 //! Other nodes (the web control page) define and play songs in the same five slots, so nothing
 //! here relies on a song defined earlier: every sound is one define_song call with the full notes
@@ -111,11 +115,13 @@ pub struct Params {
     pub call_timeout: f64,
     /// How long hello and the done jingle wait for a playing song to end before they are dropped (s).
     pub queue_time: f64,
+    /// How long hello waits for the driver's auto_reenter_mode before it plays without HELO (s).
+    pub params_timeout: f64,
 }
 
 impl Default for Params {
     fn default() -> Self {
-        Params { enabled: true, bump_interval: 4.0, display_time: 3.0, sensors_timeout: 1.0, call_timeout: 2.0, queue_time: 5.0 }
+        Params { enabled: true, bump_interval: 4.0, display_time: 3.0, sensors_timeout: 1.0, call_timeout: 2.0, queue_time: 5.0, params_timeout: 2.0 }
     }
 }
 
@@ -138,8 +144,11 @@ pub fn worth_a_jingle(message: &str) -> bool {
 
 pub struct SoundEvents {
     p: Params,
-    /// The driver's define_song service is available.
+    /// The driver's define_song service is available, since then.
     driver: bool,
+    driver_since: f64,
+    /// HELO may go on the display: the driver reported auto_reenter_mode false (None: no answer yet).
+    display: Option<bool>,
     mode: Option<u8>,
     sensors_at: f64,
     song_playing: bool,
@@ -168,6 +177,8 @@ impl SoundEvents {
             hello_pending: p.enabled,
             p,
             driver: false,
+            driver_since: f64::NEG_INFINITY,
+            display: None,
             mode: None,
             sensors_at: f64::NEG_INFINITY,
             song_playing: false,
@@ -236,12 +247,21 @@ impl SoundEvents {
     }
 
     fn check_hello(&mut self, now: f64, muted: &dyn Fn() -> bool, out: &mut Vec<Action>) {
-        if self.hello_pending && self.control() && self.driver {
+        let params_known = self.display.is_some() || now - self.driver_since >= self.p.params_timeout;
+        if self.hello_pending && self.control() && self.driver && params_known {
             self.hello_pending = false;
-            out.push(Action::Display(HELLO_TEXT));
-            self.clear_at = Some(now + self.p.display_time);
+            if self.display == Some(true) {
+                out.push(Action::Display(HELLO_TEXT));
+                self.clear_at = Some(now + self.p.display_time);
+            }
             self.attempt(Event::Hello, now, muted, out);
         }
+    }
+
+    /// The driver's auto_reenter_mode parameter (None: not readable). Only with false does a display
+    /// command never change the mode.
+    pub fn on_driver_params(&mut self, auto_reenter_mode: Option<bool>) {
+        self.display = Some(auto_reenter_mode == Some(false));
     }
 
     /// A /roomba/sensors message.
@@ -292,6 +312,12 @@ impl SoundEvents {
         if !self.p.enabled {
             return out;
         }
+        if driver && !self.driver {
+            self.driver_since = now;
+        }
+        if driver != self.driver {
+            self.display = None; // a (re)started driver: ask again
+        }
         self.driver = driver;
         if now - self.sensors_at > self.p.sensors_timeout {
             self.mode = None;
@@ -321,7 +347,7 @@ impl SoundEvents {
             }
         });
         self.queued = queued;
-        if self.clear_at.is_some_and(|t| now >= t) && self.control() {
+        if self.clear_at.is_some_and(|t| now >= t) && self.control() && self.display == Some(true) {
             self.clear_at = None;
             out.push(Action::Display(CLEAR_TEXT));
         }
@@ -368,10 +394,17 @@ mod tests {
         format!(r#"{{"state": "{state}", "message": "{message}", "reached": 3, "failed": 0, "frontiers": 0, "home": [0.0, 0.0], "goal": null}}"#)
     }
 
+    /// Driver up at 	 with auto_reenter_mode false.
+    fn driver_up(p: Params, t: f64) -> SoundEvents {
+        let mut s = SoundEvents::new(p);
+        s.tick(t, true, &unmuted);
+        s.on_driver_params(Some(false));
+        s
+    }
+
     /// Driver up, Safe mode, hello played (its song is over by t + 1) and HELO cleared.
     fn ready(t: f64) -> SoundEvents {
-        let mut s = SoundEvents::new(Params { display_time: 0.0, ..Params::default() });
-        s.tick(t, true, &unmuted);
+        let mut s = driver_up(Params { display_time: 0.0, ..Params::default() }, t);
         s.on_sensors(safe(), t, &unmuted);
         s.on_played(s.plays(), t, true);
         assert_eq!(s.tick(t, true, &unmuted), [Action::Display(CLEAR_TEXT)]);
@@ -398,8 +431,7 @@ mod tests {
 
     #[test]
     fn hello_once_when_the_driver_first_reports_safe_or_full() {
-        let mut s = SoundEvents::new(Params::default());
-        assert!(s.tick(0.0, true, &unmuted).is_empty());
+        let mut s = driver_up(Params::default(), 0.0);
         let passive = Sensors { oi_mode: PASSIVE, ..Default::default() };
         assert!(s.on_sensors(passive, 0.1, &unmuted).is_empty());
         let full = Sensors { oi_mode: MODE_FULL, ..Default::default() };
@@ -417,24 +449,77 @@ mod tests {
         assert!(s.on_sensors(safe(), 0.0, &unmuted).is_empty(), "service not seen yet");
         assert!(s.tick(0.1, false, &unmuted).is_empty());
         s.on_sensors(safe(), 0.15, &unmuted);
-        assert_eq!(s.tick(0.2, true, &unmuted), [Action::Display(HELLO_TEXT), Action::Play(Event::Hello)]);
+        // ...and for its auto_reenter_mode.
+        assert!(s.tick(0.2, true, &unmuted).is_empty());
+        s.on_driver_params(Some(false));
+        assert_eq!(s.on_sensors(safe(), 0.25, &unmuted), [Action::Display(HELLO_TEXT), Action::Play(Event::Hello)]);
     }
 
     #[test]
     fn helo_is_cleared_after_display_time_in_safe_mode_only() {
-        let mut s = SoundEvents::new(Params::default());
-        s.tick(0.0, true, &unmuted);
+        let mut s = driver_up(Params::default(), 0.0);
         s.on_sensors(safe(), 0.0, &unmuted);
         s.on_played(s.plays(), 0.1, true);
         s.on_sensors(safe(), 2.9, &unmuted);
         assert!(s.tick(2.9, true, &unmuted).is_empty());
-        // Passive at clear time: writing the display would make the driver re-enter Safe mode.
+        // Passive at clear time: the driver would ignore it; cleared once back in Safe mode.
         let passive = Sensors { oi_mode: PASSIVE, ..Default::default() };
         s.on_sensors(passive, 3.1, &unmuted);
         assert!(s.tick(3.1, true, &unmuted).is_empty());
         s.on_sensors(safe(), 4.0, &unmuted);
         assert_eq!(s.tick(4.0, true, &unmuted), [Action::Display(CLEAR_TEXT)]);
         assert!(s.tick(5.0, true, &unmuted).is_empty());
+    }
+
+    #[test]
+    fn helo_only_when_the_driver_cannot_re_enter_safe_mode() {
+        // auto_reenter_mode true: a display command crossing a drop to Passive would make the driver
+        // re-enter Safe mode, so hello plays without HELO, and nothing is ever written to the display.
+        let mut s = SoundEvents::new(Params::default());
+        s.tick(0.0, true, &unmuted);
+        s.on_driver_params(Some(true));
+        assert_eq!(s.on_sensors(safe(), 0.1, &unmuted), [Action::Play(Event::Hello)]);
+        s.on_played(s.plays(), 0.2, true);
+        for k in 1..60 {
+            let t = 0.1 * k as f64;
+            s.on_sensors(safe(), t, &unmuted);
+            assert!(s.tick(t, true, &unmuted).is_empty());
+        }
+        // Not readable: the same.
+        let mut s = SoundEvents::new(Params::default());
+        s.tick(0.0, true, &unmuted);
+        s.on_driver_params(None);
+        assert_eq!(s.on_sensors(safe(), 0.1, &unmuted), [Action::Play(Event::Hello)]);
+    }
+
+    #[test]
+    fn hello_waits_for_the_drivers_parameters_but_not_forever() {
+        let mut s = SoundEvents::new(Params::default());
+        s.tick(0.0, true, &unmuted);
+        assert!(s.on_sensors(safe(), 0.1, &unmuted).is_empty());
+        s.on_sensors(safe(), 1.9, &unmuted);
+        assert!(s.tick(1.9, true, &unmuted).is_empty());
+        assert_eq!(s.tick(2.0, true, &unmuted), [Action::Play(Event::Hello)], "no answer: no HELO");
+    }
+
+    #[test]
+    fn a_restarted_driver_is_asked_again_before_helo_is_cleared() {
+        let mut s = driver_up(Params::default(), 0.0);
+        assert_eq!(s.on_sensors(safe(), 0.0, &unmuted), [Action::Display(HELLO_TEXT), Action::Play(Event::Hello)]);
+        s.on_played(s.plays(), 0.1, true);
+        // The driver restarts before the clear is due; the new one has auto_reenter_mode true.
+        s.tick(1.0, false, &unmuted);
+        s.tick(2.0, true, &unmuted);
+        s.on_sensors(safe(), 3.5, &unmuted);
+        assert!(s.tick(3.5, true, &unmuted).is_empty(), "not known yet");
+        s.on_driver_params(Some(true));
+        assert!(s.tick(3.6, true, &unmuted).is_empty());
+        // Restarted again with false: cleared then.
+        s.tick(4.0, false, &unmuted);
+        s.tick(4.1, true, &unmuted);
+        s.on_driver_params(Some(false));
+        s.on_sensors(safe(), 4.2, &unmuted);
+        assert_eq!(s.tick(4.2, true, &unmuted), [Action::Display(CLEAR_TEXT)]);
     }
 
     #[test]
@@ -458,8 +543,7 @@ mod tests {
 
     #[test]
     fn bumper_held_when_the_node_starts_is_no_edge() {
-        let mut s = SoundEvents::new(Params::default());
-        s.tick(0.0, true, &unmuted);
+        let mut s = driver_up(Params::default(), 0.0);
         let actions = s.on_sensors(bump(true, false), 0.0, &unmuted);
         assert_eq!(plays(&actions), [Event::Hello]);
         // A gap in the sensor data forgets the bumper state too.
@@ -566,6 +650,7 @@ mod tests {
         };
         let mut s = SoundEvents::new(Params::default());
         s.tick(0.0, true, &is_muted);
+        s.on_driver_params(Some(false));
         // HELO still shows: the mute is for sounds.
         assert_eq!(s.on_sensors(safe(), 0.0, &is_muted), [Action::Display(HELLO_TEXT), Action::Skipped(Event::Hello, Skip::Muted)]);
         assert_eq!(asked.get(), 1);
@@ -636,8 +721,7 @@ mod tests {
 
     #[test]
     fn a_late_acknowledgement_keeps_the_song_playing_for_its_length() {
-        let mut s = SoundEvents::new(Params { display_time: 0.0, ..Params::default() });
-        s.tick(10.0, true, &unmuted);
+        let mut s = driver_up(Params { display_time: 0.0, ..Params::default() }, 10.0);
         assert_eq!(plays(&s.on_sensors(safe(), 10.0, &unmuted)), [Event::Hello]);
         s.on_explorer_status(&status("exploring", ""), 10.1, &unmuted);
         assert!(s.on_explorer_status(&status("done", "Exploration finished"), 10.2, &unmuted).is_empty());
