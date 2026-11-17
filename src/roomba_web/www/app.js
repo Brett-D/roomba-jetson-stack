@@ -515,7 +515,8 @@ function endPointer(ev) {
   pointers.delete(ev.pointerId);
   // Fingers wobble more than a mouse: allow more movement before a tap becomes a pan.
   const tapSlop = gesture && gesture.touch ? 12 : 6;
-  if (pointers.size === 0 && gesture && gesture.moved < tapSlop) {
+  // The 3-view map is display only (its goal and drawing controls are hidden there).
+  if (pointers.size === 0 && gesture && gesture.moved < tapSlop && tab() !== 'mfd') {
     if (S.goalMode) setGoal(gesture.start);
     else if (S.drawing) addCorner(gesture.start, gesture.touch);
   }
@@ -858,6 +859,11 @@ async function loadDepthInfo() {
 }
 
 function setTab(t, persist = true) {
+  // The 3-view hides the map's goal and drawing controls: leave those modes first.
+  if (t === 'mfd' && (S.goalMode || S.drawing)) {
+    S.goalMode = false;
+    setDrawing(false);
+  }
   document.body.dataset.tab = t;
   try {
     sessionStorage.setItem('roomba.tab', t);
