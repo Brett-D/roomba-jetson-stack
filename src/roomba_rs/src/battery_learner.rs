@@ -263,7 +263,8 @@ pub struct PackRecord {
     /// used / (start - end), if it was enough to learn from.
     pub capacity_mah: Option<f64>,
     pub weight: f64,
-    /// Rejected as an outlier by the latest capacity update (its curve points are left out too).
+    /// Rejected as an outlier by the last capacity update that included it (its curve points are
+    /// left out too).
     pub outlier: bool,
     pub curve: Vec<CurvePoint>,
 }
@@ -805,12 +806,13 @@ impl Learner {
     }
 
     /// Recomputes the learned capacity from the latest estimates; returns those rejected as outliers.
+    /// Packs older than that window keep their outlier flags (their curve points stay left out).
     fn update_capacity(&mut self) -> Vec<f64> {
         let n = self.state.history.len();
         let recent: Vec<usize> = (0..n).filter(|&i| self.state.history[i].capacity_mah.is_some()).collect();
         let recent = &recent[recent.len().saturating_sub(ESTIMATES_USED)..];
-        for r in &mut self.state.history {
-            r.outlier = false;
+        for &i in recent {
+            self.state.history[i].outlier = false;
         }
         if recent.is_empty() {
             self.state.learned_capacity_mah = None;
@@ -1254,6 +1256,42 @@ mod tests {
         assert_eq!((l.state.pack.id, l.state.pack.anchor, l.state.history.len()), (2, Anchor::Full, 1));
         assert!(l.estimate().unwrap().soc > 0.99);
         assert!((l.state.pack.start_ocv - 21.0).abs() < 0.01, "{}", l.state.pack.start_ocv);
+    }
+
+    #[test]
+    fn old_outliers_stay_out_of_the_curve() {
+        let mut l = Learner::new(params(), None, 0.0);
+        let bin = bin_of(18.0);
+        let record = |id: u32, capacity: f64, soc: f64| PackRecord {
+            id,
+            inserted_unix: 0.0,
+            removed_unix: 0.0,
+            how: How::Gap,
+            anchor: Anchor::Full,
+            start_soc: 1.0,
+            end_soc: 0.15,
+            used_mah: capacity * 0.85,
+            capacity_mah: Some(capacity),
+            weight: 1.0,
+            outlier: false,
+            curve: vec![CurvePoint { bin, soc }],
+        };
+        // Three packs, then one swapped far too early, whose curve points are mislabelled.
+        for id in 1..=3 {
+            l.state.history.push(record(id, 2500.0, 0.3));
+        }
+        l.state.history.push(record(4, 900.0, 1.0));
+        assert_eq!(l.update_capacity(), [900.0]);
+        // 20 more packs push it out of the capacity window: it stays rejected, out of the curve
+        // (with it the bin would read 0.33).
+        for id in 5..=24 {
+            l.state.history.push(record(id, 2500.0, 0.3));
+        }
+        assert!(l.update_capacity().is_empty());
+        l.refit();
+        assert!(l.state.history[3].outlier);
+        let soc = l.curve_soc(bin_centre(bin as usize));
+        assert!((soc - 0.3).abs() < 0.005, "{soc}");
     }
 
     #[test]
