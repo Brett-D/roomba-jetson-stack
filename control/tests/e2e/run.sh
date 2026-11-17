@@ -172,6 +172,10 @@ sleep 2.5
 check "session expired" "$(code -b "$JAR" "$BASE/api/status")" 401
 login fixture-password > /dev/null
 check "shutdown" "$(post shutdown)" 202
+sleep 1.5
+check "the power-off waits for a browser to see it coming" "$([ -e "$FAKE_DIR/poweroff_called" ] && echo ran || echo no)" no
+login fixture-password > /dev/null   # 2 s sessions
+check "powering off" "$(st 'd["power"]')" powering_off
 wait_for 'd["power"]' off 10 || echo "FAIL: never off"
 check "power-off command ran" "$([ -e "$FAKE_DIR/poweroff_called" ] && echo ran || echo no)" ran
 check_has "message" "$(st 'd["last"]["message"]')" "Powering off."

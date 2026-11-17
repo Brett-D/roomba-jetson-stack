@@ -287,7 +287,9 @@ On a phone, "Add to Home Screen" adds it as an app.
   `/battery_learner/pack_swapped` after a battery swap and shows its answer (e.g. "new pack 5 at 100 %"). It is
   disabled, with the reason, while the robot isn't running or `battery_learner` isn't.
 - **JETSON SHUTDOWN**: lift the red guard, flip the switch, then confirm. The robot stops first, exactly as above,
-  then the Jetson powers off. When the page says **SAFE TO REMOVE POWER**, you can unplug it.
+  then the Jetson powers off. The page waits until the Jetson stops answering on the network, then says
+  **THE JETSON NO LONGER ANSWERS**: the shutdown looks complete, but check the Jetson itself (power LED, fan)
+  before removing power.
 - **Annunciators**: STACK, ROOMBA LINK (connected / responding / not responding), OI MODE, VACUUM, CAMERA, TEMP,
   WIFI and DISK, in green, amber or red. The last lines of `~/robot.log` show "Tracking OK" and errors.
 - **Camera · map · depth**: while the robot runs, the robot web app's three-view layout (port 8080 on the same

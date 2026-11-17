@@ -67,6 +67,8 @@ pub struct Ctl {
     pub busy: Option<Busy>,
     pub last: Option<Done>,
     pub power: Power,
+    /// A browser has been told "powering off" (status served after the power state changed).
+    pub power_seen: bool,
     pub checking: Option<(CheckVia, Instant)>,
     pub link: Option<LinkResult>,
     pub ros: crate::ros::RosState,
@@ -74,7 +76,7 @@ pub struct Ctl {
 
 impl Default for Ctl {
     fn default() -> Self {
-        Ctl { busy: None, last: None, power: Power::On, checking: None, link: None, ros: Default::default() }
+        Ctl { busy: None, last: None, power: Power::On, power_seen: false, checking: None, link: None, ros: Default::default() }
     }
 }
 
@@ -310,9 +312,21 @@ pub fn request_shutdown(app: &Arc<App>) -> Result<String, String> {
 }
 
 /// After the robot has stopped (or failed to: power-off goes ahead, systemd stops what's left).
+/// The power-off can end this service before its command returns, so the browser is first told
+/// "powering off" (up to 5 s for a status request to carry it) and knows the shutdown began.
 fn power_off(app: &Arc<App>, stop_message: &str) {
-    lock(app).power = Power::PoweringOff;
+    {
+        let mut ctl = lock(app);
+        ctl.power = Power::PoweringOff;
+        ctl.power_seen = false;
+    }
     set_phase(app, "Powering off…", false);
+    let mut ctl = lock(app);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !ctl.power_seen && Instant::now() < deadline {
+        ctl = app.ctl_cv.wait_timeout(ctl, Duration::from_millis(250)).unwrap_or_else(|e| e.into_inner()).0;
+    }
+    drop(ctl);
     let cfg = &app.cfg;
     if cfg.dry_run_poweroff {
         eprintln!("power-off (dry run): not running `{}`", cfg.poweroff_cmd);

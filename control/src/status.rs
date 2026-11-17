@@ -127,7 +127,11 @@ pub fn status(app: &App, host: Option<&str>) -> Value {
     let host = clean_host(host);
     let now = Instant::now();
 
-    let ctl = robot::lock(app);
+    let mut ctl = robot::lock(app);
+    if ctl.power == Power::PoweringOff && !ctl.power_seen {
+        ctl.power_seen = true;
+        app.ctl_cv.notify_all();
+    }
     let state = match &ctl.busy {
         Some(b) if b.op == Op::Start => "starting",
         Some(b) if b.stopping => "stopping",

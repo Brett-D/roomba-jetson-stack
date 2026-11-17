@@ -4,14 +4,16 @@
 
 const $ = (id) => document.getElementById(id);
 const POLL_MS = 2000;
-const SAFE_AFTER_MS = 20000;   // after the page stops answering during a power-off
+const SILENT_MS = 10000;       // the Jetson answering nothing for this long during a power-off
+const REFUSED_MS = 1500;       // a request refused faster than this: the Jetson is still on the network
 const GUARD_CLOSE_MS = 15000;
 
 let st = null;
 let pending = null;            // {op, at}: clicked, server hasn't shown it yet
 let flash = null;              // {text, kind, until}: an action's answer, shown for a while
 let lostAt = null;             // first failed poll since the last good one
-let offSeen = false;           // the server reported that it ran the power-off command
+let offSeen = false;           // the server said it is powering off (before running the command)
+let silentSince = null;        // since when requests time out instead of being refused
 let dryRunDismissed = false;
 let lastTonePress = 0;
 let pollTimer = null;
@@ -310,14 +312,19 @@ function renderOverlay() {
     $('overlay').hidden = true;
     return;
   }
-  if (st.power === 'off' && !st.dry_run) offSeen = true;
+  if (st.power !== 'on' && !st.dry_run) offSeen = true;
   if (lostAt) {
-    // Only a power-off the server confirmed counts: a Wi-Fi drop while the robot is still
-    // stopping must not read as "safe".
-    const left = Math.ceil((SAFE_AFTER_MS - (Date.now() - lostAt)) / 1000);
-    if (!offSeen) overlay('SHUTDOWN SEQUENCE', 'LINK LOST', "The Jetson stopped answering before it reported the power-off. Don't remove power until this page says so. Retrying…", 'warn');
-    else if (left > 0) overlay('SHUTDOWN SEQUENCE', 'POWERING OFF…', `Don't remove power yet (${left} s).`, 'warn');
-    else overlay('SHUTDOWN COMPLETE', 'SAFE TO REMOVE POWER', 'The Jetson has shut down. To start it again, apply power: it boots and this page comes back by itself.', 'safe');
+    // Only a power-off the server announced counts: a Wi-Fi drop while the robot is still
+    // stopping must not read as done. And the page going away only means this service stopped:
+    // the end is when the Jetson stops answering on the network at all, and even that is a
+    // sign, not proof, so the last word is to check the Jetson itself.
+    if (!offSeen) overlay('SHUTDOWN SEQUENCE', 'LINK LOST', "The Jetson stopped answering before it reported the power-off. Don't remove power. Retrying…", 'warn');
+    else if (!silentSince || Date.now() - silentSince < SILENT_MS) {
+      overlay('SHUTDOWN SEQUENCE', 'SHUTTING DOWN…', "This page has stopped, but the Jetson is still on the network. Don't remove power yet.", 'warn');
+    } else {
+      overlay('SHUTDOWN SEQUENCE', 'THE JETSON NO LONGER ANSWERS',
+        "Its shutdown looks complete, but this page can't confirm it: check the Jetson itself (power LED, fan) before removing power. To start it again, apply power: it boots and this page comes back by itself.", 'safe');
+    }
     return;
   }
   if (st.power === 'off' && st.dry_run) {
@@ -338,16 +345,25 @@ function renderOffline() {
 
 async function poll() {
   clearTimeout(pollTimer);
+  const started = Date.now();
+  const abort = new AbortController();
+  const timer = setTimeout(() => abort.abort(), 4000);
   try {
-    const res = await fetch('/api/status', { cache: 'no-store', credentials: 'same-origin' });
+    const res = await fetch('/api/status', { cache: 'no-store', credentials: 'same-origin', signal: abort.signal });
     if (res.status === 401) { location.href = '/login'; return; }
     if (!res.ok) throw new Error(res.status);
     st = await res.json();
     lostAt = null;
+    silentSince = null;
     render();
   } catch (e) {
     if (!lostAt) lostAt = Date.now();
+    // Refused at once: the Jetson is up (its network still answers). Slow or no answer: it isn't.
+    if (Date.now() - started < REFUSED_MS) silentSince = null;
+    else if (!silentSince) silentSince = started;
     renderOffline();
+  } finally {
+    clearTimeout(timer);
   }
   const down = shuttingDown();
   pollTimer = setTimeout(poll, down ? 1000 : (document.hidden ? 8000 : POLL_MS));
