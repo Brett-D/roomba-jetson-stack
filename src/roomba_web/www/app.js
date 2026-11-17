@@ -860,10 +860,15 @@ async function loadDepthInfo() {
 }
 
 function setTab(t, persist = true) {
-  // The 3-view hides the map's goal and drawing controls: leave those modes first.
-  if (t === 'mfd' && (S.goalMode || S.drawing)) {
-    S.goalMode = false;
-    setDrawing(false);
+  // The 3-view is display only (no goal or drawing controls, no drive pad): leave those modes and
+  // stop a manual drive first (held arrow keys, the pad), with a zero command.
+  if (t === 'mfd') {
+    if (S.goalMode || S.drawing) {
+      S.goalMode = false;
+      setDrawing(false);
+    }
+    R.keys.clear();
+    stopDrive();
   }
   document.body.dataset.tab = t;
   try {
