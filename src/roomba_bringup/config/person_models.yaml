@@ -1,0 +1,28 @@
+# person_detector model profiles: the launch argument person_model:=<profile> (robot.launch.py,
+# vslam.launch.py) picks one, and its keys become person_detector parameters ('~' is expanded).
+#   classes         class ids to detect (the engine's output rows 4 + id)
+#   class_names     the model's class names in output order (default: the 80 COCO names)
+#   person_classes  the classes that are people (default: person, cat, dog); detections of the other
+#                   classes go to ~/objects_3d only, never to detections_3d (explorer, web app)
+# Engines are TensorRT FP16 plans built on the Jetson from the ONNX exports (docs/training.md, section 1):
+#   /usr/src/tensorrt/bin/trtexec --onnx=<model>.onnx --saveEngine=<model>_fp16.engine --fp16 --memPoolSize=workspace:1024
+
+# Off-the-shelf COCO YOLO11n (the default): people and pets.
+stock:
+  engine_path: ~/models/yolo11n_384x640_fp16.engine
+  classes: [0, 15, 16]          # person, cat, dog
+
+# YOLO11s fine-tuned on Isaac Sim renders of the house plus real people-free frames
+# (yolo11s v2 -> v2-AE + real negatives). Railing boxes are published on ~/objects_3d.
+finetuned:
+  engine_path: ~/models/yolo11s_person_railing_v2aeneg_384x640_fp16.engine
+  classes: [0, 1]
+  class_names: [person, railing]
+  person_classes: [person]
+
+# The same training as 'finetuned' on YOLO11n (the stock model's size and speed).
+finetuned_n:
+  engine_path: ~/models/yolo11n_person_railing_v2aeneg_384x640_fp16.engine
+  classes: [0, 1]
+  class_names: [person, railing]
+  person_classes: [person]

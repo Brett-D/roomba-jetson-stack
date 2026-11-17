@@ -39,7 +39,7 @@ from launch_ros.substitutions import FindPackageShare
 # Passed through to vslam.launch.py unchanged.
 VSLAM_ARGS = ['mode', 'odometry', 'database_path', 'foxglove', 'people', 'web', 'web_port',
               'ir_depth_only', 'ir_intensity', 'ground_constraint', 'fusion', 'camera', 'use_sim_time',
-              'rust_nodes']
+              'rust_nodes', 'person_model']
 
 
 def _check_args(context):
@@ -78,6 +78,9 @@ def generate_launch_description():
         DeclareLaunchArgument('database_path', default_value=os.path.expanduser('~/maps/vslam.db')),
         DeclareLaunchArgument('foxglove', default_value='true'),
         DeclareLaunchArgument('people', default_value='true'),
+        DeclareLaunchArgument('person_model', default_value='stock',
+                              description='person_detector model profile (config/person_models.yaml): stock '
+                                          '(COCO YOLO11n), finetuned (YOLO11s person + railing) or finetuned_n'),
         DeclareLaunchArgument('web', default_value='true'),
         DeclareLaunchArgument('web_port', default_value='8080'),
         DeclareLaunchArgument('ir_depth_only', default_value='true'),

@@ -16,6 +16,7 @@ Usage:
 """
 import os
 
+import yaml
 from launch import LaunchDescription
 from launch.actions import (DeclareLaunchArgument, IncludeLaunchDescription, LogInfo, OpaqueFunction,
                             SetLaunchConfiguration)
@@ -113,6 +114,34 @@ def _watchdog(context):
                  output='screen', parameters=[params])] + nodes
 
 
+def _people(context, localization, is_robot):
+    """person_detector with the person_model profile of config/person_models.yaml."""
+    profile = LaunchConfiguration('person_model').perform(context)
+    path = os.path.join(FindPackageShare('roomba_bringup').perform(context), 'config', 'person_models.yaml')
+    with open(path) as f:
+        profiles = yaml.safe_load(f)
+    if profile not in profiles:
+        raise RuntimeError(f"person_model must be one of {', '.join(profiles)} (got '{profile}')")
+    params = {k: os.path.expanduser(v) if isinstance(v, str) else v for k, v in profiles[profile].items()}
+    engine = params.get('engine_path', '')
+    log = f'[vslam] person_model={profile}: {engine}'
+    if not os.path.isfile(engine):
+        log += ' (MISSING: the detector will exit)'
+    pkg = 'roomba_rs' if LaunchConfiguration('rust_nodes').perform(context) == 'true' else 'roomba_perception'
+    return [LogInfo(msg=log), Node(
+        package=pkg,
+        executable='person_detector',
+        name='person_detector',
+        namespace='perception',
+        output='screen',
+        # Lower CPU priority so tracking always wins under load.
+        prefix='nice -n 10',
+        # The floor grid overlay needs a frame whose z = 0 is the floor, which only exists on the
+        # robot (base_link / planar map).
+        parameters=[{**params, 'require_localization': localization, 'floor_grid': is_robot}],
+    )]
+
+
 def generate_launch_description():
     localization = LaunchConfiguration('localization')
     odometry = LaunchConfiguration('odometry')
@@ -146,6 +175,10 @@ def generate_launch_description():
         DeclareLaunchArgument('foxglove', default_value='true'),
         DeclareLaunchArgument('people', default_value='true',
                               description='Run TensorRT person/pet detection with distance'),
+        DeclareLaunchArgument('person_model', default_value='stock',
+                              description='person_detector model: a profile of config/person_models.yaml '
+                                          '(stock = COCO YOLO11n; finetuned = YOLO11s person + railing; '
+                                          'finetuned_n = YOLO11n person + railing)'),
         DeclareLaunchArgument('web', default_value='true', description='Run the web app'),
         DeclareLaunchArgument('web_port', default_value='8080'),
         DeclareLaunchArgument('base_frame', default_value='camera_link',
@@ -353,22 +386,10 @@ def generate_launch_description():
     )
 
     # Rust port (roomba_rs) by default: identical detections, distances, ignore decisions and annotated
-    # images (tools/ab_person_detector_offline.py) at a fraction of the CPU.
-    people = Node(
-        package=PythonExpression(["'roomba_rs' if '", LaunchConfiguration('rust_nodes'),
-                                  "' == 'true' else 'roomba_perception'"]),
-        executable='person_detector',
-        name='person_detector',
-        namespace='perception',
-        output='screen',
-        # Lower CPU priority so tracking always wins under load.
-        prefix='nice -n 10',
-        # COCO class ids: 0 person, 15 cat, 16 dog. The floor grid overlay needs a frame whose
-        # z = 0 is the floor, which only exists on the robot (base_link / planar map).
-        parameters=[{'classes': [0, 15, 16], 'require_localization': localization,
-                     'floor_grid': is_robot}],
-        condition=IfCondition(LaunchConfiguration('people')),
-    )
+    # images (tools/ab_person_detector_offline.py) at a fraction of the CPU. The model (engine and
+    # classes) is a profile of config/person_models.yaml, chosen with person_model:=.
+    people = OpaqueFunction(function=_people, kwargs={'localization': localization, 'is_robot': is_robot},
+                            condition=IfCondition(LaunchConfiguration('people')))
 
     # Ignore zones are stored next to the map database they were drawn on. Rust port (roomba_rs) by
     # default: identical outputs and zones file (tools/ab_ignore_zones_offline.py).
