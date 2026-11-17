@@ -1,7 +1,8 @@
 //! web_server's listening sockets, IPv6 and IPv4 on one port: [::] takes both where the system
 //! allows it (IPV6_V6ONLY off). Where it keeps IPv6 sockets IPv6-only (net.ipv6.bindv6only=1),
 //! 0.0.0.0 needs a socket of its own, and if that can't bind (another process has IPv4 on the
-//! port) it is an error, not a server that answers only IPv6. Without IPv6, 0.0.0.0 only.
+//! port) it is an error, not a server that answers only IPv6. Without IPv6, 0.0.0.0 only; but
+//! another process on [::] is an error too, not a server that answers only IPv4.
 
 use std::io;
 use std::net::TcpListener;
@@ -17,6 +18,7 @@ pub fn bind_dual(port: u16, v6only: Option<bool>) -> io::Result<(Vec<TcpListener
             let l4 = TcpListener::bind(("0.0.0.0", p))?;
             Ok((vec![l6, l4], "[::] (IPv6) and 0.0.0.0 (IPv4)".into()))
         }
+        Err(e) if e.kind() == io::ErrorKind::AddrInUse => Err(e),
         Err(e) => {
             let l4 = TcpListener::bind(("0.0.0.0", port))?;
             Ok((vec![l4], format!("0.0.0.0 (IPv4 only: IPv6 {e})")))
@@ -96,6 +98,21 @@ mod tests {
         match bind_dual(port, Some(true)) {
             Err(e) => assert_eq!(e.kind(), io::ErrorKind::AddrInUse),
             Ok((_, what)) => panic!("listening on {what}, but IPv4 goes to the other process"),
+        }
+    }
+
+    #[test]
+    fn ipv6_taken_by_another_process_is_an_error() {
+        if !ipv6_here() {
+            return;
+        }
+        let (other, _) = bind_v6(0, Some(true)).unwrap();
+        let port = other.local_addr().unwrap().port();
+        for v6only in [None, Some(false), Some(true)] {
+            match bind_dual(port, v6only) {
+                Err(e) => assert_eq!(e.kind(), io::ErrorKind::AddrInUse),
+                Ok((_, what)) => panic!("listening on {what}, but IPv6 goes to the other process"),
+            }
         }
     }
 }

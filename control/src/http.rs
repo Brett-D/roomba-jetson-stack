@@ -108,6 +108,8 @@ pub fn bind(listen: &str, ipv6: Ipv6) -> io::Result<Vec<(TcpListener, String)>> 
             let l4 = TcpListener::bind(("0.0.0.0", p))?;
             Ok(vec![(l6, format!("[::]:{p} (IPv6 only)")), (l4, format!("0.0.0.0:{p} (IPv4)"))])
         }
+        // Another process has IPv6 on the port: IPv4 alone would leave IPv6 clients reaching it.
+        Err(e) if e.kind() == ErrorKind::AddrInUse => Err(e),
         Err(e) => {
             let l4 = TcpListener::bind(("0.0.0.0", port))?;
             let p = l4.local_addr()?.port();
@@ -540,5 +542,11 @@ mod tests {
         let other = TcpListener::bind("0.0.0.0:0").unwrap();
         let port = other.local_addr().unwrap().port();
         assert_eq!(bind(&format!("[::]:{port}"), Ipv6::V6Only).map(|_| ()).unwrap_err().kind(), ErrorKind::AddrInUse);
+        // Another process has IPv6 on the port: an error, not IPv4 only.
+        let (other6, _) = bind_v6_any(0, true).unwrap();
+        let port = other6.local_addr().unwrap().port();
+        for ipv6 in [Ipv6::Use, Ipv6::V6Only] {
+            assert_eq!(bind(&format!("[::]:{port}"), ipv6).map(|_| ()).unwrap_err().kind(), ErrorKind::AddrInUse);
+        }
     }
 }
