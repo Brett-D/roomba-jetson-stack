@@ -7,7 +7,8 @@ scenario (about 42 s) on fake /roomba/sensors and /explorer/status, serves /room
 /roomba/play_song and /roomba/set_mode like the driver (song_playing while a song plays; play needs
 Safe/Full mode) and checks:
   - which songs are asked for and when (hello, uh-oh, done jingle), with the full notes and play = true;
-  - nothing on the latched status of an earlier run, a bump in Passive mode, the light bumpers alone,
+  - nothing during start-up (Passive mode, the latched status of an earlier run; those records are kept),
+    a bump in Passive mode, the light bumpers alone,
     a second bump within 4 s, a bump while muted or while a song plays, a finished run in Passive mode,
     a second hello;
   - HELO on the display and cleared ~3 s later, only in Safe/Full mode (with --auto-reenter-mode, where the
@@ -64,6 +65,7 @@ class FakeDriver(Node):
         self.song_until = 0.0
         self.delay = 0.0
         self.explorer = ('done', 'Exploration finished: no reachable unmapped areas left - back at the start point')
+        # Everything from the start, start-up included; t is time.monotonic().
         self.calls = []        # (t, service, number, notes, durations, play, success)
         self.displays = []     # (t, text, mode)
         self.mode_calls = []   # (t, mode)
@@ -81,11 +83,8 @@ class FakeDriver(Node):
         self.create_timer(1.0, self.publish_status, callback_group=MutuallyExclusiveCallbackGroup())
         self.publish_status()
 
-    def now(self):
-        return time.monotonic() - self.t0
-
     def define_song(self, req, res):
-        t = self.now()
+        t = time.monotonic()
         with self.lock:
             mode, delay = self.mode, self.delay
         res.success = len(req.notes) == len(req.durations) and 1 <= len(req.notes) <= 16 and req.song_number <= 4
@@ -105,19 +104,19 @@ class FakeDriver(Node):
         return res
 
     def play_song(self, req, res):
-        self.calls.append((self.now(), 'play_song', req.song_number, None, None, True, True))
+        self.calls.append((time.monotonic(), 'play_song', req.song_number, None, None, True, True))
         res.success, res.message = True, f'play song {req.song_number} sent'
         return res
 
     def set_mode(self, req, res):
-        self.mode_calls.append((self.now(), req.mode))
+        self.mode_calls.append((time.monotonic(), req.mode))
         res.success, res.mode = True, req.mode
         return res
 
     def on_display(self, m):
         with self.lock:
             mode = self.mode
-        self.displays.append((self.now(), m.data, mode))
+        self.displays.append((time.monotonic(), m.data, mode))
 
     def publish_sensors(self):
         m = SensorState()
@@ -188,9 +187,9 @@ def main():
         proc.kill()
         sys.exit(f'sound_events never subscribed; its log: {log_path}')
     time.sleep(1.0)
+    # The records of the start-up (Passive mode, the latched "done" of an earlier run) are kept: the
+    # checks below see them too, and they must be empty.
     fake.t0 = time.monotonic()
-    fake.calls.clear()
-    fake.displays.clear()
 
     def at(t, what, fn):
         time.sleep(max(0.0, fake.t0 + t - time.monotonic()))
@@ -238,12 +237,15 @@ def main():
     fake.destroy_node()
     rclpy.shutdown()
 
-    print('\nService calls (t from scenario start):')
-    for t, srv, n, notes, durations, play, ok in fake.calls:
+    calls = [(t - fake.t0, *rest) for t, *rest in fake.calls]
+    displays = [(t - fake.t0, text, mode) for t, text, mode in fake.displays]
+    mode_calls = [(round(t - fake.t0, 2), mode) for t, mode in fake.mode_calls]
+    print('\nService calls (t from scenario start; negative: during start-up):')
+    for t, srv, n, notes, durations, play, ok in calls:
         print(f'  {t:6.2f} s  {srv} song {n} ({SONGS.get(n, ("?",))[0]}) notes={notes} durations={durations} '
               f'play={play} -> success={ok}')
     print('Display:')
-    for t, text, mode in fake.displays:
+    for t, text, mode in displays:
         print(f'  {t:6.2f} s  "{text}" (OI mode {mode})')
 
     checks = []
@@ -253,8 +255,12 @@ def main():
         print(f'  [{"PASS" if ok else "FAIL"}] {name}{": " + detail if detail else ""}')
 
     print('\nChecks:')
+    early = ([f'{srv} song {n} at {t:.2f} s' for t, srv, n, *_ in calls if t < 0]
+             + [f'display "{text}" at {t:.2f} s' for t, text, _ in displays if t < 0])
+    check('nothing played or shown during start-up (Passive mode, latched "done" of an earlier run)',
+          not early, ', '.join(early))
     expected = [(2.0, 0), (6.0, 1), (10.5, 1), (17.0, 1), (24.0, 2), (36.5, 1), (38.5, 2)]
-    got = [(t, n) for t, srv, n, _, _, play, _ in fake.calls if srv == 'define_song' and play]
+    got = [(t, n) for t, srv, n, _, _, play, _ in calls if srv == 'define_song' and play]
     check('songs asked for, in order', [n for _, n in got] == [n for _, n in expected],
           ', '.join(f'{SONGS[n][0]} {t:.2f} s' for t, n in got))
     for (te, n), (tg, ng) in zip(expected, got):
@@ -262,16 +268,16 @@ def main():
               f'{tg:.2f} s ({(tg - te) * 1000:+.0f} ms)')
     check('every call is define_song with the full song and play = true',
           all(srv == 'define_song' and play and n in SONGS and (notes, durations) == SONGS[n][1:]
-              for _, srv, n, notes, durations, play, _ in fake.calls),
-          f'{len(fake.calls)} calls')
-    disp = [(round(t, 2), text) for t, text, _ in fake.displays]
+              for _, srv, n, notes, durations, play, _ in calls),
+          f'{len(calls)} calls')
+    disp = [(round(t, 2), text) for t, text, _ in displays]
     if a.auto_reenter_mode:
         check('no display command (driver has auto_reenter_mode: true)', not disp, str(disp))
     else:
         check('HELO at hello, cleared ~3 s later', [text for _, text in disp] == ['HELO', '    ']
               and abs(disp[0][0] - 2.0) <= 0.35 and abs(disp[1][0] - 5.0) <= 0.35, str(disp))
-    check('display only written in Safe/Full mode', all(mode in (2, 3) for *_, mode in fake.displays))
-    check('OI mode never changed (no set_mode call)', not fake.mode_calls, str(fake.mode_calls))
+    check('display only written in Safe/Full mode', all(mode in (2, 3) for *_, mode in displays))
+    check('OI mode never changed (no set_mode call)', not mode_calls, str(mode_calls))
     check('exits with status 0 on SIGINT', code == 0, str(code))
     with open(log_path) as f:
         node_log = f.read()
