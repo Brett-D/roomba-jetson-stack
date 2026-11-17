@@ -383,6 +383,12 @@ mod tests {
         // SAFETY: openpty fills the two fds and the name buffer.
         let r = unsafe { libc::openpty(&mut master, &mut slave, name.as_mut_ptr(), std::ptr::null(), std::ptr::null()) };
         assert_eq!(r, 0);
+        // Not inherited by processes other tests start meanwhile: the check would see them holding
+        // the port.
+        for fd in [master, slave] {
+            // SAFETY: fcntl on the fds openpty just returned.
+            unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
+        }
         // The slave fd stays open (the master side would see a hangup without it); the check
         // opens the device again by name and ignores this process's own fds.
         // SAFETY: openpty wrote a NUL-terminated name.

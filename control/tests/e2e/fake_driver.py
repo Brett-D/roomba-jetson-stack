@@ -3,7 +3,8 @@
 ROS_DOMAIN_ID: the roomba/define_song service, the roomba/cleaning_motors subscription, roomba/mode
 (latched), roomba/sensors (5 Hz) and battery_state (1 Hz: 18.20 V, 56 %). The OI mode, a hazard,
 battery_learner's pack number and learned capacity come from the files mode, hazard, pack and
-capacity in $FAKE_DIR; every request is appended to $FAKE_DIR/driver.jsonl.
+capacity in $FAKE_DIR; every request is appended to $FAKE_DIR/driver.jsonl. While the file
+motors_unplugged exists it has no roomba/cleaning_motors subscription (a publisher waits for one).
   fake_driver.py <token>      (the token is only there for the page's --driver-match)"""
 import json
 import os
@@ -42,7 +43,7 @@ class FakeDriver(Node):
         latched = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.pub_mode = self.create_publisher(String, 'roomba/mode', latched)
         self.pub_sensors = self.create_publisher(SensorState, 'roomba/sensors', 2)
-        self.create_subscription(CleaningMotors, 'roomba/cleaning_motors', self.on_motors, 10)
+        self.motors_sub = self.create_subscription(CleaningMotors, 'roomba/cleaning_motors', self.on_motors, 10)
         # Its own callback group: a slow answer (song_delay) doesn't hold up the rest.
         self.create_service(DefineSong, 'roomba/define_song', self.on_song, callback_group=MutuallyExclusiveCallbackGroup())
         self.pub_battery = self.create_publisher(BatteryState, 'battery_state', 10)
@@ -51,6 +52,12 @@ class FakeDriver(Node):
         self.create_timer(1.0, self.battery)
 
     def tick(self):
+        unplugged = os.path.exists(os.path.join(DIR, 'motors_unplugged'))
+        if unplugged and self.motors_sub is not None:
+            self.destroy_subscription(self.motors_sub)
+            self.motors_sub = None
+        elif not unplugged and self.motors_sub is None:
+            self.motors_sub = self.create_subscription(CleaningMotors, 'roomba/cleaning_motors', self.on_motors, 10)
         mode = read('mode', 'passive')
         if mode != self.mode:
             self.mode = mode

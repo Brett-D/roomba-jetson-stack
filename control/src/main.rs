@@ -44,6 +44,8 @@ pub struct Config {
     pub disk_path: PathBuf,
     /// The sound_events node stays silent while this file exists.
     pub sound_mute_file: PathBuf,
+    /// Runtime state kept across restarts (the motor commands on their way).
+    pub state_dir: PathBuf,
 }
 
 const HELP: &str = "\
@@ -75,6 +77,8 @@ roomba-control --check-comms  run COMMS CHECK once and print the result
   --learner-match TEXT     command-line text of the battery_learner process (battery_learner)
   --sound-mute-file FILE   SOUND switch: this file exists while the Roomba is muted
                            ($HOME/.config/roomba/sound_muted, read live by sound_events)
+  --state-dir DIR          motor commands on their way, for the next start to clean up
+                           ($HOME/.local/state/roomba-control)
   --ros-setup CMD          bash to set up ROS for the comms check over ROS
                            (source /opt/ros/jazzy/setup.bash && source <ws>/install/setup.bash)
 ";
@@ -91,7 +95,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<(Config, bool), 
             "--check-comms" => check = true,
             "--listen" | "--robot-ws" | "--start-cmd" | "--force-stop-cmd" | "--poweroff-cmd" | "--pid-file" | "--log-file"
             | "--auth-file" | "--stop-timeout-s" | "--start-timeout-s" | "--session-ttl-s" | "--robot-web-port"
-            | "--driver-config" | "--serial-dev" | "--camera-usb" | "--launch-match" | "--driver-match" | "--learner-match" | "--ros-setup" | "--sound-mute-file" => {
+            | "--driver-config" | "--serial-dev" | "--camera-usb" | "--launch-match" | "--driver-match" | "--learner-match" | "--ros-setup" | "--sound-mute-file" | "--state-dir" => {
                 let val = it.next().ok_or_else(|| format!("{a} needs a value"))?;
                 v.insert(a[2..].to_string(), val);
             }
@@ -132,6 +136,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<(Config, bool), 
             .remove("ros-setup")
             .unwrap_or_else(|| format!("source /opt/ros/jazzy/setup.bash && source {}", q(ws.join("install/setup.bash")))),
         sound_mute_file: path(&mut v, "sound-mute-file", home.join(".config/roomba/sound_muted")),
+        state_dir: path(&mut v, "state-dir", home.join(".local/state/roomba-control")),
         disk_path: home,
     };
     Ok((cfg, check))
@@ -192,6 +197,13 @@ fn main() {
         let out = robot::check_comms(&app, via);
         println!("{} ({:?}, via {:?}): {}", out.link.as_str(), out.link, via, out.message);
         std::process::exit(if out.link == comms::Link::Responding { 0 } else { 1 });
+    }
+    // A restart or crash of this service leaves a motor command on its way running (KillMode=
+    // process): kill it before this run's first motor command (the OFF for the unknown state), or
+    // an ON it was still waiting to send could follow that OFF. The robot launch is left alone.
+    let killed = cmd::kill_leftover_groups(&ros::motor_registry(&app.cfg), ros::MOTOR_MARKER);
+    if !killed.is_empty() {
+        eprintln!("killed motor commands left by the previous run (process groups {killed:?})");
     }
     if !Path::new(&app.cfg.auth_file).exists() {
         eprintln!("warning: {} doesn't exist: nobody can log in (set the password with set_password)", app.cfg.auth_file.display());

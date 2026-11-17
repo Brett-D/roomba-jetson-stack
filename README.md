@@ -274,7 +274,9 @@ On a phone, "Add to Home Screen" adds it as an app.
   - The driver doesn't report the motors, so the switch shows what the page commanded. It disarms by itself
     when the robot stack stops, the OI mode leaves Safe / Full (the Roomba stops its motors then) or a cliff or
     wheel drop is reported (it also sends all-off then, for Full mode), including while it is still arming.
-  - Motor commands go out one at a time, so an OFF asked for while an ON is on its way follows it.
+  - Motor commands go out one at a time, so an OFF asked for while an ON is on its way follows it. Each runs
+    in its own process group, listed in `~/.local/state/roomba-control/` while it runs: a restart of the page
+    kills any its previous run left behind before sending its first OFF (the robot launch is left alone).
   - If a command fails, or the page has just started (a restart can leave a robot running), the state is
     unknown: the switch shows UNKNOWN, hazards stay watched and all-off is sent (and retried) until it goes out.
     A driver that stopped while the motors may have been on (it could have crashed) is owed an all-off too:

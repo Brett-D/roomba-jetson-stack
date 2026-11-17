@@ -38,7 +38,7 @@ start_instance() {
     "$BIN" --listen "127.0.0.1:$PORT" --auth-file "$AUTH" --pid-file "$FAKE_DIR/robot.pid" \
         --log-file "$FAKE_DIR/robot.log" --start-cmd "$HERE/fake_run_robot.sh" \
         --force-stop-cmd "$HERE/fake_stop_slam.sh" --launch-match "$FAKE_MATCH" --driver-match "$FAKE_DRIVER" --learner-match "fake-battery-learner-$$" \
-        --serial-dev "$FAKE_DIR/no-such-tty" --ros-setup "sleep 1; false" --robot-web-port 18099 --sound-mute-file "$MUTE" "$@" \
+        --serial-dev "$FAKE_DIR/no-such-tty" --ros-setup "sleep 1; false" --robot-web-port 18099 --sound-mute-file "$MUTE" --state-dir "$FAKE_DIR/state" "$@" \
         >> "$FAKE_DIR/server.log" 2>&1 &
     SERVER=$!
     for _ in $(seq 1 40); do [ "$(code "$BASE/login")" = 200 ] && return; sleep 0.25; done

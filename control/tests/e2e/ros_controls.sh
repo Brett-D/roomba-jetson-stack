@@ -43,6 +43,8 @@ last_entry() { python3 -c 'import json,sys; es=[json.loads(l) for l in open(sys.
 # The vacuum states the motor commands logged after line $1 went through (repeats collapsed).
 vac_seq() { python3 -c 'import json,sys; es=[json.loads(l) for l in open(sys.argv[1]).readlines()[int(sys.argv[2]):] if l.strip()]; v=[e["vacuum"] for e in es if e["kind"]=="motors"]; print(json.dumps([x for i,x in enumerate(v) if i==0 or v[i-1]!=x]))' "$LOG" "$1"; }
 lines() { wc -l < "$LOG"; }
+# Whether a motor ON command (ros2 topic pub of vacuum: true) is running.
+on_cmd() { pgrep -f -- 'cleaning_motors.*vacuum: true' > /dev/null && echo running || echo none; }
 wait_entry() {   # kind, expression, value, seconds
     local i
     for i in $(seq 1 $(($4 * 2))); do [ "$(last_entry "$1" "$2")" = "$3" ] && return 0; sleep 0.5; done
@@ -61,7 +63,8 @@ server_up() {
         --pid-file "$FAKE_DIR/robot.pid" --log-file "$FAKE_DIR/robot.log" --start-cmd "$HERE/fake_run_robot.sh" \
         --force-stop-cmd "$HERE/fake_stop_slam.sh" --launch-match "$FAKE_MATCH" --driver-match "$TOKEN" \
         --learner-match "$LTOKEN" --serial-dev "$FAKE_DIR/no-such-tty" --ros-setup "$SETUP" \
-        --sound-mute-file "$FAKE_DIR/sound_muted" --robot-web-port 18099 --dry-run-poweroff >> "$FAKE_DIR/server.log" 2>&1 &
+        --sound-mute-file "$FAKE_DIR/sound_muted" --state-dir "$FAKE_DIR/state" --robot-web-port 18099 \
+        --dry-run-poweroff >> "$FAKE_DIR/server.log" 2>&1 &
     SERVER=$!
     for _ in $(seq 1 40); do [ "$(code "$BASE/login")" = 200 ] && break; sleep 0.25; done
     code -c "$JAR" -H "$ORIGIN" --data-urlencode password=fixture-password "$BASE/login" > /dev/null
@@ -235,6 +238,25 @@ server_up
 wait_for '"state was unknown" in ((d["vacuum"]["note"] or {}).get("message") or "")' true 40
 check "off" "$(vac_seq "$n0")" '[false]'
 check "not armed" "$(st 'd["vacuum"]["armed"], d["vacuum"]["unknown"]')" '[false, false]'
+
+echo "== the page restarted while an ON waits for the driver: killed before the new OFF"
+settled
+touch "$FAKE_DIR/motors_unplugged"   # the ON command waits for a subscriber (up to 8 s)
+sleep 2
+n0=$(lines)
+check "arm" "$(post vacuum/arm)" 202
+sleep 3
+check "the ON command is waiting" "$(on_cmd)" running
+kill "$SERVER"
+wait "$SERVER" 2>/dev/null
+server_up
+check "the old ON command is gone" "$(on_cmd)" none
+check "the robot launch is still running" "$(st 'd["robot"]["state"]')" running
+rm -f "$FAKE_DIR/motors_unplugged"
+wait_for '"state was unknown" in ((d["vacuum"]["note"] or {}).get("message") or "")' true 40
+sleep 5   # an old ON would have gone out by now
+check "only OFF after the restart" "$(vac_seq "$n0")" '[false]'
+check "not armed" "$(st 'd["vacuum"]["armed"]')" false
 
 echo "== shut down (dry run) switches the vacuum off first"
 wait_for 'd["ros"]["available"]' true 40

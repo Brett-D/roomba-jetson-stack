@@ -371,6 +371,14 @@ pub fn request_vacuum(app: &Arc<App>, arm: bool) -> Result<String, String> {
     Ok(if arm { "Arming: vacuum and brushes on…".into() } else { "Vacuum and brushes off…".into() })
 }
 
+/// The process groups of motor commands on their way (see `cmd::run_killing`).
+pub fn motor_registry(cfg: &crate::Config) -> std::path::PathBuf {
+    cfg.state_dir.join("motor-commands")
+}
+
+/// What every motor command's command line contains (`motors_cmd`).
+pub const MOTOR_MARKER: &str = "/roomba/cleaning_motors";
+
 /// Sends every motor command, one at a time, until the motors are as the page wants them.
 pub fn motor_worker(app: Arc<App>) {
     loop {
@@ -393,7 +401,7 @@ pub fn motor_worker(app: Arc<App>) {
             }
         };
         let Some(target) = target else { continue };
-        let r = cmd::run_killing(&motors_cmd(&app.cfg.ros_setup, target), Duration::from_secs(CLI_TIMEOUT_S + 10));
+        let r = cmd::run_killing(&motors_cmd(&app.cfg.ros_setup, target), Duration::from_secs(CLI_TIMEOUT_S + 10), &motor_registry(&app.cfg));
         let result = published(&r);
         eprintln!("vacuum {}: {result:?}", if target { "on" } else { "off" });
         let mut play_armed = false;
