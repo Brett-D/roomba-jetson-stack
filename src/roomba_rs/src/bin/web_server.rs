@@ -36,6 +36,7 @@ use roomba_rs::tf_listener::{stamp_ns, TfListener};
 use roomba_rs::web::auth::{self, AuthPaths, Sessions, SESSION_COOKIE};
 use roomba_rs::web::http::{self, Conditional, MimeTypes, Reply};
 use roomba_rs::web::json::{self, Py};
+use roomba_rs::web::listen;
 use roomba_rs::web::state::{self, Core, Detection, Grid, MAX_BODY, MAX_STREAMS};
 use roomba_rs::web::image;
 
@@ -1053,24 +1054,18 @@ fn main() -> Result<()> {
         scrypt_slots: tokio::sync::Semaphore::new(10),
         streams: AtomicUsize::new(0),
     });
-    // IPv6 and IPv4: [::] takes both where the system allows it, and then 0.0.0.0 can't bind (in
-    // use); where it keeps IPv6 sockets IPv6-only, 0.0.0.0 binds too; without IPv6, only 0.0.0.0.
-    let (v6, v4) = rt.block_on(async {
-        (tokio::net::TcpListener::bind(("::", port)).await, tokio::net::TcpListener::bind(("0.0.0.0", port)).await)
-    });
-    let listeners: Vec<_> = match (v6, v4) {
-        (Err(e), Err(_)) => return Err(anyhow!("cannot listen on port {port}: {e}")),
-        (v6, v4) => {
-            let what = match (&v6, &v4) {
-                (Ok(_), Ok(_)) => "[::] (IPv6) and 0.0.0.0 (IPv4)".to_string(),
-                (Ok(_), Err(e)) if e.kind() == std::io::ErrorKind::AddrInUse => "[::] (IPv6 and IPv4)".to_string(),
-                (Ok(_), Err(e)) => format!("[::] (IPv6; not IPv4: {e})"),
-                (Err(e), _) => format!("0.0.0.0 (IPv4 only: IPv6 {e})"),
-            };
-            log!(node.info(), "Web app on port {port}: listening on {what}");
-            [v6.ok(), v4.ok()].into_iter().flatten().collect()
-        }
-    };
+    // IPv6 and IPv4 (see roomba_rs::web::listen).
+    let (listeners, what) = listen::bind_dual(port, None).with_context(|| format!("cannot listen on port {port}"))?;
+    log!(node.info(), "Web app on port {port}: listening on {what}");
+    let listeners = rt.block_on(async {
+        listeners
+            .into_iter()
+            .map(|l| {
+                l.set_nonblocking(true)?;
+                tokio::net::TcpListener::from_std(l)
+            })
+            .collect::<std::io::Result<Vec<_>>>()
+    })?;
     std::thread::Builder::new().name("http".into()).spawn(move || {
         rt.block_on(async move {
             for l in listeners {
