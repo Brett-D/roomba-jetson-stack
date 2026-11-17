@@ -14,6 +14,7 @@ pub mod node_params;
 pub mod ocv;
 pub mod person;
 pub mod scene_filter;
+pub mod sound_events;
 pub mod static_tf;
 pub mod tf_buffer;
 pub mod tf_listener;

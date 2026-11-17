@@ -3,6 +3,7 @@
   ros2 launch roomba_bringup robot.launch.py mode:=mapping         # drive around to build a new map
   ros2 launch roomba_bringup robot.launch.py                       # reuse the saved map (auto)
   ros2 launch roomba_bringup robot.launch.py nav:=false            # VSLAM + driver only
+  ros2 launch roomba_bringup robot.launch.py sounds:=false         # no event sounds on the Roomba
 
 Pipelines (A is the default; any mix of the three choices works):
   A  odometry:=basalt  fusion:=watchdog  obstacles:=floor     Basalt VIO (CPU), vslam_watchdog
@@ -83,6 +84,9 @@ def generate_launch_description():
         DeclareLaunchArgument('ir_intensity', default_value='4'),
         DeclareLaunchArgument('nav', default_value='true', description='Run Nav2'),
         DeclareLaunchArgument('driver', default_value='true', description='Run the Roomba base driver'),
+        DeclareLaunchArgument('sounds', default_value='true',
+                              description='Event sounds on the Roomba (roomba_rs sound_events): hello, uh-oh on '
+                                          'bumps, a jingle when exploring finishes; false = none'),
         DeclareLaunchArgument('rust_nodes', default_value='true',
                               description='Use the Rust ports (package roomba_rs) of nodes that have one, and the '
                                           'Rust Roomba driver (roomba_driver_rs); false = the original '
@@ -129,6 +133,15 @@ def generate_launch_description():
         condition=IfCondition(lc('driver')),
     )
 
+    # Event sounds (sounds:=true): "hello" when the driver first reports Safe/Full mode, "uh-oh" on a
+    # bumper hit, a jingle when an exploration run finishes. Rust only, but it just uses the driver's
+    # roomba/define_song service and topics, so it runs with the Python driver (rust_nodes:=false) too.
+    # Never changes the OI mode. Mute it live with: touch ~/.config/roomba/sound_muted
+    sounds = Node(
+        package='roomba_rs', executable='sound_events', name='sound_events', output='screen',
+        condition=IfCondition(PythonExpression(["'", lc('sounds'), "' == 'true' and '", lc('driver'), "' == 'true'"])),
+    )
+
     nav = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(PathJoinSubstitution([bringup, 'launch', 'nav.launch.py'])),
         launch_arguments=[
@@ -157,4 +170,4 @@ def generate_launch_description():
 
     sim_time = SetParameter(name='use_sim_time', value=ParameterValue(lc('use_sim_time'), value_type=bool))
     return LaunchDescription(args + [OpaqueFunction(function=_check_args), sim_time,
-                                     mount, vslam, driver, nvblox, nav])
+                                     mount, vslam, driver, sounds, nvblox, nav])

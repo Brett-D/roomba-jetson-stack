@@ -56,6 +56,10 @@ path = "src/bin/twin2d.rs"
 name = "nav2_guard"
 path = "src/bin/nav2_guard.rs"
 
+[[bin]]
+name = "sound_events"
+path = "src/bin/sound_events.rs"
+
 # Learned navigation skills (docs/learned-skills.md): opt-in, build with --features learned.
 [[bin]]
 name = "unstuck_skill"

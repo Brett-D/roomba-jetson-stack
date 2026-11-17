@@ -14,7 +14,7 @@ The serial driver lives in its own repository and is included here as a submodul
 |---|---|
 | `src/roomba_bringup` | Launch files (`robot.launch.py`, `vslam.launch.py`, `nav.launch.py`, `handheld_slam.launch.py`, `twin2d.launch.py`), Nav2 configs, robot driver config, digital-twin scenarios (`config/twin2d/`) |
 | `src/roomba_perception` | VSLAM watchdog/odometry filter with wheel bridging, EKF input conditioning (`ekf_inputs`), floor obstacle detection, explorer, ignore zones, nav coach, person detector, IMU calibration |
-| `src/roomba_rs` | Rust ports of the robot's ROS 2 nodes (rclrs): `floor_obstacles`, `ekf_inputs`, `vslam_watchdog`, `map_gap_filler`, `ignore_zones`, `web_server`, `set_password`, `explorer`, `nav_coach` and `person_detector` (TensorRT and OpenCV through a small C++ shim in `native/`) (same topics, services, parameters, files and output as the Python nodes at a fraction of the CPU; `vendor/` holds generated Rust bindings for the Isaac ROS VSLAM interfaces). `tf_buffer`/`tf_listener` give rclrs nodes a tf2-equivalent TF buffer (bit-identical lookups). `rust_nodes:=false` switches back to the Python nodes (and the Python Roomba driver). `twin2d` is the 2D digital twin (see [Digital twin (2D)](#digital-twin-2d)); its simulated Roomba uses the Open Interface code of the Rust driver's library (`roomba_driver_rs`, a cargo path dependency on the submodule); `nav2_guard` (Rust only) brings Nav2's servers up when the lifecycle manager's start-up hangs on a lost answer |
+| `src/roomba_rs` | Rust ports of the robot's ROS 2 nodes (rclrs): `floor_obstacles`, `ekf_inputs`, `vslam_watchdog`, `map_gap_filler`, `ignore_zones`, `web_server`, `set_password`, `explorer`, `nav_coach` and `person_detector` (TensorRT and OpenCV through a small C++ shim in `native/`) (same topics, services, parameters, files and output as the Python nodes at a fraction of the CPU; `vendor/` holds generated Rust bindings for the Isaac ROS VSLAM interfaces). `tf_buffer`/`tf_listener` give rclrs nodes a tf2-equivalent TF buffer (bit-identical lookups). `rust_nodes:=false` switches back to the Python nodes (and the Python Roomba driver). `twin2d` is the 2D digital twin (see [Digital twin (2D)](#digital-twin-2d)); its simulated Roomba uses the Open Interface code of the Rust driver's library (`roomba_driver_rs`, a cargo path dependency on the submodule); `nav2_guard` (Rust only) brings Nav2's servers up when the lifecycle manager's start-up hangs on a lost answer; `sound_events` (Rust only) plays [event sounds](#event-sounds) on the Roomba |
 | `src/roomba_web` | Web app on port 8080: live map, robot status, drive pad, tap-to-go navigation, login (the page, and the Python server used with `rust_nodes:=false`) |
 | `src/mynteye_d1000_driver` | ROS 2 node for the MYNT EYE D1000 stereo/depth/IMU camera |
 | `src/basalt_vio_ros` | ROS 2 wrapper for Basalt visual-inertial odometry |
@@ -22,7 +22,7 @@ The serial driver lives in its own repository and is included here as a submodul
 | `src/roomba_skills_msgs` | Interfaces of the learned navigation skills (`action/Unstuck`) |
 | `twin/learned` | Learned navigation skills (simulation only, opt-in, off by default): Isaac Lab unstuck policy, learned frontier ranking for the explorer, their evaluation against the classical logic and in the 2D twin, and the Rust inference (`roomba_rs` feature `learned`, node `unstuck_skill`, explorer options `unstuck_skill` and `goal_ranking: learned`); see [docs/learned-skills.md](docs/learned-skills.md) |
 | `scripts/` | `run_robot.sh`, `stop_slam.sh`, `graceful.py` (`ros2 launch` that SIGTERM / SIGINT stop cleanly), `record_run.sh` / `compare_pipelines.sh` (A vs B on a recorded drive), `run_twin2d.sh` (the 2D digital twin), mapping/replay helpers, setup scripts |
-| `tools/` | Probes and diagnostics (motion step test, costmap/obstacle probes, map render, TF/drift/CPU-GPU checks, comparison monitor/renderer, Python vs Rust A/B checks), `twin2d_world.py` / `twin2d_plan.py` / `twin2d_run.py` (digital twin floor plan from the map database or a vector plan, scenario runner); `tools/oi_tests/` holds early serial/OI bench scripts |
+| `tools/` | Probes and diagnostics (motion step test, costmap/obstacle probes, map render, TF/drift/CPU-GPU checks, comparison monitor/renderer, Python vs Rust A/B checks), `twin2d_world.py` / `twin2d_plan.py` / `twin2d_run.py` (digital twin floor plan from the map database or a vector plan, scenario runner), `sound_events_offline.py` (the event-sounds node against a fake driver); `tools/oi_tests/` holds early serial/OI bench scripts |
 | `docs/` | Wiring and power diagrams; [training.md](docs/training.md): everything that was trained in this project (Isaac Sim person / railing detector, unstuck skill, frontier ranking), with algorithms, code, results and status (simulation only, nothing learned is deployed); [learned-skills.md](docs/learned-skills.md): the two navigation skills in detail |
 | `hardware/platform` | 3D-printed platform: STLs, fit tests and the Python generator |
 
@@ -139,6 +139,34 @@ python tools/markers/make_markers.py --out markers.pdf    # IDs 1-3 (1 = HOME), 
   15 cm), on matte paper. Put them up **before** mapping and never move them afterwards.
 - Markers are on by default (`markers:=true`, `marker_length:=0.15` in metres, detected up to 3 m). Use
   `markers:=false` to turn them off. A different print size needs a matching `marker_length:=`.
+
+### Event sounds
+
+`sound_events` (`src/roomba_rs`, Rust; launched by `robot.launch.py` with either driver) plays songs on the
+Roomba's beeper through the driver's `/roomba/define_song` service:
+
+| Event | Song slot | Notes (MIDI) | Durations (1/64 s) |
+|---|---|---|---|
+| **hello**: the driver first reports Safe or Full mode after start-up (once; `HELO` on the display for 3 s too) | 0 | 67 72 76 | 10 10 24 |
+| **uh-oh**: the bumper is pressed (left or right, a new press; not the light bumpers), at most once per 4 s, never over a song that is playing | 1 | 76 76 69 | 12 6 28 |
+| **done**: an exploration run finishes or gets back to its start point (once per run) | 2 | 72 76 79 84 rest 79 84 | 7 7 7 14 4 8 36 |
+
+Each sound is a single `define_song` call with the full notes and `play: true`, so it doesn't matter
+if something else (the web control page, a `ros2 service call`) has used the same slot meanwhile;
+slots 3 and 4 are never touched. Nothing plays outside Safe/Full mode, and the node never changes the mode.
+
+- **Mute** without restarting: `mkdir -p ~/.config/roomba && touch ~/.config/roomba/sound_muted`;
+  unmute with `rm ~/.config/roomba/sound_muted`. The file is checked at each event (`HELO` still shows).
+- **Off**: `run_robot.sh sounds:=false` (or `robot.launch.py sounds:=false`), or the node's parameter `enabled: false`.
+- Parameters: `enabled` (true), `mute_file` (`~/.config/roomba/sound_muted`), `bump_interval_s` (4.0), `display_s` (3.0).
+- The driver has no bump event topic: its bump stop sees every 15 ms frame, but other nodes only get the
+  bumpers in the `/roomba/sensors` snapshots, published at `sensor_rate_hz` (5 Hz in `roomba_driver_robot.yaml`).
+  A press shorter than ~0.2 s can go unheard; holding the bump flags until the next snapshot (or a bump event
+  topic) in the driver would fix that. With `ignore_sensors: ['bump_right']` (this robot's stuck switch) only
+  the left bumper counts.
+- Without the robot: `ROS_DOMAIN_ID=77 tools/sound_events_offline.py` runs the node against a fake driver and
+  checks which songs it asks for and when.
+
 ### Pipelines A (default) and B (GPU)
 
 Extra arguments to `run_robot.sh` / `robot.launch.py` pick the odometry, the fusion and the costmap obstacles:
