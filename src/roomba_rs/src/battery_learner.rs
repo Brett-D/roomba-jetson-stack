@@ -707,6 +707,10 @@ impl Learner {
                 self.swap(How::Startup, m, before, unix, out);
             }
             Kind::Startup { saved } => {
+                if !self.state.pack.start_ocv.is_finite() {
+                    // A pack started by the manual reset just before a restart.
+                    self.state.pack.start_ocv = m;
+                }
                 let saved = saved.map_or("none".into(), |s| format!("{s:.2} V"));
                 out.logs.push(format!(
                     "continuing pack {} at {} ({m:.2} V; saved {saved}), capacity {:.0} mAh{}",
@@ -778,8 +782,10 @@ impl Learner {
             message = format!("new pack {id} at 100 %");
             self.fresh = false;
             // The next readings settle the voltage without a swap check: the button may come while
-            // the pack is out, and the new pack's voltage jump must not count as another swap.
+            // the pack is out, and the new pack's voltage jump must not count as another swap; nor
+            // may a restart before they settle compare it with the old pack's saved voltage.
             self.pending = Some(Pending::new(Kind::Gap { before: None, gap_s: 0.0 }));
+            self.state.last_ocv = None;
             self.rest_since = None;
         }
         self.state.detected_swap_stamp = None;
@@ -1469,6 +1475,26 @@ mod tests {
         let (mut l2, _) = started(Some(saved), &sim, &mut t);
         let (reply, _) = l2.manual_swap(t);
         assert!(reply.starts_with("new pack 3 at 100 %"), "{reply}");
+    }
+
+    #[test]
+    fn manual_reset_then_restart_before_settling() {
+        let mut t = 0.0;
+        let mut sim = Sim { offset: 0.0, capacity: 2000.0, soc: 0.3, r: 0.2 };
+        let (mut l, _) = started(None, &sim, &mut t);
+        run(&mut l, &mut sim, &mut t, 60.0, -400.0);
+        // The button while the pack is out (the node saves the state then), the node restarts and
+        // a full pack goes in: still pack 2, full, no second swap against the old pack's voltage.
+        t += 30.0;
+        l.manual_swap(t);
+        let saved = l.state.clone();
+        assert_eq!(saved.last_ocv, None);
+        t += 30.0;
+        sim.soc = 1.0;
+        let (l2, logs) = started(Some(saved), &sim, &mut t);
+        assert!(logs[0].starts_with("continuing pack 2 at 100 %"), "{logs:?}");
+        assert_eq!((l2.state.pack.id, l2.state.pack.anchor, l2.state.history.len()), (2, Anchor::Full, 1));
+        assert!((l2.state.pack.start_ocv - 21.0).abs() < 0.01, "{}", l2.state.pack.start_ocv);
     }
 
     #[test]
