@@ -1,9 +1,12 @@
-# Learned navigation skills (simulation; opt-in, not deployed)
+# Learned navigation skills (trained in simulation; on by default on the robot since 2026-11-16)
 
 Two learned skills for the explorer's weakest moments, trained and evaluated in simulation against
-the classical logic, with the robot-side inference prepared but **not deployed** (both are off by default:
-`-DLEARNED_SKILLS=ON` builds them, the launch arguments `unstuck_skill:=true` and
-`goal_ranking:=learned` turn them on; the explorer's default behaviour is unchanged):
+the classical logic. Since 2026-11-16 both are **on by default on the robot**: roomba_rs builds them
+by default (CMake `LEARNED_SKILLS`, default ON), and `robot.launch.py` / `nav.launch.py` start them with
+`unstuck_skill:=true` and `goal_ranking:=learned`; `unstuck_skill:=false goal_ranking:=rule` gives
+the classical explorer exactly as before (checked, section 3). There is no real-robot validation
+yet, and the unstuck skill runs with a provisional light-bumper calibration (section 5); the 2D twin
+(`twin2d.launch.py`) keeps both off by default for its A/B baselines:
 
 1. **Unstuck**: a small policy that drives the robot out of a stuck situation (nose to a wall inside
    the camera's 0.3 m blind zone, wedged in a corner or between chair legs, under an overhang at camera
@@ -234,18 +237,26 @@ driving, fewer revisits, faster early coverage**; no gain in final coverage (bot
 
 ![coverage over time](learned-skills/explore_coverage.png)
 
-## 3. Robot-side integration (prepared, not deployed)
+## 3. Robot-side integration (on by default since 2026-11-16)
 
-### Build (opt-in)
+### Build
 
 ```bash
-colcon build --packages-select roomba_skills_msgs roomba_rs --cmake-args -DLEARNED_SKILLS=ON
+colcon build --packages-select roomba_skills_msgs roomba_rs     # LEARNED_SKILLS is ON by default
+# an existing build directory configured before (cached OFF): add --cmake-args -DLEARNED_SKILLS=ON once
 # or, for development: cd src/roomba_rs && cargo test --release --features learned --lib learned::
 ```
 
-`-DLEARNED_SKILLS=ON` turns on the cargo feature `learned` (adds `tract-onnx` 0.23, pure Rust), builds
-`unstuck_skill` and installs `src/roomba_rs/models/` to `share/roomba_rs/models`. Without it the build,
-the binaries and the tests are exactly as before (checked: default `cargo test --lib` 168 passed).
+`LEARNED_SKILLS=ON` turns on the cargo feature `learned` (adds `tract-onnx` 0.23, pure Rust), builds
+`unstuck_skill` and installs `src/roomba_rs/models/` to `share/roomba_rs/models`. With
+`-DLEARNED_SKILLS=OFF` the build, the binaries and the tests are exactly as before (checked: default
+`cargo test --lib` 168 passed); `nav.launch.py` then skips `unstuck_skill` with a message and the
+explorer falls back to the rule. Checked for the switch to on by default (2026-11-16): with
+`unstuck_skill:=false goal_ranking:=rule` the learned build's explorer is identical to the classical
+one (`tools/ab_explorer_offline.py` in WSL: every output of every scenario equal to the Python explorer
+but one goal orientation 1 ulp apart in scenario `commands`, which main's build shows too),
+and `goal_ranking:=learned` loads `explore_ranker.onnx` from the install space
+(`share/roomba_rs/models`), not the source tree.
 
 ### Rust inference (`src/roomba_rs/src/learned/`)
 
@@ -289,8 +300,9 @@ more than the network). Model files:
   carpet pile adds ~30 x gain while driving). The first version divided the raw signal by a reference;
   in the twin the carpet share alone then read as "something 6 cm away" on the side sensors whenever
   the robot moved, so the skill could not end SUCCEEDED while driving and fed the policy phantom
-  obstacles. Calibrate the gains and floor values on the robot (signals at 1, 5, 10 cm from a wall, and
-  driving on each floor covering).
+  obstacles. The node defaults are the 2D twin's sensor model (twin2d.launch.py uses them); on the robot
+  `nav.launch.py` loads `config/unstuck_skill_robot.yaml` (launch argument `unstuck_params`), the
+  provisional calibration of section 5.
 - The 10 Hz step runs on a **steady-clock** timer. The first version used a ROS-time timer and in
   the live twin demo the node sometimes went silent (goal accepted, then no feedback or result, every
   executor thread idle in `rcl_wait`). Root cause, the same rclrs 0.8 bug the other Rust nodes hit: when
@@ -501,10 +513,65 @@ PPO-fine-tuned model; they behave the same in the 2D env.)
   (`ros2 action send_goal /unstuck_skill roomba_skills_msgs/action/Unstuck "{time_limit_s: 10.0}"`)
   from known stuck poses (nose to the hallway wall, in a corner, at a railing), checking that the
   collision monitor, the driver's bump reflex and cliff stop stay in charge; then inside exploration
-  with `unstuck_skill:=true`. Keep `goal_ranking: rule` (no benefit in the twin).
+  with `unstuck_skill:=true`. (Since 2026-11-16 both skills are on by default on the robot, ahead of
+  steps (2)-(4): `unstuck_skill:=false goal_ranking:=rule` is the fallback; the ranker showed no gain in
+  the twin.)
 - **Retraining**: domain-randomise more (turn efficiency 40-90 % for carpet, stereo noise on the
   marks, real light-bumper curves), add wheel suspension, and fine-tune on stuck episodes recorded by
   the twin and the robot.
+
+### Light bumpers: sim vs the real robot (measured 2026-11-16) and the calibration in use
+
+What the policy was trained on (`unstuck_env.py`): proximity = 1 - d / 12 cm (0 beyond 12 cm), per-sensor
+gain 0.7-1.3 on the proximity, Gaussian noise 0.02, no floor offset; the driver's light stop modelled as
+front-left proximity >= 0.85 (about 1.8 cm). What `unstuck_skill` feeds it on the robot: the raw signal
+mapped back with the 2D twin's model, signal = gain x 0.285 / (d + 0.019)^2 + floor x gain, with
+`light_gains` 0.5,1.0,0.55,0.55,0.55,0.5 and floor 30 (driving) / 5 (still) until 2026-11-16 (the node defaults,
+the 2D twin's model). At gain 1 that model reads 60 at 5 cm and 250 at 1.5 cm.
+
+Measured on the robot (hand about 5 cm in front of each sensor; nothing near): peaks L 224-536,
+FL 228-1071, CL 196-715, CR 209-556, FR 194-680, R <= 271; 0-40 with nothing near (the two robot
+recordings of 2026-11-14 agree: driving forward over carpet, front-left read p50 7-11 and p99 30-38,
+the other sensors less).
+
+| | twin mapping (node defaults) | consequence |
+|---|---|---|
+| hand at 5 cm (true proximity 0.58) | 0.86-1.00 on every sensor (0-1.7 cm) | everything near looks touching |
+| idle reading 40, standing still | 0.62-0.64 on L, CL, CR, FR, R (4.3-4.6 cm), 0.41 on FL (7 cm) | phantom obstacles next to a free robot |
+| idle reading 40, driving | 0.48-0.53 on all but FL (5.6-6.3 cm) | the skill can't see itself free |
+| implied gain at 5 cm (hand) | L 3.4-8.6, FL 3.5-17.6, CL 2.9-11.6, CR 3.2-9.0, FR 2.9-11.0, R ~4 | 4-18 x the configured gains |
+| driver light stop (signal >= 200 on FL, CL, CR **and** FR) | at gain 6-8 that is 7-9 cm from a hand-like surface | the sim stops at 1.8 cm, front-left only |
+
+**Applied (observation scaling only; the policy is unchanged):** `src/roomba_bringup/config/unstuck_skill_robot.yaml`,
+loaded by `nav.launch.py` (`unstuck_params`), sets `light_gains` 5.5,7.9,5.9,5.4,5.7,4.2 - per sensor,
+(geometric mean of the hand peaks - 20) / 59.9, so a hand-like surface at 5 cm reads proximity ~0.59 as
+in the sim - and the floor terms in gain units `light_floor_driving` 5 / `light_floor_still` 2 (x gain:
+27-40 / 11-16 signal; 30 x 6 would have subtracted 180). With it, idle readings up to 40 and the
+recorded carpet driving (p99 38) read 0, the hand peaks 0.30-0.77, and the driver's stop signal 200
+reads 0.24-0.50 (6-9 cm). It is provisional: it only fixes the scale. Still open: (1) refit the gains
+with the procedure below; (2) check whether the inverse-square shape
+holds (it fixes how distance and reflectance trade off); (3) the driver's stop happens 4-5 x farther
+out and on four sensors, so either model that stop in `unstuck_env.py` (and the reflex back-up it
+triggers) and fine-tune, or accept that tight manoeuvres (chair legs, narrow gaps: the policy's
+weakest scenarios) will be interrupted by bump stops the policy never saw; (4) widen the reflectance
+randomisation (the sim's 0.7-1.3 on proximity vs a several-fold signal range between white walls and
+dark wood or black metal).
+
+Supervised calibration procedure, to replace the provisional values (robot in Passive or Safe with the wheels lifted, a person at the
+robot; `ros2 bag record /roomba/sensors`, about 10 s per point, the current driver and stream layout):
+1. Baselines: nothing within 30 cm, standing still and then driving slowly in open space, on each floor
+   covering (thick carpet, rug, hard floor), lights on and off, and once near a sunny window.
+2. Distance sweeps per sensor: a flat target perpendicular to the sensor's axis (L/R 69 deg, FL/FR
+   37 deg, CL/CR 11 deg off the nose) at 0 (touching), 1, 2, 3, 5, 7.5, 10, 12, 15 and 20 cm from the
+   bumper face, for: a white painted wall or baseboard, a dark wood panel (furniture), black metal
+   (a baluster or chair leg; a 2-4 cm round post), a door edge, and a hand for reference.
+3. The stair railing and the chair legs in place, robot at 2, 5 and 10 cm, at 0 and 45 deg.
+4. Fit signal(d) per sensor and surface (gain and offset of the inverse-square model, or a lookup
+   table if it doesn't fit); record the noise (std) at each point. Set `light_gains` from a mid
+   (painted wall) surface, the floor terms from step 1, and replay the recorded sweeps through
+   `light_proximity` to check that 5 cm reads ~0.58 and the baselines read 0; put the values into
+   `config/unstuck_skill_robot.yaml`.
+5. The robot test of item (4) above, first with the skill called by hand.
 
 ## 6. Watch it
 

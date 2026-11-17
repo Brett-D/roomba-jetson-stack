@@ -11,9 +11,11 @@ find_program(CARGO cargo HINTS "$ENV{HOME}/.cargo/bin" REQUIRED)
 set(CARGO_TARGET_DIR "${CMAKE_CURRENT_BINARY_DIR}/cargo")
 set(NODES floor_obstacles ekf_inputs vslam_watchdog map_gap_filler ignore_zones web_server set_password explorer nav_coach person_detector twin2d nav2_guard sound_events)
 
-# Learned navigation skills (docs/learned-skills.md): off by default. ON adds the cargo feature
-# "learned" (tract ONNX inference, the explorer's goal_ranking: learned) and the unstuck_skill node.
-option(LEARNED_SKILLS "Build the learned navigation skills" OFF)
+# Learned navigation skills (docs/learned-skills.md): on by default since the robot uses them
+# (robot.launch.py: unstuck_skill:=true goal_ranking:=learned). ON adds the cargo feature "learned"
+# (tract ONNX inference, the explorer's goal_ranking: learned), the unstuck_skill node and the models.
+# CMake caches the choice: an existing build directory configured OFF needs -DLEARNED_SKILLS=ON once.
+option(LEARNED_SKILLS "Build the learned navigation skills" ON)
 set(CARGO_FEATURES "")
 if(LEARNED_SKILLS)
   list(APPEND NODES unstuck_skill)

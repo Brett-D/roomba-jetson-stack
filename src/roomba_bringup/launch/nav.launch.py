@@ -10,8 +10,11 @@ Pipeline: floor_obstacles (depth + IMU) -> costmaps -> planner + RPP controller
           (and, on the robot, cmd_vel -> roomba_driver). On the robot, explorer drives to the
           edges of the map on request (web app Explore button).
 """
+import os
+
+from ament_index_python.packages import PackageNotFoundError, get_package_prefix, get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument
+from launch.actions import DeclareLaunchArgument, LogInfo, OpaqueFunction
 from launch.conditions import IfCondition, UnlessCondition
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution, PythonExpression
 from launch_ros.actions import Node
@@ -20,6 +23,25 @@ from launch_ros.substitutions import FindPackageShare
 
 NAV_NODES = ['controller_server', 'planner_server', 'behavior_server', 'bt_navigator', 'velocity_smoother',
              'collision_monitor']
+
+
+def _unstuck_skill(context):
+    """The unstuck_skill node with the light-bumper calibration (unstuck_params), or a warning when
+    roomba_rs was built without LEARNED_SKILLS (the explorer then carries on without the skill)."""
+    try:
+        prefix = get_package_prefix('roomba_rs')
+    except PackageNotFoundError:
+        prefix = ''
+    if not os.path.isfile(os.path.join(prefix, 'lib', 'roomba_rs', 'unstuck_skill')):
+        return [LogInfo(msg='[nav] unstuck_skill:=true but roomba_rs was built without LEARNED_SKILLS: '
+                            'not started (the explorer explores without it)')]
+    model = os.path.join(get_package_share_directory('roomba_rs'), 'models', 'unstuck_policy.onnx')
+    calibration = LaunchConfiguration('unstuck_params').perform(context)
+    return [LogInfo(msg=f'[nav] unstuck_skill: {model}, light-bumper calibration '
+                        f'{calibration or "(node defaults)"}'),
+            Node(package='roomba_rs', executable='unstuck_skill', name='unstuck_skill', output='screen',
+                 respawn=True, respawn_delay=2.0,
+                 parameters=[{'model': model}] + ([calibration] if calibration else []))]
 
 
 def generate_launch_description():
@@ -39,12 +61,18 @@ def generate_launch_description():
         DeclareLaunchArgument('robot_mode', default_value='false',
                               description='true: the robot drives itself (status wording instead of '
                                           'instructions for a person)'),
-        # Learned navigation skills (docs/learned-skills.md), off by default; need roomba_rs built with
-        # -DLEARNED_SKILLS=ON and the Rust explorer.
-        DeclareLaunchArgument('unstuck_skill', default_value='false',
+        # Learned navigation skills (docs/learned-skills.md): on by default on the robot (roomba_rs is
+        # built with LEARNED_SKILLS=ON by default); unstuck_skill:=false goal_ranking:=rule restores the
+        # classical behaviour. Both need the Rust explorer.
+        DeclareLaunchArgument('unstuck_skill', default_value='true',
                               description='true: run unstuck_skill and let the explorer call it when stuck'),
-        DeclareLaunchArgument('goal_ranking', default_value='rule',
-                              description="explorer goal choice: 'rule' or 'learned' (frontier ranker)"),
+        DeclareLaunchArgument('goal_ranking', default_value='learned',
+                              description="explorer goal choice: 'learned' (frontier ranker) or 'rule'"),
+        DeclareLaunchArgument('unstuck_params',
+                              default_value=PathJoinSubstitution(
+                                  [FindPackageShare('roomba_bringup'), 'config', 'unstuck_skill_robot.yaml']),
+                              description='unstuck_skill parameters file: the light-bumper calibration '
+                                          '(empty: the node defaults, which match the 2D twin)'),
     ]
     models = PathJoinSubstitution([FindPackageShare('roomba_rs'), 'models'])
 
@@ -163,11 +191,11 @@ def generate_launch_description():
                           'goal_ranking': LaunchConfiguration('goal_ranking'),
                           'goal_ranking_model': PathJoinSubstitution([models, 'explore_ranker.onnx'])}],
              condition=IfCondition(LaunchConfiguration('robot_mode'))),
-        # Learned unstuck skill (opt-in): drives through cmd_vel_nav, so the smoother, the collision
-        # monitor and the driver's reflexes stay in charge; respawned if its watchdog fires.
-        Node(package='roomba_rs', executable='unstuck_skill', name='unstuck_skill', output='screen',
-             respawn=True, respawn_delay=2.0,
-             parameters=[{'model': PathJoinSubstitution([models, 'unstuck_policy.onnx'])}],
-             condition=IfCondition(LaunchConfiguration('unstuck_skill'))),
+        # Learned unstuck skill (robot only: the explorer calls it): drives through cmd_vel_nav, so the
+        # smoother, the collision monitor and the driver's reflexes stay in charge; respawned if its
+        # watchdog fires.
+        OpaqueFunction(function=_unstuck_skill, condition=IfCondition(PythonExpression([
+            "'", LaunchConfiguration('unstuck_skill'), "' == 'true' and '", LaunchConfiguration('robot_mode'),
+            "' == 'true'"]))),
     ]
     return LaunchDescription(args + nodes)

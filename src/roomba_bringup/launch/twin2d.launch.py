@@ -124,6 +124,8 @@ def _setup(context):
                 ('rust_nodes', lc('rust_nodes')),
                 ('unstuck_skill', lc('unstuck_skill')),
                 ('goal_ranking', lc('goal_ranking')),
+                # The twin simulates the light bumpers with the node's default calibration.
+                ('unstuck_params', ''),
                 ('fallback_camera_height_m', floor_height),
                 ('fixed_camera_height_m', floor_height),
             ]))

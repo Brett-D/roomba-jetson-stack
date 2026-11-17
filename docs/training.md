@@ -5,12 +5,17 @@ from simulated experience), how, with which code, and how well it works. It is w
 configs and training logs; where a number could not be read from a log it was re-measured (and says
 so).
 
-**Status (2026-11-16): nothing trained in this project runs on the robot.**
+**Status (2026-11-16): the two navigation skills are on by default on the robot; the person detector is still the stock model.**
 - The robot's person detector uses an off-the-shelf, COCO-pretrained YOLO11n TensorRT engine
   (`~/models/yolo11n_384x640_fp16.engine`, loaded by `person_detector`); it was not trained here.
 - The fine-tuned person/railing detector, the unstuck skill and the frontier ranker were trained and
-  evaluated **in simulation only**. The two navigation skills are opt-in code paths that are off by
-  default; the detector was never deployed. There is no real-robot validation of any of them yet.
+  evaluated **in simulation only**; there is no real-robot validation of any of them yet. The unstuck
+  skill and the frontier ranker are on by default in `robot.launch.py` (`unstuck_skill:=true`,
+  `goal_ranking:=learned`; roomba_rs builds them by default); `unstuck_skill:=false goal_ranking:=rule`
+  restores the classical explorer. The unstuck skill uses a provisional light-bumper calibration
+  ([learned-skills.md section 5](learned-skills.md)).
+  The fine-tuned detector can be selected with `person_model:=finetuned` but stays off by default:
+  on a second real recording it raised more false alarms than the stock model (section 1).
 
 | | 1. Person / railing detector | 2. Unstuck skill | 3. Frontier ranking |
 |---|---|---|---|
@@ -21,7 +26,7 @@ so).
 | training budget (one RTX 5090) | 30 epochs, 27 min + 10 epochs, 10 min | 312 PPO iterations, 30.7 M simulated steps, 39 min | CEM 40 generations, 18 min + PPO 120 updates (450 k decisions), 17 min |
 | headline result (simulation) | person recall 0.75 vs 0.28 for the COCO model at the same precision (0.96 vs 0.93); 0 false-positive frames on 312 held-out real frames | freed the robot in 86 % of 440 held-out generated situations vs 28 % for today's recovery; 85 % vs 30 % on 117 spots from the real floor plans | same final coverage with 10.6 % less time and 15.8 % less driving on 200 held-out houses |
 | closed loop in `twin2d` (real stack, 2D twin) | - | called by the explorer when stuck: freed the robot in 92 of 93 calls (median 2.5 s); fewer bumper hits in the 10 scenarios, no coverage gain | no gain over the rule (coverage within noise, the time saving did not carry over) |
-| deployed | no | no (`unstuck_skill` node, opt-in) | no (`goal_ranking: learned`, opt-in) |
+| on the robot | no (selectable: `person_model:=finetuned`, not the default) | on by default (`unstuck_skill:=true`), not yet validated on the robot | on by default (`goal_ranking:=learned`), not yet validated on the robot |
 
 Details of the two navigation skills: [learned-skills.md](learned-skills.md). Details of the Isaac
 Sim twin and the detector data: [../twin/isaac/README.md](../twin/isaac/README.md).
@@ -123,6 +128,33 @@ recall on *real* people is unknown (no labelled real frames with people yet). Ra
 trained (ultralytics val mAP50 0.22 for railing in the first run) but is not used by any node. Not
 deployed: the robot still runs the COCO YOLO11n engine.
 
+**Robot hookup (2026-11-16): selectable, not the default.** `person_detector` (Rust and Python) now
+takes the model's class names from parameters (`class_names`, `person_classes`; only people go to
+`detections_3d`, so a railing never counts as a person for the explorer; other classes are published on
+`~/objects_3d`), and `person_model:=stock|finetuned|finetuned_n` (`robot.launch.py` / `vslam.launch.py`,
+profiles in `src/roomba_bringup/config/person_models.yaml`) picks the engine and classes. Default:
+`stock`, unchanged. Engines, built on the Jetson with the stock engine's trtexec options:
+`~/models/yolo11s_person_railing_v2aeneg_384x640_fp16.engine` (finetuned) and
+`~/models/yolo11n_person_railing_v2aeneg_384x640_fp16.engine` (finetuned_n). Why not the default: a
+second people-free robot recording (fresh_map7, 643 frames every 2 s, the same house earlier that day,
+never trained on) shows the hard-negative round only fixed the recording it came from, recall on real
+people is still unmeasured, and YOLO11s costs 52 % more GPU time than the stock model
+(`twin/isaac/eval/compare_robot_detectors.py`, conf 0.45, each profile's classes):
+
+| | stock YOLO11n COCO (person, cat, dog) | finetuned YOLO11s | finetuned_n YOLO11n |
+|---|---|---|---|
+| synthetic v2-AE val: people found (2700) | 752 (0.28) | **2003 (0.74)** | 1958 (0.73) |
+| synthetic v2-AE val: correct detections (precision) | 0.93 | **0.96** | 0.95 |
+| fresh_map8 held-out 312 frames: frames with a false person | 1 (balusters) | 0 | 0 |
+| fresh_map7 643 frames (independent): frames with a false person | **2** (a blanket on the floor) | 16 (12 a dark open closet at the image edge while the robot stood still, 4 balusters / newel posts / a door edge) | 17 (12 the same closet, 2 a dresser, 3 a chair back and posts) |
+| real railings (fresh_map7, objects_3d only) | - | 42 frames (in a sample of 9: 6 real railings, 2 vertical blinds, 1 nightstand) | 32 frames |
+| Jetson TensorRT FP16 (trtexec, robot stack running): GPU compute median / latency median | 2.85 / 3.15 ms | 4.33 / 4.56 ms (+52 %) | 2.75 / 2.92 ms (-4 %) |
+
+Next for the detector: real frames with people (labelled) and hard negatives from several recordings,
+then re-check on a recording that was not used for training. The railing class also learned that
+fresh_map8's real railings are background (they were in the negative frames without labels): it
+finds railings on fresh_map7 but never on fresh_map8. Nothing uses `objects_3d` yet.
+
 Reproduce: see [twin/isaac/README.md](../twin/isaac/README.md) sections 1, 5 and 6 (install, data
 generation, training and evaluation commands); results in its "Results" section.
 
@@ -188,9 +220,9 @@ costmap and wait 2 s), with the same smoother, collision monitor and bump reflex
 Weak spots: dense clutter (0.31 success) and chair legs (0.67).
 
 **Status / limitations**: simulation only. The robot-side node (`unstuck_skill`, Rust, `tract` ONNX
-inference, reproduces PyTorch within 5e-7) is built only with `-DLEARNED_SKILLS=ON` and is not started
-by any launch file by default; with `unstuck_skill:=true` the Rust explorer calls it when it is stuck
-(default off). In the 2D twin with the real stack (phase-2 A/B, 10 scenarios x 2 seeds + the real
+inference, reproduces PyTorch within 5e-7) is built by default (`LEARNED_SKILLS`) and started by
+`nav.launch.py` on the robot; with `unstuck_skill:=true` (the default since 2026-11-16) the Rust explorer
+calls it when it is stuck. In the 2D twin with the real stack (phase-2 A/B, 10 scenarios x 2 seeds + the real
 upstairs floor plan x 4 seeds) the explorer called it 93 times, mostly after bumping an invisible
 railing; it reported the robot free in 92 (median 2.5 s), the 10 scenarios had fewer bumper hits
 (24 -> 15), and coverage did not improve
@@ -270,8 +302,8 @@ static houses; in the dynamic runs on the real plans (16 each) the differences a
 the upstairs plan saw more failed goals.
 
 **Status / limitations**: simulation only. In the Rust explorer, `goal_ranking: learned` (with
-`goal_ranking_model`) re-ranks the surviving candidates; default `rule`, and the build feature is off by
-default. The 2D simulator has no Nav2 dynamics (travel time from path length), simplified mapping and
+`goal_ranking_model`) re-ranks the surviving candidates; on by default on the robot since 2026-11-16
+(`goal_ranking:=learned`; `rule` is the classical choice). The 2D simulator has no Nav2 dynamics (travel time from path length), simplified mapping and
 visible railings. In `twin2d` (the real stack; phase-2 A/B on the current explorer, 10 scenarios x 2
 seeds + the real upstairs floor plan x 4 seeds) the learned ranking did not beat the rule: about the
 same coverage over the scenarios (62.8 vs 64.9 %, time -2 %), and on the floor-plan world slightly

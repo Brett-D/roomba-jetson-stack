@@ -1,0 +1,19 @@
+# unstuck_skill on the robot (nav.launch.py unstuck_params): the light-bumper calibration, i.e. the
+# scaling from the Roomba's raw light-bumper signals to the proximity the policy was trained on in
+# simulation (1 - d / 0.12 m, 0 beyond 12 cm; docs/learned-skills.md section 5). For each sensor
+# (L, FL, CL, CR, FR, R) the node inverts
+#     signal = gain x 0.285 / (d + 0.019)^2 + floor x gain
+# (gain 1 reads ~60 at 5 cm and ~250 at 1.5 cm), so `gain` scales the real signal range onto the sim's
+# distances and `floor` removes what the floor itself reflects. The node defaults (0.5,1.0,0.55,0.55,
+# 0.55,0.5; floor 30 / 5) are the 2D twin's sensor model, which twin2d.launch.py keeps using.
+unstuck_skill:
+  ros__parameters:
+    # PROVISIONAL (2026-11-16, a hand ~5 cm in front of each sensor, peaks L 224-536, FL 228-1071,
+    # CL 196-715, CR 209-556, FR 194-680, R <= 271): gain = (geometric mean of the peaks - 20) / 59.9,
+    # so a hand-like surface at 5 cm reads proximity ~0.58 as in the sim. Replace with the fitted
+    # values of the supervised calibration (docs/learned-skills.md section 5) when it is done.
+    light_gains: "5.5,7.9,5.9,5.4,5.7,4.2"
+    # Floor share in gain units (x gain: 27-40 signal while driving over carpet, 11-16 standing):
+    # nothing near (raw 0-40) then reads proximity 0.
+    light_floor_driving: 5.0
+    light_floor_still: 2.0

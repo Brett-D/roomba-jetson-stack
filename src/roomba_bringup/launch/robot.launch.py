@@ -19,6 +19,11 @@ roomba_driver drives the wheels from /cmd_vel (Nav2's collision monitor, or the 
 and publishes /wheel/odom, /battery_state and /roomba/sensors. rust_nodes:=false runs the original
 Python nodes (driver included) instead of their Rust ports in roomba_rs and roomba_driver_rs.
 
+Learned parts (docs/learned-skills.md, docs/training.md): the explorer calls the learned unstuck skill
+when stuck and ranks its frontier goals with the learned ranker (unstuck_skill:=true
+goal_ranking:=learned, the defaults; unstuck_skill:=false goal_ranking:=rule is the classical
+explorer); person_model:= picks the person detector (config/person_models.yaml, default stock).
+
 Camera mount defaults: centred, facing forward, level, lens 0.153 m ahead of the Roomba's centre
 (1.7 cm behind the front bumper edge) and 0.13 m above the floor (tape measure). In the depth
 data the floor is ~0.11 m below the lens (depth runs ~15% short); floor_obstacles uses that
@@ -90,6 +95,11 @@ def generate_launch_description():
         DeclareLaunchArgument('sounds', default_value='true',
                               description='Event sounds on the Roomba (roomba_rs sound_events): hello, uh-oh on '
                                           'bumps, a jingle when exploring finishes; false = none'),
+        DeclareLaunchArgument('unstuck_skill', default_value='true',
+                              description='Learned unstuck skill, called by the explorer when stuck '
+                                          '(docs/learned-skills.md; false = the classical recoveries only)'),
+        DeclareLaunchArgument('goal_ranking', default_value='learned',
+                              description="Explorer goal choice: 'learned' (frontier ranker) or 'rule'"),
         DeclareLaunchArgument('rust_nodes', default_value='true',
                               description='Use the Rust ports (package roomba_rs) of nodes that have one, and the '
                                           'Rust Roomba driver (roomba_driver_rs); false = the original '
@@ -152,6 +162,8 @@ def generate_launch_description():
             ('base_frame', 'base_link'),
             ('robot_mode', 'true'),
             ('rust_nodes', lc('rust_nodes')),
+            ('unstuck_skill', lc('unstuck_skill')),
+            ('goal_ranking', lc('goal_ranking')),
             ('fallback_camera_height_m', lc('floor_height')),
             # Rigid mount: pin the floor instead of re-detecting it every frame (the floor
             # often fills too little of the view to detect, e.g. facing furniture on carpet).

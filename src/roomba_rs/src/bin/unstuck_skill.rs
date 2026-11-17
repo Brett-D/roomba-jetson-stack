@@ -1,5 +1,6 @@
-//! unstuck_skill: learned recovery as an action server (docs/learned-skills.md; phase 1, opt-in:
-//! roomba_rs built with `--features learned`, not started by any launch file by default).
+//! unstuck_skill: learned recovery as an action server (docs/learned-skills.md; needs roomba_rs built with
+//! `--features learned`, the default of the CMake build; nav.launch.py starts it on the robot with
+//! `unstuck_skill:=true`, the default, and the light-bumper calibration config/unstuck_skill_robot.yaml).
 //!
 //! Action /unstuck_skill (roomba_skills_msgs/action/Unstuck): the explorer or nav_coach calls it
 //! when Nav2 gives up on a goal (aborted after its recoveries, no progress). At 10 Hz the node
@@ -221,7 +222,8 @@ impl State {
 
 fn load_params(node: &Node) -> Result<Params> {
     let mut p = NodeParams::new(node);
-    // Light-bumper gains (L, FL, CL, CR, FR, R) as the 2D twin models this unit; calibrate per robot.
+    // Light-bumper gains (L, FL, CL, CR, FR, R) as the 2D twin models this unit; the robot's calibration is
+    // roomba_bringup/config/unstuck_skill_robot.yaml.
     let light: Vec<f32> = p
         .string("light_gains", "0.5,1.0,0.55,0.55,0.55,0.5")?
         .split(',')

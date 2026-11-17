@@ -58,7 +58,8 @@ EOF
 PIDS+=($!)
 for i in $(seq 1 90); do grep -q ready "$OUT.latched.log" && break; sleep 2; done   # reading the bag takes a while
 setsid ros2 launch roomba_bringup robot.launch.py mode:=mapping database_path:="$DB" camera:=false driver:=false \
-  use_sim_time:=true people:=false foxglove:=false web:=false "$@" > "$OUT.launch.log" 2>&1 < /dev/null &
+  use_sim_time:=true people:=false foxglove:=false web:=false unstuck_skill:=false goal_ranking:=rule "$@" \
+  > "$OUT.launch.log" 2>&1 < /dev/null &   # the classical explorer: the Python one has no learned parts
 PIDS+=($!)
 # Play as soon as the odometry nodes are up: Nav2 activation fails if odom -> base_link does not
 # appear within ~25 s of the launch.
