@@ -1065,11 +1065,15 @@ function mfdReset() {
 }
 
 // Inside a frame (the control page), report the content height so a phone layout can show it
-// all without a scrollbar inside the frame.
+// all without a scrollbar inside the frame. The wide three-view fills the window instead: its
+// height follows the frame's, so it reports none (null), or each would keep growing the other.
 function postHeight() {
   if (window.parent === window) return;
-  const g = document.querySelector('main.grid');
-  const height = Math.ceil(g.getBoundingClientRect().bottom + window.scrollY + 12);
+  let height = null;
+  if (tab() !== 'mfd' || phone.matches) {
+    const g = document.querySelector('main.grid');
+    height = Math.ceil(g.getBoundingClientRect().bottom + window.scrollY + 12);
+  }
   window.parent.postMessage({ type: 'roomba-mfd-height', height }, '*');
 }
 

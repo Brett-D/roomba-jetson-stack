@@ -577,9 +577,11 @@ function initLayout() {
   // The robot page (three-view) reports its height so the stacked phone layout shows it whole.
   window.addEventListener('message', (e) => {
     if (e.source !== $('frame').contentWindow || !e.data || e.data.type !== 'roomba-mfd-height') return;
-    const h = Number(e.data.height);
-    if (!Number.isFinite(h)) return;
-    frameAutoHeight = Math.round(Math.max(240, Math.min(h, 4000)));
+    // null: the robot page fills whatever height the frame has (the wide three-view).
+    const h = e.data.height;
+    if (h === null) frameAutoHeight = 0;
+    else if (Number.isFinite(h)) frameAutoHeight = Math.round(Math.max(240, Math.min(h, 4000)));
+    else return;
     applyFrameHeight();
   });
   wide.addEventListener('change', applyLayout);
