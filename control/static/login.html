@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#1c1f22">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Robot">
+  <title>Roomba control – Sign in</title>
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" href="/icon-192.png">
+  <link rel="apple-touch-icon" href="/icon-192.png">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body class="login-body">
+  <form class="panel login" method="post" action="/login">
+    <h1 class="stencil">RMB-550 <span class="dim">//</span> CONTROL</h1>
+    <p class="hud mono">AUTH REQUIRED ▸ ROBOT WEB PASSWORD</p>
+    <label for="password" class="stencil">PASSWORD</label>
+    <input name="username" type="text" value="roomba" autocomplete="username" hidden>
+    <input id="password" name="password" type="password" autocomplete="current-password" required autofocus>
+    <!--ERROR-->
+    <button type="submit" class="plate-btn big">SIGN IN</button>
+  </form>
+</body>
+</html>

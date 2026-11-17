@@ -1,0 +1,21 @@
+[package]
+name = "roomba-control"
+version = "0.1.0"
+edition = "2021"
+description = "Always-on control page for the robot's Jetson: start / stop the robot, check the Roomba link, shut down"
+license = "MIT"
+
+# Standalone on purpose (no ROS, no rclrs): it runs while the robot stack is off. COLCON_IGNORE keeps
+# colcon (colcon-cargo) from picking it up; scripts/install_control_page.sh builds and installs it.
+
+[dependencies]
+libc = "0.2"
+getrandom = "0.4"
+# login: the robot web app's auth.json (scrypt n=2^14, r=8, p=1, 32 bytes)
+scrypt = { version = "0.12", default-features = false }
+serde_json = "1"
+tiny_http = "0.12"
+
+[profile.release]
+opt-level = 3
+lto = "thin"

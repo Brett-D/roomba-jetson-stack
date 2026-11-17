@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#1c1f22">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Robot">
+  <title>Roomba control</title>
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" href="/icon-192.png">
+  <link rel="apple-touch-icon" href="/icon-192.png">
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header class="topbar panel">
+    <div class="title">
+      <h1 class="stencil">RMB-550 <span class="dim">//</span> CONTROL</h1>
+      <p class="node mono">NODE <span id="page-url">—</span></p>
+    </div>
+    <div class="top-right">
+      <span id="link-lamp" class="lamp-dot" role="img" aria-label="Connection to the Jetson: checking"></span>
+      <form method="post" action="/logout"><button class="plate-btn" type="submit">LOG OUT</button></form>
+    </div>
+    <p id="hud" class="hud mono" aria-live="off">SYS ▸ ACQUIRING…</p>
+  </header>
+
+  <main class="layout">
+    <div class="col">
+      <section class="panel master" aria-labelledby="master-h">
+        <h2 id="master-h" class="panel-label stencil">MASTER</h2>
+        <div class="controls">
+          <!-- ROBOT PWR: up = robot running; the lever only moves when the server reports it -->
+          <div class="ctl">
+            <span class="pos stencil" aria-hidden="true">ON</span>
+            <button id="pwr" class="toggle" role="switch" aria-checked="false" aria-describedby="pwr-state" type="button">
+              <span class="sr-only">Robot power</span>
+              <span class="nut" aria-hidden="true"></span><span class="lever" aria-hidden="true"></span>
+            </button>
+            <span class="pos stencil" aria-hidden="true">OFF</span>
+            <span class="plate stencil">ROBOT PWR</span>
+            <span id="pwr-state" class="sr-only">Stopped</span>
+            <div class="mini-lamps" aria-hidden="true">
+              <span id="l-run" class="mini">RUN</span>
+              <span id="l-xfer" class="mini">START</span>
+              <span id="l-save" class="mini">SAVING MAP</span>
+            </div>
+          </div>
+
+          <!-- COMMS CHECK: momentary -->
+          <div class="ctl">
+            <span class="pos stencil" aria-hidden="true">PUSH</span>
+            <button id="comms" class="pushbtn" type="button" aria-describedby="comms-state">
+              <span class="cap" aria-hidden="true"></span>
+              <span class="sr-only">Comms check: test the Jetson to Roomba serial link</span>
+            </button>
+            <span class="pos stencil" aria-hidden="true">&nbsp;</span>
+            <span class="plate stencil">COMMS CHECK</span>
+            <span id="comms-state" class="sr-only"></span>
+            <div class="mini-lamps" aria-hidden="true">
+              <span id="l-link" class="mini">LINK</span>
+            </div>
+          </div>
+
+          <!-- JETSON SHUTDOWN: lift the guard, flip the switch, confirm -->
+          <div class="ctl">
+            <span class="pos stencil" aria-hidden="true">ON</span>
+            <div class="guarded" id="guarded">
+              <button id="sd" class="toggle danger" role="switch" aria-checked="true" aria-describedby="sd-state" type="button" disabled>
+                <span class="sr-only">Jetson power: flip to shut down</span>
+                <span class="nut" aria-hidden="true"></span><span class="lever" aria-hidden="true"></span>
+              </button>
+              <button id="guard" class="guard" type="button" aria-expanded="false" aria-controls="sd">
+                <span class="guard-text stencil">LIFT</span>
+                <span class="sr-only">Lift the guard of the Jetson shutdown switch</span>
+              </button>
+            </div>
+            <span class="pos stencil" aria-hidden="true">OFF</span>
+            <span class="plate stencil plate-red">JETSON SHUTDOWN</span>
+            <span id="sd-state" class="sr-only">Guard closed</span>
+            <div class="mini-lamps" aria-hidden="true">
+              <span id="l-pwr" class="mini">PWR</span>
+            </div>
+          </div>
+        </div>
+        <p id="msg" class="readout mono" role="status" aria-live="polite">&nbsp;</p>
+        <p id="comms-msg" class="readout mono small" aria-live="polite">COMMS: PRESS TO TEST THE ROOMBA LINK</p>
+        <p class="note stencil">PWR ON IS PHYSICAL: APPLY POWER, THE JETSON BOOTS AND THIS PAGE RETURNS BY ITSELF</p>
+      </section>
+
+      <section class="panel" aria-labelledby="ann-h">
+        <h2 id="ann-h" class="panel-label stencil">CAUTION / ADVISORY</h2>
+        <ul class="annunciators" id="ann">
+          <li id="a-stack" class="ann"><span class="ann-name">STACK</span><span class="ann-val mono">—</span></li>
+          <li id="a-link" class="ann"><span class="ann-name">ROOMBA LINK</span><span class="ann-val mono">—</span></li>
+          <li id="a-cam" class="ann"><span class="ann-name">CAMERA</span><span class="ann-val mono">—</span></li>
+          <li id="a-temp" class="ann"><span class="ann-name">TEMP</span><span class="ann-val mono">—</span></li>
+          <li id="a-wifi" class="ann"><span class="ann-name">WIFI</span><span class="ann-val mono">—</span></li>
+          <li id="a-disk" class="ann"><span class="ann-name">DISK</span><span class="ann-val mono">—</span></li>
+        </ul>
+      </section>
+
+      <section class="panel" aria-labelledby="log-h">
+        <h2 id="log-h" class="panel-label stencil">MFD 1 <span class="dim">·</span> ROBOT LOG <span id="log-age" class="mono dim small"></span></h2>
+        <div class="bezel">
+          <pre id="log" class="mfd mono" tabindex="0" aria-label="Last lines of the robot log">NO DATA</pre>
+        </div>
+      </section>
+    </div>
+
+    <div class="col">
+      <section class="panel" aria-labelledby="disp-h">
+        <h2 id="disp-h" class="panel-label stencil">MFD 2 <span class="dim">·</span> ROBOT PAGE</h2>
+        <div class="bezel display">
+          <span class="screw tl" aria-hidden="true"></span><span class="screw tr" aria-hidden="true"></span>
+          <span class="screw bl" aria-hidden="true"></span><span class="screw br" aria-hidden="true"></span>
+          <div id="nosignal" class="nosignal mono">NO SIGNAL<br><span class="small">THE ROBOT PAGE APPEARS HERE WHILE THE ROBOT RUNS</span></div>
+          <iframe id="frame" title="Robot web page" hidden></iframe>
+        </div>
+        <p class="bezel-row"><a id="open" class="plate-btn" target="_blank" rel="noopener">OPEN ROBOT PAGE ↗</a></p>
+      </section>
+    </div>
+  </main>
+
+  <dialog id="confirm" aria-labelledby="confirm-h">
+    <form method="dialog" class="panel dlg">
+      <h2 id="confirm-h" class="stencil warn-title">CONFIRM JETSON SHUTDOWN</h2>
+      <p>The robot is stopped first (RTAB-Map saves the map), then the Jetson powers off.</p>
+      <p>To turn it on again you must re-apply power.</p>
+      <div class="dlg-btns">
+        <button value="cancel" class="plate-btn" autofocus>ABORT</button>
+        <button value="ok" class="plate-btn red">SHUT DOWN</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div id="overlay" class="overlay" hidden role="alertdialog" aria-labelledby="ov-title" aria-describedby="ov-text">
+    <div class="ov-box">
+      <p class="mono ov-tag" id="ov-tag">SHUTDOWN SEQUENCE</p>
+      <h2 id="ov-title" class="mono">…</h2>
+      <p id="ov-text" class="mono"></p>
+      <button id="ov-close" class="plate-btn" type="button" hidden>DISMISS</button>
+    </div>
+  </div>
+</body>
+</html>

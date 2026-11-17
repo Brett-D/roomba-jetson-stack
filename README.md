@@ -21,7 +21,8 @@ The serial driver lives in its own repository and is included here as a submodul
 | `src/roomba-serial-ros2` | Roomba Open Interface driver (submodule): `roomba_driver_rs` (Rust, used with `rust_nodes:=true`), `roomba_driver` (Python), `roomba_msgs`, and in `tools/` the simulated Roomba (`fake_roomba.py`) and the driver A/B checks |
 | `src/roomba_skills_msgs` | Interfaces of the learned navigation skills (`action/Unstuck`) |
 | `twin/learned` | Learned navigation skills (trained in simulation; on by default on the robot since 2026-11-16, `unstuck_skill:=false goal_ranking:=rule` turns them off): Isaac Lab unstuck policy, learned frontier ranking for the explorer, their evaluation against the classical logic and in the 2D twin, and the Rust inference (`roomba_rs` feature `learned`, node `unstuck_skill`, explorer options `unstuck_skill` and `goal_ranking: learned`); see [docs/learned-skills.md](docs/learned-skills.md) |
-| `scripts/` | `run_robot.sh`, `stop_slam.sh`, `graceful.py` (`ros2 launch` that SIGTERM / SIGINT stop cleanly), `record_run.sh` / `compare_pipelines.sh` (A vs B on a recorded drive), `run_twin2d.sh` (the 2D digital twin), mapping/replay helpers, setup scripts |
+| `scripts/` | `run_robot.sh`, `stop_slam.sh`, `graceful.py` (`ros2 launch` that SIGTERM / SIGINT stop cleanly), `install_control_page.sh` (the control page service), `record_run.sh` / `compare_pipelines.sh` (A vs B on a recorded drive), `run_twin2d.sh` (the 2D digital twin), mapping/replay helpers, setup scripts |
+| `control/` | Control page (standalone Rust, no ROS, always on, port 80): start / stop the robot, Roomba comms check, Jetson health, robot log, shut down; see [Control page](#control-page-phone-or-browser) |
 | `tools/` | Probes and diagnostics (motion step test, costmap/obstacle probes, map render, TF/drift/CPU-GPU checks, comparison monitor/renderer, Python vs Rust A/B checks), `twin2d_world.py` / `twin2d_plan.py` / `twin2d_run.py` (digital twin floor plan from the map database or a vector plan, scenario runner), `sound_events_offline.py` (the event-sounds node against a fake driver), `battery_learner_replay.py` (the battery gauge through whole simulated discharges and swaps); `tools/oi_tests/` holds early serial/OI bench scripts |
 | `docs/` | Wiring and power diagrams; [training.md](docs/training.md): everything that was trained in this project (Isaac Sim person / railing detector, unstuck skill, frontier ranking), with algorithms, code, results and status (simulation only, nothing learned is deployed); [learned-skills.md](docs/learned-skills.md): the two navigation skills in detail |
 | `hardware/platform` | 3D-printed platform: STLs, fit tests and the Python generator |
@@ -236,6 +237,46 @@ that arrives in Passive, and the robot can drop to Passive just before one arriv
   the left bumper counts.
 - Without the robot: `ROS_DOMAIN_ID=77 tools/sound_events_offline.py` runs the node against a fake driver and
   checks which songs it asks for and when.
+
+### Control page (phone or browser)
+
+`control/` is a small always-on page for running the robot without SSH. It has no ROS dependency, starts at
+boot and serves port 80. Install or update it once, as the robot's user:
+
+```bash
+~/roomba_ws/scripts/install_control_page.sh
+```
+
+This builds the release binary and installs it as `/usr/local/bin/roomba-control` with the systemd service
+`roomba-control`. It also allows the user exactly one root command, `systemctl poweroff`
+(`/etc/sudoers.d/roomba-control-poweroff`), and enables lingering for the user, so logging out of SSH can't
+delete the running robot's shared memory.
+
+Open `http://<jetson-host>.local/` (or `http://<jetson-ip>/`) and log in with the robot web app's password.
+On a phone, "Add to Home Screen" adds it as an app.
+
+- **ROBOT PWR** (toggle): up runs `scripts/run_robot.sh auto` (the saved map; the page has no way to start a new
+  map). Down sends SIGTERM to the launch in `~/robot.pid` (a clean Ctrl-C-like stop: RTAB-Map saves the map, and
+  the amber SAVING MAP light shows it). If the launch is still running after 100 s (graceful.py's own SIGTERM and
+  SIGKILL escalation ends by 90 s), it runs `stop_slam.sh`. A launch without a PID file is stopped with
+  `stop_slam.sh`. The lever moves only when the Jetson reports the new state.
+- **COMMS CHECK** (push-button) tests the Jetson ↔ Roomba serial link:
+  - While the robot runs, the driver owns the port, so the page asks the driver over ROS (`roomba/mode`,
+    `battery_state`).
+  - Otherwise it opens the port named in `roomba_driver_robot.yaml` and sends only Start (128, Passive mode) and
+    one sensor query (142, packet 3: voltage and current). It never sends Safe/Full or any drive command.
+  - The result reads "OK: voltage …", "No reply: Roomba asleep, press Clean until its lights come on", or
+    "Port missing: check the USB-serial cable".
+- **JETSON SHUTDOWN**: lift the red guard, flip the switch, then confirm. The robot stops first, exactly as above,
+  then the Jetson powers off. When the page says **SAFE TO REMOVE POWER**, you can unplug it.
+- **Annunciators**: STACK, ROOMBA LINK (connected / responding / not responding), CAMERA, TEMP, WIFI and DISK, in
+  green, amber or red. Below them, the last lines of `~/robot.log` show "Tracking OK" and errors.
+- **Robot page**: while the robot runs, its web app (port 8080 on the same host) is shown in a frame, with an
+  "Open robot page" link.
+
+Power-on is physical: apply power, and the Jetson boots and brings the page back by itself. The page logs to the
+journal (`journalctl -u roomba-control`). `roomba-control --check-comms` runs the comms check from a shell.
+`control/tests/e2e/run.sh` tests the whole page with stand-in scripts: no robot, serial port or power-off.
 
 ### Pipelines A (default) and B (GPU)
 
