@@ -131,6 +131,12 @@ def generate_launch_description():
                               description='Use the Rust ports (package roomba_rs) of nodes that have one'),
         DeclareLaunchArgument('mode', default_value='auto',
                               description='auto (reuse saved map if present), mapping (new map), localization'),
+        DeclareLaunchArgument('markers', default_value='true',
+                              description='Use printed ArUco markers (DICT_4X4_50, tools/markers) as RTAB-Map '
+                                          'landmarks: seeing one fixes the robot\'s position in the map '
+                                          'whatever the lighting'),
+        DeclareLaunchArgument('marker_length', default_value='0.15',
+                              description='Printed marker side in metres (black square)'),
         DeclareLaunchArgument('odometry', default_value='basalt',
                               description='basalt (CPU, most robust on recorded walks) or cuvslam (GPU)'),
         DeclareLaunchArgument('ground_constraint', default_value='true',
@@ -296,6 +302,12 @@ def generate_launch_description():
         "     ' --Grid/NoiseFilteringRadius 0.1 --Grid/NoiseFilteringMinNeighbors 5'"
         "     ' --GridGlobal/FootprintRadius 0.2'"
         "    if '", LaunchConfiguration('platform'), "' == 'robot' else '')",
+        # Printed markers as landmarks (tools/markers/make_markers.py): the first sighting places a
+        # marker in the map, every later one relocalizes the robot even when the room looks different
+        # (a map made in daylight matched 0 features at night). Beyond 3 m the 640x360 image gives
+        # too few pixels per marker cell for a reliable pose.
+        " + (' --RGBD/MarkerDetection true --Marker/Dictionary 0 --Marker/MaxRange 3.0 --Marker/Length '",
+        "     + '", LaunchConfiguration('marker_length'), "' if '", LaunchConfiguration('markers'), "' == 'true' else '')",
     ])
 
     rtabmap = IncludeLaunchDescription(

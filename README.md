@@ -119,6 +119,23 @@ each node gets SIGINT, then if still running SIGTERM 5 s later and SIGKILL only 
 The web login password is generated on first run and stored in `~/.config/roomba_web/initial_password`;
 change it with `ros2 run roomba_web set_password` (or `ros2 run roomba_rs set_password`; same file).
 
+### Position markers
+
+A map made in one lighting can stop matching in another: a saved map made in daylight matched 0 features
+at night, so the robot started at the wrong spot. Printed ArUco markers fix that. RTAB-Map adds each marker
+to the map the first time it sees one, and every later sighting fixes the robot's position, whatever the
+lighting or clutter.
+
+```bash
+python tools/markers/make_markers.py --out markers.pdf    # IDs 0-9, 150 mm, one per Letter page
+```
+
+- Print at 100 % and check that the 100 mm bar measures 100 mm.
+- ID 0 marks the robot's home / start spot. Put one or two of the others in each room.
+- Mount them flat on walls facing open floor, centre about 20 cm above the floor (the camera is at about
+  15 cm), on matte paper. Put them up **before** mapping and never move them afterwards.
+- Markers are on by default (`markers:=true`, `marker_length:=0.15` in metres, detected up to 3 m). Use
+  `markers:=false` to turn them off. A different print size needs a matching `marker_length:=`.
 ### Pipelines A (default) and B (GPU)
 
 Extra arguments to `run_robot.sh` / `robot.launch.py` pick the odometry, the fusion and the costmap obstacles:
