@@ -25,10 +25,13 @@ check_has() { case "$2" in *"$3"*) echo "ok   $1";; *) echo "FAIL $1: '$3' not i
 code() { curl -s -o /dev/null -w '%{http_code}' "$@"; }
 J() { python3 -c 'import json,sys; v=eval(sys.argv[1], {"d": json.load(sys.stdin)}); print(v if isinstance(v, str) else json.dumps(v))' "$1"; }
 st() { curl -s -b "$JAR" "$BASE/api/status" | J "$1"; }
+# A required state that doesn't come in time fails the run there (the EXIT trap cleans up).
 wait_for() {   # expression, value, seconds
     local i
     for i in $(seq 1 $(($3 * 4))); do [ "$(st "$1")" = "$2" ] && return 0; sleep 0.25; done
-    return 1
+    echo "FAIL waited $3 s for $1 == $2; it is $(st "$1")"
+    echo "FAILED (stopped at a missed deadline)"
+    exit 1
 }
 login() { code -c "$JAR" -H "$ORIGIN" --data-urlencode "password=$1" "$BASE/login"; }
 post() { code -b "$JAR" -X POST -H "$ORIGIN" "$BASE/api/$1"; }
@@ -82,7 +85,7 @@ check "action from the robot web app's port" "$(code -b "$JAR" -X POST -H 'Origi
 echo "== start / stop"
 check "start" "$(post start)" 202
 check "starting" "$(st 'd["robot"]["state"]')" starting
-wait_for 'd["robot"]["state"]' running 15 || echo "FAIL: never running"
+wait_for 'd["robot"]["state"]' running 15
 check "running with the PID from the PID file" "$(st 'd["robot"]["pid"]')" "$(cat "$FAKE_DIR/robot.pid")"
 check_has "robot log" "$(st '"|".join(d["log"]["lines"])')" "Tracking OK"
 check "start while running" "$(post start)" 409
@@ -93,7 +96,7 @@ check "comms check went over ROS" "$(st 'd["roomba"]["result"]["via"], d["roomba
 check "stop" "$(post stop)" 202
 check "stopping" "$(st 'd["robot"]["state"]')" stopping
 check_has "stopping message" "$(st 'd["busy"]["message"]')" "saving map"
-wait_for 'd["robot"]["state"]' stopped 15 || echo "FAIL: never stopped"
+wait_for 'd["robot"]["state"]' stopped 15
 check_has "stopped by SIGTERM" "$(st 'd["last"]["message"]')" "Stopped after"
 check "no stop_slam.sh" "$([ -e "$FAKE_DIR/force_stop_called" ] && echo called || echo no)" no
 check "PID file removed" "$([ -e "$FAKE_DIR/robot.pid" ] && echo present || echo gone)" gone
@@ -107,7 +110,7 @@ wait_for 'd["robot"]["state"]' running 15
 post stop > /dev/null
 sleep 3
 check "still stopping before the timeout" "$(st 'd["robot"]["state"]')" stopping
-wait_for 'd["robot"]["state"]' stopped 20 || echo "FAIL: never stopped"
+wait_for 'd["robot"]["state"]' stopped 20
 check "stop_slam.sh ran" "$([ -e "$FAKE_DIR/force_stop_called" ] && echo called || echo no)" called
 check_has "fallback message" "$(st 'd["last"]["message"]')" "stop_slam.sh"
 rm -f "$FAKE_DIR/force_stop_called" "$FAKE_DIR/stop_delay"
@@ -119,7 +122,7 @@ sleep 0.5
 check "seen as running" "$(st 'd["robot"]["state"], d["robot"]["external"], d["robot"]["pid"]')" '["running", true, null]'
 check "start refused" "$(post start)" 409
 check "stop" "$(post stop)" 202
-wait_for 'd["robot"]["state"]' stopped 10 || echo "FAIL: never stopped"
+wait_for 'd["robot"]["state"]' stopped 10
 check "stopped with stop_slam.sh" "$([ -e "$FAKE_DIR/force_stop_called" ] && echo called || echo no)" called
 rm -f "$FAKE_DIR/force_stop_called"
 
@@ -130,7 +133,7 @@ sleep 0.5
 check "seen as running, left over" "$(st 'd["robot"]["state"], d["robot"]["leftover"], d["robot"]["pid"]')" '["running", true, null]'
 check "start refused" "$(post start)" 409
 check "stop" "$(post stop)" 202
-wait_for 'd["robot"]["state"]' stopped 15 || echo "FAIL: never stopped"
+wait_for 'd["robot"]["state"]' stopped 15
 check "stopped with stop_slam.sh" "$([ -e "$FAKE_DIR/force_stop_called" ] && echo called || echo no)" called
 check "the driver is gone" "$(fake_drivers)" ""
 rm -f "$FAKE_DIR/force_stop_called"
@@ -141,7 +144,7 @@ wait_for 'd["robot"]["state"]' running 15
 setsid bash -c 'while :; do sleep 0.2; done' "$FAKE_DRIVER" > /dev/null 2>&1 < /dev/null &
 disown
 check "stop" "$(post stop)" 202
-wait_for 'd["robot"]["state"]' stopped 30 || echo "FAIL: never stopped"
+wait_for 'd["robot"]["state"]' stopped 30
 check "stop_slam.sh for the leftover driver" "$([ -e "$FAKE_DIR/force_stop_called" ] && echo called || echo no)" called
 check_has "message" "$(st 'd["last"]["message"]')" "stop_slam.sh"
 check "the driver is gone" "$(fake_drivers)" ""
@@ -176,8 +179,8 @@ echo "== shut down (dry run)"
 post start > /dev/null
 wait_for 'd["robot"]["state"]' running 15
 check "shutdown" "$(post shutdown)" 202
-wait_for 'd["robot"]["state"], d["busy"]["op"]' '["stopping", "shutdown"]' 3 && echo "ok   stops the robot first" || { echo "FAIL stops the robot first"; fails=$((fails + 1)); }
-wait_for 'd["power"]' off 20 || echo "FAIL: never off"
+wait_for 'd["robot"]["state"], d["busy"]["op"]' '["stopping", "shutdown"]' 3 && echo "ok   stops the robot first"
+wait_for 'd["power"]' off 20
 check "robot stopped, power off (dry run)" "$(st 'd["robot"]["state"], d["dry_run"], d["last"]["ok"]')" '["stopped", true, true]'
 check_has "dry-run message" "$(st 'd["last"]["message"]')" "Dry run: would now run"
 check "no stop_slam.sh" "$([ -e "$FAKE_DIR/force_stop_called" ] && echo called || echo no)" no
@@ -211,7 +214,7 @@ sleep 1.5
 check "the power-off waits for a browser to see it coming" "$([ -e "$FAKE_DIR/poweroff_called" ] && echo ran || echo no)" no
 login fixture-password > /dev/null   # 2 s sessions
 check "powering off" "$(st 'd["power"]')" powering_off
-wait_for 'd["power"]' off 10 || echo "FAIL: never off"
+wait_for 'd["power"]' off 10
 check "power-off command ran" "$([ -e "$FAKE_DIR/poweroff_called" ] && echo ran || echo no)" ran
 check_has "message" "$(st 'd["last"]["message"]')" "Powering off."
 stop_instance

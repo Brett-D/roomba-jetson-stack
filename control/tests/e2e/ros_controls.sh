@@ -32,12 +32,13 @@ check_has() { case "$2" in *"$3"*) echo "ok   $1";; *) echo "FAIL $1: '$3' not i
 code() { curl -s -o /dev/null -w '%{http_code}' "$@"; }
 J() { python3 -c 'import json,sys; v=eval(sys.argv[1], {"d": json.load(sys.stdin)}); print(v if isinstance(v, str) else json.dumps(v))' "$1"; }
 st() { curl -s -b "$JAR" "$BASE/api/status" | J "$1"; }
+# A required state or driver entry that doesn't come in time fails the run there (the EXIT trap
+# cleans up).
+missed() { echo "FAIL $1"; echo "FAILED (stopped at a missed deadline)"; exit 1; }
 wait_for() {   # expression, value, seconds
     local i
     for i in $(seq 1 $(($3 * 4))); do [ "$(st "$1")" = "$2" ] && return 0; sleep 0.25; done
-    echo "FAIL waited $3 s for $1 == $2; it is $(st "$1")"
-    fails=$((fails + 1))
-    return 1
+    missed "waited $3 s for $1 == $2; it is $(st "$1")"
 }
 post() { code -b "$JAR" -X POST -H "$ORIGIN" "$BASE/api/$1"; }
 # VACUUM ARMED takes a new command once the last one has gone out (the switch is disabled till then).
@@ -52,7 +53,7 @@ on_cmd() { pgrep -f -- 'cleaning_motors.*vacuum: true' > /dev/null && echo runni
 wait_entry() {   # kind, expression, value, seconds
     local i
     for i in $(seq 1 $(($4 * 2))); do [ "$(last_entry "$1" "$2")" = "$3" ] && return 0; sleep 0.5; done
-    return 1
+    missed "waited $4 s for the last $1 entry: $2 == $3; it is $(last_entry "$1" "$2")"
 }
 # The fake drivers (python3 with $TOKEN; not the control page, which has it too).
 kill_drivers() { for p in $(pgrep -f -- "$TOKEN"); do [ "$(cat /proc/$p/comm 2>/dev/null)" = python3 ] && kill "$p"; done; }
@@ -176,7 +177,7 @@ post vacuum/arm > /dev/null
 wait_for 'd["vacuum"]["armed"]' true 40
 wait_for 'd["tones"]["pending"]' armed 10
 check "disarm" "$(post vacuum/disarm)" 202
-wait_entry motors 'e["vacuum"]' false 7 && echo "ok   OFF while the sound call is still waiting" || { echo "FAIL OFF waited for the sound"; fails=$((fails + 1)); }
+wait_entry motors 'e["vacuum"]' false 7 && echo "ok   OFF while the sound call is still waiting"
 check "the sound was still waiting" "$(st 'd["tones"]["pending"]')" armed
 rm -f "$FAKE_DIR/song_delay"
 wait_for 'd["tones"]["pending"]' null 30
